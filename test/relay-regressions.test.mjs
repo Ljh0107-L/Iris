@@ -12,8 +12,8 @@ import test from 'node:test';
 
 const relay = fileURLToPath(new URL('../agent/iris-relay.mjs', import.meta.url));
 const exec = promisify(execFile);
-const waitFor = async (predicate, description) => {
-  for (let i = 0; i < 200; i++) { if (await predicate()) return; await sleep(25); }
+const waitFor = async (predicate, description, attempts = 200) => {
+  for (let i = 0; i < attempts; i++) { if (await predicate()) return; await sleep(25); }
   assert.fail(`Timed out waiting for ${description}`);
 };
 function running(pid) {
@@ -291,7 +291,7 @@ test('update stop requires a valid acknowledgement for a listed live session', {
   assert.deepEqual(requests.map(r => r.op), ['list', 'stop-tree', 'list', 'stop-tree']);
 });
 
-test('relay bounds live and replay socket queues while healthy readers catch up', { timeout: 15000 }, async t => {
+test('relay bounds live and replay socket queues while healthy readers catch up', { timeout: 60000 }, async t => {
   const f = await fixture(t, dir => `
     import net from 'node:net';
     import { writeFileSync } from 'node:fs';
@@ -334,7 +334,9 @@ test('relay bounds live and replay socket queues while healthy readers catch up'
   await waitFor(() => slow.records.length, 'slow attach');
   slow.socket.pause();
   healthy.write({ cmd: 'burst' });
-  await waitFor(() => healthy.records.some(r => r.type === 'finished'), 'healthy client to receive burst');
+  // About 30 MB through the relay: what is checked is that all of it arrives and the queues stay bounded, not
+  // how fast. Beside the other test files on a small CI machine it takes longer than the usual five seconds.
+  await waitFor(() => healthy.records.some(r => r.type === 'finished'), 'healthy client to receive burst', 1600);
   const chunks = healthy.records.filter(r => r.type === 'chunk');
   assert.deepEqual(chunks.map(r => r.i), Array.from({ length: count }, (_, i) => i));
   await waitFor(async () => (await f.list())[0].clients === 1, 'eviction of the lagging live client');
