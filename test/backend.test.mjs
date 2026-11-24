@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
@@ -101,6 +101,11 @@ test('Antigravity readiness is read-only and does not throw away a healthy stand
   assert.deepEqual(manager.store.sessions, []);
   const trace = readFileSync(join(cwd, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(new Set(trace.filter(r => r.method).map(r => r.method)), new Set(['initialize', 'session/list']));
+  // Asking for the menus is what opens an (empty) conversation, in Iris's own folder, and remembers what it offered.
+  writeFileSync(scenario, JSON.stringify({ workspace: join(dirname(manager.local.agentDir), 'cli-menus') }));
+  assert.deepEqual((await manager.askCliOptions('local', 'antigravity')).map(o => o.id), ['model', 'effort']);
+  assert.deepEqual(manager.store.sessions, []);
+  assert.equal([...manager.spares.values()][0], spare, 'the standby is kept');
 });
 
 test('Antigravity keeps a failed startup on the same record and reconnects without sending', { timeout: 12000 }, async t => {

@@ -41,8 +41,9 @@ function SessionRow({ session, active }) {
             onBlur={() => { setEditing(false); if (title.trim() && title !== session.title) api('rename', session.id, title.trim()); }}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setTitle(session.title); setEditing(false); } }} />
         : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
+            {/* Which agent the conversation runs on, before its title: all four are told apart at a glance. */}
+            <span className="session-engine" aria-hidden="true" title={engineLabel(session.engine)}><EngineLogo engine={session.engine ?? 'pi'} size={15} className="session-engine-logo" title={engineLabel(session.engine)} /></span>
             <span className="session-title">{session.title}</span>
-            {(session.engine === 'claude-code' || isCliEngine(session.engine)) && <EngineLogo engine={session.engine} size={14} className="session-engine-logo" title={session.engine === 'claude-code' ? 'Claude Code' : engineCli(session.engine)} />}
             {indicator && <span className="session-indicator">{indicator}</span>}
           </button>}
       <button ref={anchor} className="row-more" onClick={() => setMenu(m => !m)} aria-label="Session actions"><Icon name="more" size={16} /></button>
@@ -116,18 +117,22 @@ export function Sidebar({ peek = false }) {
       <div className="sidebar-sessions">
         {grouped ? groups.map(group => <Group key={group.key} group={group} activeId={activeId} view={view} />) : sessions.map(session => <SessionRow key={session.id} session={session} active={view === 'session' && activeId === session.id} />)}
       </div>
+      {/* Updates, in their own row above Settings: checking (when asked), downloading, ready, restarting, done. */}
+      <div className="sidebar-update">
+        {update?.state === 'checking' && update.manual && <span className="update-button downloading" role="status"><Spinner size={12} /> Checking for updates…</span>}
+        {update?.state === 'downloading' && <div className="update-button downloading" role="progressbar" aria-valuenow={Math.round((update.progress ?? 0) * 100)} title={`Downloading Iris ${update.version}`}>
+          <span className="update-fill" style={{ width: `${Math.max(4, Math.round((update.progress ?? 0) * 100))}%` }} />
+          <span className="update-label">Downloading update… {Math.round((update.progress ?? 0) * 100)}%</span>
+        </div>}
+        {update?.state === 'ready' && sessionUpdate?.state !== 'restarting' && <button className="update-button" onClick={() => api('installUpdate').catch(updateError)} title={`Iris ${update.version} is ready. Running conversations are restarted afterwards.`}><Icon name="download" size={13} /> Restart to update</button>}
+        {(update?.state === 'installing' || sessionUpdate?.state === 'restarting') && <span className="update-button downloading" role="status" title="Restarting running conversations"><Spinner size={12} /> Restarting…</span>}
+        {sessionUpdate?.state === 'complete' && !sessionUpdate.acknowledged && !['ready', 'downloading', 'installing'].includes(update?.state) && <button className="update-button" onClick={() => api('showSessionUpdateReport').catch(updateError)} title={`${sessionUpdate.version} · ${sessionUpdate.restarted} restarted · ${sessionUpdate.failures} issues`}>
+          {sessionUpdate.failures ? `Updated to ${sessionUpdate.version}, with issues` : `Updated to ${sessionUpdate.version}`}
+        </button>}
+      </div>
       <div className="sidebar-foot">
         <button className="nav-item settings-button" onClick={() => openSettings(true)} aria-label="Settings" title="Settings (⌘,)"><span className="nav-icon"><Icon name="settings" size={20} stroke={1.6} /></span><span>Settings</span></button>
         <button className="tool-button appearance-toggle" onClick={() => setAppearance(appearance === 'dark' ? 'light' : 'dark')} aria-label={`Switch to ${appearance === 'dark' ? 'light' : 'dark'} theme`} title={`${appearance === 'dark' ? 'Light' : 'Dark'} appearance`}><Icon name={appearance === 'dark' ? 'sun' : 'moon'} size={15} /></button>
-        {update?.state === 'downloading' && <div className="update-button downloading" role="progressbar" aria-valuenow={Math.round((update.progress ?? 0) * 100)} title={`Downloading ${update.version}`}>
-          <span className="update-fill" style={{ width: `${Math.max(4, Math.round((update.progress ?? 0) * 100))}%` }} />
-          <span className="update-label">{Math.round((update.progress ?? 0) * 100)}%</span>
-        </div>}
-        {update?.state === 'ready' && sessionUpdate?.state !== 'restarting' && <button className="update-button" onClick={() => api('installUpdate').catch(updateError)} title={`Update to ${update.version} and restart running conversations`}><Icon name="download" size={13} /> Update</button>}
-        {(update?.state === 'installing' || sessionUpdate?.state === 'restarting') && <span className="update-button downloading" role="status" title="Restarting running conversations"><Spinner size={12} /> Restarting…</span>}
-        {sessionUpdate?.state === 'complete' && !sessionUpdate.acknowledged && !['ready', 'downloading', 'installing'].includes(update?.state) && <button className="update-button" onClick={() => api('showSessionUpdateReport').catch(updateError)} title={`${sessionUpdate.version} · ${sessionUpdate.restarted} restarted · ${sessionUpdate.failures} issues`}>
-          {sessionUpdate.failures ? 'Update issues' : 'Updated'}
-        </button>}
       </div>
     </aside>
   );

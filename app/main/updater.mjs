@@ -51,7 +51,7 @@ export class Updater {
 
   async check({ manual = false } = {}) {
     if (['checking', 'downloading', 'ready', 'installing'].includes(this.status.state)) return this.status;
-    this.#set({ state: 'checking' });
+    this.#set({ state: 'checking', manual }); // a check the user asked for is shown while it runs
     try {
       // No api.github.com call: unauthenticated REST requests share a 60/hour
       // allowance across a company's outbound proxy. The public asset needs no token.

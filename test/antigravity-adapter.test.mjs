@@ -111,6 +111,21 @@ test('Settings checks and signs in without creating a conversation or exposing C
   assert.equal(existsSync(f.config.sessionsDir), false);
 });
 
+test('a signed-in check asked for the menus opens one empty conversation in Iris’s folder and reports the model and effort menus', { timeout: 12000 }, async t => {
+  const f = fixture(t);
+  const menus = join(f.cwd, 'cli-menus');
+  f.setScenario({ workspace: menus });
+  const account = async (mode, env = {}) => JSON.parse((await exec(process.execPath, [adapter, `--account-${mode}`, f.config.bin, '0.1.0', 'iris'], { cwd: f.cwd, timeout: 5000, env: { ...process.env, ...env } })).stdout);
+  assert.deepEqual(await account('check', { IRIS_CLI_MENUS_DIR: menus }), { cliAccountStatus: { signedIn: false, canSignIn: true } }, 'signed out: nothing is opened');
+  assert.equal(f.calls('session/new').length, 0);
+  await account('login');
+  const { cliAccountStatus: status } = await account('check', { IRIS_CLI_MENUS_DIR: menus });
+  assert.equal(status.signedIn, true);
+  assert.deepEqual(status.options.map(o => [o.id, o.category, o.currentValue, o.options.length > 0]), [['model', 'model', 'mock-gemini-fast', true], ['effort', 'thought_level', 'low', true]]);
+  assert.equal(f.calls('session/new').length, 1);
+  assert.equal(existsSync(f.config.sessionsDir), false, 'no conversation of Iris’s own is created');
+});
+
 test('standby negotiates once and only creates a transcript and ACP session on activation', { timeout: 12000 }, async t => {
   const f = fixture(t, {}, true);
   const cwd = join(f.cwd, 'conversation-folder');

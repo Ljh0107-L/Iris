@@ -22,6 +22,7 @@ for (let turn = 0; turn < 120; turn++) {
 }
 const ipcCalls = [];
 const codexAccounts = [{ id: 'default', name: 'Default' }];
+const cli = { localInstalled: false, signedIn: {}, signIn: null }; // what the fixture's Codex says on this Mac
 const dist = resolve('dist/renderer');
 const server = createServer(async (req, res) => {
   try {
@@ -49,10 +50,14 @@ try {
     if (method === 'jobs') return { version: 0, jobs: [] };
     if (method === 'agents' || method === 'commands') return [];
     if (method === 'cliAccounts') return { accounts: codexAccounts, selected: 'default' };
-    if (method === 'addCliAccount') { codexAccounts.push({ id: `acc${codexAccounts.length}`, name: args[1].trim() }); return codexAccounts; }
+    if (method === 'addCliAccount') { codexAccounts.push({ id: `acc${codexAccounts.length}`, name: args[1].trim() || `Account ${codexAccounts.length + 1}` }); return codexAccounts; }
+    if (method === 'removeCliAccount') { codexAccounts.splice(codexAccounts.findIndex(a => a.id === args[1]), 1); return codexAccounts; }
     if (method === 'cliOptions') return [];
-    if (method === 'cliInfo') return { installed: args[0] !== 'local' };
-    if (method === 'cliAccountStatus') return { installed: true, signedIn: false, canSignIn: false };
+    if (method === 'cliInfo') return { installed: args[0] !== 'local' || cli.localInstalled };
+    if (method === 'cliAccountStatus') return args[0] === 'local' && args[2] === 'codex' && cli.signedIn[args[3] ?? 'default']
+      ? { installed: true, signedIn: true, canSignIn: true, identity: cli.signedIn[args[3] ?? 'default'], plan: 'pro', limits: [{ usedPercent: 42, windowMinutes: 300, resetsAt: Date.now() + 3600000 }, { usedPercent: 18, windowMinutes: 10080 }] }
+      : { installed: true, signedIn: false, canSignIn: true };
+    if (method === 'cliSignIn') return (cli.signIn = Promise.withResolvers()).promise; // the browser's part: the test finishes or abandons it
     if (method === 'cliReadiness') return 'missing';
     if (method === 'prompt') return { disposition: args[3]?.interrupt ? 'started' : 'queued' };
     return null;
@@ -126,27 +131,57 @@ try {
   await page.locator('.find-count', { hasText: '0 results' }).waitFor();
   await find.press('Escape');
 
-  // ---- Settings → Models → Subscriptions: a row per CLI says what is true on the chosen machine; machines come from the app's own menu
+  // ---- Settings → Subscriptions: a card per plan says what is true on the chosen machine; machines come from the app's own menu
   await page.keyboard.press('Meta+,');
-  assert.deepEqual((await page.locator('.settings-sidebar-nav button').allInnerTexts()).map(t => t.trim()), ['Models', 'Connections', 'Usage'], 'sign-ins live with the models');
+  assert.deepEqual((await page.locator('.settings-sidebar-nav button').allInnerTexts()).map(t => t.trim()), ['Subscriptions', 'Models', 'Connections', 'Usage'], 'sign-ins have a page of their own');
   await page.locator('.settings-sidebar-nav button', { hasText: 'Models' }).click();
   await page.locator('section[aria-label="API keys"]').waitFor();
+  assert.equal(await page.locator('.cli-settings').count(), 0, 'API keys are apart from the subscriptions');
+  await page.locator('.settings-sidebar-nav button', { hasText: 'Subscriptions' }).click();
   const agy = page.locator('.cli-settings');
-  await agy.locator('.cli-setting-desc', { hasText: 'Not installed on This computer' }).first().waitFor();
-  assert.deepEqual((await agy.locator('.cli-setting-text > span:first-child').allInnerTexts()).filter(t => !t.startsWith('Another')), ['Machine', 'Antigravity CLI', 'Codex CLI', 'Antigravity: ask before running tools']);
+  await agy.locator('.sub-state', { hasText: 'Not installed' }).first().waitFor();
+  assert.deepEqual(await agy.locator('.sub-card-title').allInnerTexts(), ['Codex', 'Antigravity']);
   assert.equal(await agy.locator('select').count(), 0, 'no system pop-up menus');
   await agy.locator('.cli-machine').click();
   await page.locator('.menu-item', { hasText: 'Lab host' }).click();
-  await agy.locator('.cli-setting-desc', { hasText: 'Installed · not signed in' }).first().waitFor();
+  await agy.locator('.sub-state', { hasText: 'Not signed in' }).first().waitFor();
   assert.ok(ipcCalls.some(c => c.method === 'cliAccountStatus' && c.args[0] === 'ssh:lab' && c.args[2] === 'codex'), 'each CLI is checked by name');
-  // Codex can have more than one account; Antigravity cannot, so only Codex offers to add one.
-  await agy.locator('button', { hasText: 'Add account' }).click();
-  await agy.locator('input[aria-label="Account name"]').fill('Work');
-  await agy.locator('button', { hasText: /^Add$/ }).click();
-  await agy.locator('.cli-setting-text', { hasText: 'Codex · Work' }).waitFor();
+  assert.equal(await agy.locator('button', { hasText: 'Add account' }).count(), 0, 'nothing to add an account to while signed out');
+  // On this Mac, signed in: the row is the account (who, plan, how much of each limit is used).
+  cli.localInstalled = true; cli.signedIn.default = 'dev@example.test';
+  await agy.locator('.cli-machine').click();
+  await page.locator('.menu-item', { hasText: 'This computer' }).click();
+  const codex = agy.locator('.sub-card', { has: page.locator('.sub-card-title', { hasText: 'Codex' }) });
+  await codex.locator('.sub-who', { hasText: 'dev@example.test' }).waitFor();
+  assert.equal(await codex.locator('.sub-plan').innerText(), 'Pro plan');
+  assert.deepEqual(await codex.locator('.sub-limit-name').allInnerTexts(), ['5-hour limit', 'Weekly limit']);
+  assert.match(await codex.locator('.sub-limit-text').first().innerText(), /^42% used · resets /);
+  assert.equal(await agy.locator('.cli-settings-terminal, .cli-terminal-card').count(), 0, 'usage is on the page, not in a terminal');
+  // Codex can have more than one account; Antigravity cannot. Adding one starts its sign-in at once.
   assert.equal(await agy.locator('button', { hasText: 'Add account' }).count(), 1);
-  assert.ok(ipcCalls.some(c => c.method === 'cliAccountStatus' && c.args[2] === 'codex' && c.args[3] === 'acc1'), 'the new account is checked on its own');
-  assert.equal(await agy.locator('.cli-setting-row', { hasText: 'Codex · Work' }).locator('button', { hasText: 'Remove' }).count(), 1);
+  await codex.locator('button', { hasText: 'Add account' }).click();
+  await codex.locator('.sub-flow', { hasText: 'Opening ChatGPT sign-in' }).waitFor();
+  assert.ok(ipcCalls.some(c => c.method === 'cliSignIn' && c.args[1] === 'codex' && c.args[2] === 'acc1'), 'the new account signs in on its own');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'cli-sign-in', payload: { environmentId: 'local', engine: 'codex', account: 'acc1', url: 'https://auth.example.test/authorize' } }));
+  await codex.locator('.sub-flow', { hasText: 'Your browser has opened' }).waitFor();
+  assert.deepEqual(await codex.locator('.sub-flow button').allInnerTexts(), ['Open again', 'Copy link', 'Cancel']);
+  cli.signedIn.acc1 = 'work@example.test';
+  cli.signIn.resolve({ installed: true, signedIn: true, canSignIn: true, identity: 'work@example.test', plan: 'team' });
+  const work = codex.locator('.sub-account', { hasText: 'work@example.test' });
+  await work.waitFor();
+  assert.equal(await work.locator('button', { hasText: 'Remove' }).count(), 1);
+  assert.equal(await codex.locator('.sub-flow').count(), 0);
+  const checksOfWork = () => ipcCalls.filter(c => c.method === 'cliAccountStatus' && c.args[3] === 'acc1').length;
+  const before = checksOfWork();
+  await page.waitForTimeout(600);
+  assert.equal(checksOfWork(), before, 'a row is not checked again whenever the page re-renders');
+  // Giving up a sign-in leaves no empty account behind.
+  await codex.locator('button', { hasText: 'Add account' }).click();
+  await codex.locator('.sub-flow button', { hasText: 'Cancel' }).click();
+  assert.ok(ipcCalls.some(c => c.method === 'cliSignInCancel' && c.args[2] === 'acc2'));
+  cli.signIn.reject(new Error('Sign-in cancelled.'));
+  await page.waitForFunction(() => document.querySelectorAll('.sub-card')[0].querySelectorAll('.sub-account').length === 2);
+  assert.ok(ipcCalls.some(c => c.method === 'removeCliAccount' && c.args[1] === 'acc2'));
   if (process.env.IRIS_UI_SHOT) await page.screenshot({ path: process.env.IRIS_UI_SHOT });
   await page.keyboard.press('Escape');
 

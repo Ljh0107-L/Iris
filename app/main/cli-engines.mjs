@@ -1,5 +1,5 @@
 // Antigravity remains the owner of its credentials, tools and quota.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
@@ -17,7 +17,7 @@ const agentFile = name => fileURLToPath(new URL(`../../agent/${name}`, import.me
 export const CODEX_ENGINE = 'codex';
 export const CLI_ENGINES = {
   antigravity: { id: 'antigravity', label: 'Antigravity', bin: 'agy', adapter: 'iris-antigravity.mjs', login: () => ['acp', '--login'],
-    install: 'Install it from Settings → Models, then try again.' },
+    install: 'Install it from Settings → Subscriptions, then try again.' },
   // accounts: more than one sign-in per machine, each in its own CODEX_HOME. (Antigravity keeps one
   // sign-in per machine whatever data directory it is given, so it has no such choice.)
   codex: { id: 'codex', label: 'Codex', bin: 'codex', adapter: 'iris-codex.mjs', accounts: true, login: env => env.kind === 'local' ? ['login'] : ['login', '--device-auth'],
@@ -43,16 +43,18 @@ export function cliBoot(bin, record, sessionsDir, remote = false, bypassPermissi
     ...(record.spare ? { standby: true } : {}), clientVersion: app.version } };
 }
 
-export async function cliAccountStatus(env, { bin, local, facts, login = false, logout = false, engine, home = null, run = runSsh, invoke = exec }) {
+// menusDir: where the CLI may open one empty conversation to say what a new one can choose from (Antigravity
+// has no other way to ask); given only while Iris has no menus for that CLI on that machine.
+export async function cliAccountStatus(env, { bin, local, facts, login = false, logout = false, engine, home = null, menusDir = null, run = runSsh, invoke = exec }) {
   if (login && env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
   const args = [login ? '--account-login' : logout ? '--account-logout' : '--account-check', bin, app.version, ...(home ? [home] : [])];
   const timeout = login ? 145000 : 35000;
   let out;
   if (env.kind === 'local') {
-    ({ stdout: out } = await invoke(local.node, [cliAdapterPath(engine), ...args], { cwd: homedir(), env: { ...process.env, ...local.extraEnv }, timeout }));
+    ({ stdout: out } = await invoke(local.node, [cliAdapterPath(engine), ...args], { cwd: homedir(), env: { ...process.env, ...local.extraEnv, ...(menusDir ? { IRIS_CLI_MENUS_DIR: menusDir } : {}) }, timeout }));
   } else {
     const cmd = [facts.node, remoteCliAdapter(facts, engine), ...args].map(shellQuote).join(' ');
-    out = await run(env, `cd "$HOME" && exec ${cmd}`, { timeout });
+    out = await run(env, `cd "$HOME" && ${menusDir ? `IRIS_CLI_MENUS_DIR=${shellQuote(menusDir)} ` : ''}exec ${cmd}`, { timeout });
   }
   const line = out.trim().split('\n').at(-1);
   let result;
@@ -64,6 +66,31 @@ export async function cliAccountStatus(env, { bin, local, facts, login = false, 
     ...(typeof identity === 'string' ? { identity: identity.slice(0, 200) } : {}), ...(typeof plan === 'string' ? { plan: plan.slice(0, 60) } : {}),
     ...(Array.isArray(options) && options.length ? { options } : {}),
     ...(Array.isArray(limits) ? { limits: limits.slice(0, 4).filter(l => Number.isFinite(l?.usedPercent)).map(l => ({ usedPercent: l.usedPercent, windowMinutes: l.windowMinutes, resetsAt: l.resetsAt })) } : {}) };
+}
+
+// A sign-in the CLI itself carries out, on this Mac: the adapter names the page to open (onUrl), then
+// reports the account once the browser has finished. cancel() gives up; the CLI is told to drop it.
+export function cliSignIn({ bin, local, engine, home = null, onUrl }) {
+  const child = spawn(local.node, [cliAdapterPath(engine), '--account-login', bin, app.version, ...(home ? [home] : [])],
+    { cwd: homedir(), env: { ...process.env, ...local.extraEnv }, stdio: ['pipe', 'pipe', 'ignore'] });
+  let buffer = '', last = null;
+  const promise = new Promise((resolve, reject) => {
+    child.stdout.on('data', data => {
+      buffer += data;
+      for (let i; (i = buffer.indexOf('\n')) >= 0;) {
+        const line = buffer.slice(0, i); buffer = buffer.slice(i + 1);
+        let record; try { record = JSON.parse(line); } catch { continue; }
+        if (typeof record?.cliSignIn?.url === 'string' && /^https:\/\//.test(record.cliSignIn.url)) onUrl?.(record.cliSignIn.url);
+        else if (record?.cliAccountStatus || record?.cliAccountError) last = record;
+      }
+    });
+    child.on('error', error => reject(new Error(`${cliEngine(engine).label} could not be started: ${error.message}`)));
+    child.on('close', () => {
+      if (last?.cliAccountStatus) resolve(last.cliAccountStatus);
+      else reject(new Error(last?.cliAccountError ?? `${cliEngine(engine).label} did not finish the sign-in.`));
+    });
+  });
+  return { promise, cancel: () => { try { child.stdin.end(); } catch { /* already gone */ } } };
 }
 
 export function findCli({ home = homedir(), path = process.env.PATH ?? '', name = 'agy' } = {}) {

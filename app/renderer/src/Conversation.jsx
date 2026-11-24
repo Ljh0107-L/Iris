@@ -872,7 +872,7 @@ function ErrorBlock({ block, engine, sessionId }) {
   if (!failure) return <div className="block-error"><Icon name="alert" size={15} /> {block.text}</div>;
   const cli = isCliEngine(engine);
   const fix = failure.fix === 'settings'
-    ? cli ? { label: 'Open sign-in', run: () => openSettings(true, 'antigravity') } : { label: 'Open Settings', run: () => openSettings(true, 'providers') }
+    ? cli ? { label: 'Open sign-in', run: () => openSettings(true, 'subscriptions') } : { label: 'Open Settings', run: () => openSettings(true, 'providers') }
     : failure.fix === 'compact' && sessionId && !cli ? { label: 'Compact', run: () => api('compact', sessionId).catch(error => notify(error.message, 'error')) } : null;
   return (
     <div className="block-error described" title={block.text}>

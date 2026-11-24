@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { hasAccounts, isCliEngine, readinessKey } from './engines.js';
 import { Icon } from './Icons.jsx';
 import { SessionCliOptions, CliSetup, DraftCliAccount, DraftCliOptions } from './CliEngines.jsx';
-import { NewModelPicker, cliModelLabel } from './ModelPicker.jsx';
+import { HarnessPicker } from './HarnessPicker.jsx';
 import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, fileBadgeKind, shortPath } from './ui.jsx';
 import { effectiveSpeed } from '../../../agent/iris-speed.mjs';
 import { cliSendBlock, api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, set as setStore, takeComposerDraft, useStore } from './store.js';
@@ -612,6 +612,7 @@ export function NewSessionTrayHead() {
         <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
           <Icon name={envIcon(env)} size={13.5} /><span>{env.kind === 'local' ? 'Local' : env.label}</span><Icon name="chevronDown" size={11} className="tray-caret" />
         </Trigger>
+        <HarnessPicker environmentId={environmentId} />
       </div>
       {isClaude && ccPrep?.status === 'preparing' ? (
         <span className="bar-status"><Spinner size={11.5} /><span>{ccPrep.message || 'Preparing Claude Code…'}</span></span>
@@ -631,7 +632,8 @@ export function NewSessionTrayHead() {
   );
 }
 
-// Antigravity-style inner composer toolbar: Model + Effort on the left; Ultra / Ultracode + Speed on the right.
+// Under the message box: what the conversation's agent offers. Model and effort on the left; Ultra or
+// Ultracode and speed on the right. (The agent itself is chosen above the box, beside folder and machine.)
 export function ComposerBar({ session }) {
   const [branch, setBranch] = useState('');
   useEffect(() => {
@@ -647,7 +649,6 @@ export function ComposerBar({ session }) {
   const loadingModels = useStore(s => s.catalogLoading && (s.settings?.providers?.length ?? 0) > 0);
   const isNew = !session;
   const engine = (isNew ? draft.engine : session.engine) ?? 'pi';
-  const cliOptions = useStore(s => isNew ? s.cliDraftOptions[`${engine}:${draft.environmentId}`] : null);
   const isClaude = engine === 'claude-code';
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const availableModels = useMemo(() => modelsForEnvironment(catalog, environmentId, engine), [catalog, environmentId, engine]);
@@ -679,17 +680,14 @@ export function ComposerBar({ session }) {
 
   if (isCliEngine(engine)) return <div className="composer-bar"><div className="composer-bar-left">
     {session ? <SessionCliOptions session={session} /> : <>
-      <NewModelPicker environmentId={environmentId} label={cliModelLabel(cliOptions, draft.cliChoices, engine)} />
-      <DraftCliOptions environmentId={environmentId} engine={engine} skipModel /><DraftCliAccount engine={engine} /><CliSetup key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine} />
+      <DraftCliOptions environmentId={environmentId} engine={engine} /><DraftCliAccount engine={engine} /><CliSetup key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine} />
     </>}{branchChip}
   </div></div>;
 
   return (
     <div className="composer-bar">
       <div className="composer-bar-left">
-        {isNew
-          ? <NewModelPicker environmentId={environmentId} label={hasValidModel ? modelLabel(model, catalog) : loadingModels ? 'Loading models…' : 'Choose a model'} loading={!hasValidModel && loadingModels} attention={!hasValidModel && !loadingModels} />
-          : hasValidModel
+        {hasValidModel
           ? <Trigger width={320} placement="top-start" label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} engine={engine} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>{effortLevels.length === 0 && <Icon name="chevronDown" size={11} />}
             </Trigger>

@@ -4,7 +4,6 @@ import { EngineLogo, EngineMark, Icon, IrisMark } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar, NewSessionTrayHead } from './Composer.jsx';
 import { CliLogin, openSubscriptions } from './CliEngines.jsx';
-import { GetStarted } from './ModelPicker.jsx';
 import { Transcript, transcriptBlocks } from './Conversation.jsx';
 import { AgentReports, SubagentSummary } from './Subagents.jsx';
 import { RightPanel, UsageMetrics } from './RightPanel.jsx';
@@ -90,7 +89,6 @@ function useWindowWidth() {
 function NewSessionView() {
   const draft = useStore(s => s.draft);
   // No model to run anything with (a new user): show the ways to connect one, not just a small link.
-  const needsSetup = useStore(s => !isCliEngine(s.draft.engine) && !s.draft.model && !s.catalogLoading && !s.settings?.providers?.length);
   const isClaude = draft.engine === 'claude-code', cli = isCliEngine(draft.engine);
   // Warm the selected engine's runtime without waiting for the first message.
   useEffect(() => {
@@ -105,7 +103,6 @@ function NewSessionView() {
           <IrisMark />
           <h1 className="welcome-heading">What can we build today?</h1>
         </div>
-        {needsSetup && <GetStarted />}
         <div className="dock new-session-dock">
           <div className="composer-shell">
             <NewSessionTrayHead />
@@ -319,12 +316,8 @@ function Header({ session, view }) {
           ? <input className="title-input no-drag" autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => { setRenaming(false); if (title.trim()) api('rename', session.id, title.trim()); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false); }} />
           : <div className="header-context">
               <button ref={anchor} className="title-button no-drag" onClick={() => setMenu(m => !m)} aria-expanded={menu} title={session.title}>
-                <span>{session.title}</span><Icon name="chevronDown" size={12} />
+                <EngineLogo engine={session.engine ?? 'pi'} size={16} className="title-engine-logo" title={engineLabel(session.engine)} /><span>{session.title}</span><Icon name="chevronDown" size={12} />
               </button>
-              {session.engine === 'claude-code' && (
-                <span className="header-engine-badge" title="Running on Claude Code"><EngineLogo engine="claude-code" size={14} />Claude Code</span>
-              )}
-              {isCliEngine(session.engine) && <button type="button" className="header-engine-badge no-drag" title={`${engineLabel(session.engine)} account`} onClick={() => openSubscriptions(session.environmentId)}><EngineLogo engine={session.engine} size={14} />{engineLabel(session.engine)}</button>}
               {!local && session.environmentLabel && (
                 <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
               )}

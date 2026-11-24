@@ -36,12 +36,12 @@ export class Terminals {
       file = command?.bin ?? (process.env.SHELL || '/bin/zsh');
       args = command?.args ?? ['-l'];
       options.cwd = cwd;
-      if (command) options.env = commandEnv;
+      if (command) options.env = command.path?.length ? { ...commandEnv, PATH: [...new Set(command.path)].join(':') } : commandEnv;
     } else {
       // A login shell in the session's folder on the host; the window size follows over SSH.
       file = 'ssh';
       const remote = command
-        ? `cd "$HOME" && exec ${[command.bin, ...command.args].map(quote).join(' ')}`
+        ? `${command.path?.length ? `PATH=${command.path.map(quote).join(':')}:"$PATH"; export PATH; ` : ''}cd "$HOME" && exec ${[command.bin, ...command.args].map(quote).join(' ')}`
         : `cd ${quote(cwd)} 2>/dev/null; exec "\${SHELL:-/bin/sh}" -l`;
       args = ['-tt', ...(command ? ['-o', 'BatchMode=yes'] : []), '-o', 'ServerAliveInterval=15', ...sshMuxArgs(), ...(env.sshArgs ?? []), env.host, remote];
       options.cwd = process.env.HOME;

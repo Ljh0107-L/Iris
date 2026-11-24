@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { PiSession } from '../../core/pi-session.mjs';
@@ -18,7 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/iris-speed.mjs';
 import { readHistory } from '../../agent/iris-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CODEX_ENGINE, cliAccountStatus, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter } from './cli-engines.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -576,8 +576,10 @@ export class SessionManager extends EventEmitter {
 
   async cliAccountStatus(environmentId, { login = false, logout = false, engine = ANTIGRAVITY_ENGINE, account = null } = {}) {
     const env = this.env(environmentId);
-    const result = await this.#readCliAccount(env, login, engine, logout, account);
-    if (result.signedIn) {
+    // The Subscriptions page also wants Antigravity's plan and menus, which it only names when asked (see askCliOptions).
+    const menus = engine === ANTIGRAVITY_ENGINE && !login && !logout && !(this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length && this.store.settings.cliPlans?.[`${engine}:${env.id}`]);
+    const result = await this.#readCliAccount(env, login, engine, logout, account, menus);
+    if (result.signedIn && (login || logout)) {
       // Only an explicit account action should invalidate standby/reconnect an open chat.
       for (const [key, spare] of this.spares) {
         if (spare.record.engine === engine && spare.record.environmentId === env.id) this.#dropSpare(key);
@@ -589,30 +591,70 @@ export class SessionManager extends EventEmitter {
     return result;
   }
 
-  async #readCliAccount(env, login = false, engine = ANTIGRAVITY_ENGINE, logout = false, account = null) {
+  // Sign in on this Mac, in the browser. Codex names the page ('cli-sign-in' carries it, so the window can
+  // open it and offer the link); Antigravity opens the browser itself. Resolves with the account.
+  async cliSignIn(environmentId, { engine = ANTIGRAVITY_ENGINE, account = null } = {}) {
+    const env = this.env(environmentId);
+    if (env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
+    if (engine !== CODEX_ENGINE) return this.cliAccountStatus(environmentId, { login: true, engine, account });
+    const id = this.#cliAccount(engine, account), key = `${engine}:${env.id}:${id ?? ''}`;
+    const running = (this.cliSignIns ??= new Map()).get(key);
+    if (running) return running.promise;
+    const bin = await this.#findCli(env, engine);
+    if (!bin) throw new Error(antigravityInstallMessage(env, engine));
+    const job = cliSignIn({ bin, local: this.local, engine, home: this.#cliHome(env, null, engine, account),
+      onUrl: url => this.emit('cli-sign-in', { environmentId: env.id, engine, account: id ?? 'default', url }) });
+    const promise = job.promise.then(({ options, ...status }) => {
+      if (options && !this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length) this.#rememberCliOptions({ engine, environmentId: env.id }, { options });
+      const result = { installed: true, ...status };
+      if (result.signedIn) {
+        for (const [spareKey, spare] of this.spares) if (spare.record.engine === engine && spare.record.environmentId === env.id) this.#dropSpare(spareKey);
+        const record = this.#recordOf(this.focused), runtime = this.runtimes.get(this.focused);
+        if (record?.engine === engine && record.environmentId === env.id && runtime?.cli?.authRequired) this.reconnect(record.id).catch(() => {});
+      }
+      return result;
+    }).finally(() => { this.cliSignIns.delete(key); this.emit('cli-sign-in', { environmentId: env.id, engine, account: id ?? 'default', url: null }); });
+    this.cliSignIns.set(key, { promise, cancel: job.cancel });
+    return promise;
+  }
+  cliSignInCancel(environmentId, { engine = CODEX_ENGINE, account = null } = {}) {
+    this.cliSignIns?.get(`${engine}:${environmentId}:${this.#cliAccount(engine, account) ?? ''}`)?.cancel();
+  }
+
+  // menus: also ask what a new conversation can choose from (askCliOptions). A plain check never does.
+  async #readCliAccount(env, login = false, engine = ANTIGRAVITY_ENGINE, logout = false, account = null, menus = false) {
     if (login && env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
     const key = `${engine}:${env.id}:${this.#cliAccount(engine, account) ?? ''}`;
     const active = this.cliAccountChecks.get(key);
     if (active) {
-      if ((!login && !logout) || (active.login && !logout)) return active.promise;
+      if (!(menus && !active.menus) && ((!login && !logout) || (active.login && !logout))) return active.promise;
       await active.promise.catch(() => {});
-      return this.#readCliAccount(env, login, engine, logout, account);
+      return this.#readCliAccount(env, login, engine, logout, account, menus);
     }
     const promise = (async () => {
       const bin = await this.#findCli(env, engine);
       if (!bin) return { installed: false };
       const facts = env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null;
-      const { options, ...result } = await cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account) });
+      // Antigravity names its models only in a conversation, so to learn them it opens an empty one in this folder.
+      const menusDir = menus && engine === ANTIGRAVITY_ENGINE ? (env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-menus') : `${facts.root}/cli-menus`) : null;
+      const { options, ...result } = await cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account), menusDir });
       // The CLI also said what a new conversation can choose from: its menus exist before the first one opens.
       if (options && !this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length) this.#rememberCliOptions({ engine, environmentId: env.id }, { options });
+      // Antigravity names the plan only together with its menus: kept for the checks that do not ask for them.
+      if (engine === ANTIGRAVITY_ENGINE) {
+        const plans = this.store.settings.cliPlans ??= {}, planKey = `${engine}:${env.id}`;
+        if (result.plan && plans[planKey] !== result.plan) { plans[planKey] = result.plan; try { this.store.saveSettings(); } catch { /* asked again later */ } }
+        else if (result.signedIn && !result.plan && plans[planKey]) result.plan = plans[planKey];
+        else if (result.signedIn === false && plans[planKey]) delete plans[planKey];
+      }
       return result;
     })().finally(() => this.cliAccountChecks.delete(key));
-    this.cliAccountChecks.set(key, { login, promise });
+    this.cliAccountChecks.set(key, { login, menus, promise });
     return promise;
   }
 
   async cliTerminal(environmentId, action, engine = ANTIGRAVITY_ENGINE, account = null) {
-    if (!['login', 'usage', 'install'].includes(action)) throw new Error('Unknown terminal action.');
+    if (!['login', 'install'].includes(action)) throw new Error('Unknown terminal action.');
     const env = this.env(environmentId);
     // Codex is installed with npm, in the user's own login shell, where they can watch it.
     if (action === 'install' && engine === CODEX_ENGINE) return { env, bin: 'sh', args: ['-c', 'exec "${SHELL:-sh}" -lic "npm install -g @openai/codex"'] };
@@ -620,12 +662,16 @@ export class SessionManager extends EventEmitter {
     const args = action === 'login' ? cliEngine(engine).login(env) : [];
     // Codex signs in to Iris's own home (one per account); Antigravity's Google sign-in is the CLI's own.
     const home = engine === CODEX_ENGINE ? this.#cliHome(env, env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null, engine, account) : null;
-    if (home) return { env, bin: 'sh', args: ['-c', 'mkdir -p "$1" && chmod 700 "$1" && home=$1 && shift && CODEX_HOME="$home" exec "$@"', 'sh', home, bin, ...args] };
-    return { env, bin, args };
+    // A CLI installed with npm is a script that starts with `env node`. An app opened from Finder has
+    // launchd's PATH, with no node on it, so the command gets the login shell's PATH and the CLI's own
+    // directory (where npm and Homebrew put node as well); on a host, that directory comes first.
+    const path = env.kind === 'local' ? [dirname(bin), ...(this.local.extraEnv?.PATH ?? process.env.PATH ?? '').split(delimiter)].filter(Boolean) : [dirname(bin)];
+    if (home) return { env, path, bin: 'sh', args: ['-c', 'mkdir -p "$1" && chmod 700 "$1" && home=$1 && shift && CODEX_HOME="$home" exec "$@"', 'sh', home, bin, ...args] };
+    return { env, path, bin, args };
   }
 
   // Codex always runs with full access, as its conversations here are the user's own machine and
-  // account. Antigravity keeps its one switch in Settings → Models → Subscriptions (off by default: full access too).
+  // account. Antigravity keeps its one switch in Settings → Subscriptions (off by default: full access too).
   cliPermissionMode(record) {
     if (record?.engine === CODEX_ENGINE) return 'bypassPermissions';
     return this.store.settings.defaults?.antigravityBypassPermissions === false ? 'confirm' : 'bypassPermissions';
@@ -653,10 +699,12 @@ export class SessionManager extends EventEmitter {
   }
   addCliAccount(engine, name) {
     if (!cliEngine(engine).accounts) throw new Error(`${cliEngine(engine).label} has one sign-in per machine.`);
-    const label = String(name ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
-    if (!label) throw new Error('Give the account a name.');
     const list = (this.store.settings.cliAccounts ??= {})[engine] ??= [];
-    if (label.toLowerCase() === 'default' || list.some(a => a.name.toLowerCase() === label.toLowerCase())) throw new Error('There is already an account with that name.');
+    // Without a name it is "Account 2", "Account 3"…: the page shows who signed in, so a name is optional.
+    const taken = text => text.toLowerCase() === 'default' || list.some(a => a.name.toLowerCase() === text.toLowerCase());
+    let label = String(name ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (!label) for (let n = list.length + 2; taken(label = `Account ${n}`); n++);
+    else if (taken(label)) throw new Error('There is already an account with that name.');
     if (list.length >= 8) throw new Error('At most eight extra accounts.');
     const account = { id: randomUUID().slice(0, 8), name: label };
     list.push(account);
@@ -702,6 +750,20 @@ export class SessionManager extends EventEmitter {
     this.cliOptionsSaved.set(key, json);
     (this.store.settings.cliOptions ??= {})[key] = options;
     try { this.store.saveSettings(); } catch { /* shown again after the next conversation */ }
+  }
+  // The menus for the new-conversation screen. Codex names its models whenever its account is checked;
+  // Antigravity has to be asked, which happens here, when the screen needs them and none are remembered
+  // (at most every half minute while that fails, for example signed out).
+  async askCliOptions(environmentId, engine = ANTIGRAVITY_ENGINE) {
+    const key = `${engine}:${environmentId}`;
+    if (engine === ANTIGRAVITY_ENGINE && !this.store.settings.cliOptions?.[key]?.length && Date.now() - ((this.cliMenusAsked ??= new Map()).get(key) ?? 0) > 30000) {
+      this.cliMenusAsked.set(key, Date.now());
+      try {
+        const env = this.env(environmentId);
+        if (await this.#findCli(env, engine)) await this.#readCliAccount(env, false, engine, false, null, true);
+      } catch { /* the menus come with the first conversation instead */ }
+    }
+    return this.cliOptions(environmentId, engine);
   }
   cliOptions(environmentId, engine = ANTIGRAVITY_ENGINE) {
     const options = this.store.settings.cliOptions?.[`${engine}:${environmentId}`] ?? [];

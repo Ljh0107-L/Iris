@@ -75,7 +75,7 @@ export async function checkBackgroundJobs({ page, send, check, shot, remote = fa
       const heading = row.querySelector('.job-head').getBoundingClientRect();
       const actions = row.querySelector('.job-actions').getBoundingClientRect();
       return heading.left >= box.left && actions.right <= box.right;
-    }) && !element.querySelector('.panel-card-aside');
+    }) && [...element.querySelectorAll('.panel-card-aside')].every(aside => aside.getBoundingClientRect().right <= box.right); // the running count, in the heading
   }));
   await idle();
   if (!remote) {

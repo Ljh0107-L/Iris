@@ -103,10 +103,25 @@ try {
             __entryId: 'e5', timestamp: 4000, role: 'assistant',
             content: [{ type: 'text', text: 'Audit complete: `example.js` is clean.\n\n1. Escaped inline code `<pre>` and `<span>` inside lists wraps normally.\n   - Check [unordered trace](trace-unordered.json) or folder [trace dir](trace-dir).' }],
             usage: { input: 500, output: 40, cacheRead: 100, cacheWrite: 0, totalTokens: 640 }, stopReason: 'stop',
+            __timing: { source: 'agent', complete: true, requestStart: 3000, start: 3200, first: 3300, last: 4000, end: 4000 },
           },
         ],
       };
     }
+    // Codex, as its adapter writes a turn: an agent it started (its spawn-agent tool, shown as a task), token
+    // counts and the length of the turn. Antigravity: no token counts, so the speed is an estimate for the turn.
+    if (method === 'historyPage' && args[0] === 'codex-ui') return { next: null, messages: [
+      { __entryId: 'c1', timestamp: 1000, role: 'user', content: [{ type: 'text', text: 'Delegate the parser check.' }] },
+      { __entryId: 'c2', timestamp: 2000, role: 'assistant', provider: 'codex', model: 'gpt-a', durationMs: 4000, stopReason: 'stop',
+        content: [{ type: 'toolCall', id: 'cx-task-1', name: 'Task', arguments: { description: 'Check the parser', prompt: 'Check the parser\nRead src/parser.js and list the edge cases.', subagent_type: 'Agent', model: 'gpt-a' } },
+          { type: 'text', text: 'The agent found three edge cases.' }],
+        usage: { input: 900, output: 200, cacheRead: 300, cacheWrite: 0, reasoning: 40, totalTokens: 1400 } },
+      { __entryId: 'c3', timestamp: 3000, role: 'toolResult', toolCallId: 'cx-task-1', toolName: 'Task', content: [{ type: 'text', text: 'Three edge cases: empty input, nested quotes, trailing comma.' }], details: { engine: 'codex' }, isError: false },
+    ] };
+    if (method === 'historyPage' && args[0] === 'agy-ui') return { next: null, messages: [
+      { __entryId: 'g1', timestamp: 1000, role: 'user', content: [{ type: 'text', text: 'Summarise the parser.' }] },
+      { __entryId: 'g2', timestamp: 2000, role: 'assistant', provider: 'antigravity', model: 'gemini-4-neon', stopReason: 'stop', content: [{ type: 'text', text: 'The parser reads tokens in one pass.' }], __agyTurn: { durationMs: 5000, tokenEstimate: 400 } },
+    ] };
     if (method === 'historyPage' && args[0] === 'empty-code') return { messages: [], next: null };
     if (method === 'historyPage') return { next: null, messages: [{ role: 'user', content: [{ type: 'text', text: 'Review the repository changes and explain what needs attention.' }] }, { role: 'assistant', content: [{ type: 'text', text: 'The changes are ready for review. The implementation is small, and there is one behavior worth checking before committing.\n\n### What changed\n\nThe default answer in `example.js` now returns **42**. The new `notes.txt` documents the expected behavior.\n\n- Confirm that existing callers expect the updated value.\n- Add a regression case for the previous boundary condition.\n- Keep the documentation with the implementation in the same commit.\n\nOpen **Review** to inspect the actual diff. You can select a line to add feedback to your next message.' }], stopReason: 'stop' }] };
     if (method === 'listFiles') {
@@ -370,13 +385,16 @@ try {
   assert.equal(await page.evaluate(() => window.__irisState().draft.model.id), 'alternate');
   await page.screenshot({ path: join(screenshots, 'ssh-model-selection.png') });
 
-  // Claude Code: chosen by picking a model in its group (Anthropic models only), 5-level effort, Ultracode, upload progress, tool & question cards.
-  const claudeGroup = page.locator('.source-section', { has: page.locator('.source-title', { hasText: 'Claude Code' }) });
-  await page.getByRole('button', { name: 'Model', exact: true }).click();
-  assert.equal(await page.getByRole('button', { name: 'Engine', exact: true }).count(), 0, 'no separate engine menu');
-  assert.equal(await claudeGroup.locator('.menu-item', { hasText: 'Offline fixture' }).count(), 0, 'non-Anthropic models are not offered for Claude Code');
-  await claudeGroup.locator('.menu-item', { hasText: 'Alternate fixture' }).click();
+  // Claude Code: the agent is chosen beside folder and machine; the model menu below then lists its models
+  // only (Anthropic Messages), with 5-level effort, Ultracode, upload progress, tool & question cards.
+  await page.getByRole('button', { name: 'Agent', exact: true }).click();
+  assert.deepEqual(await page.locator('.harness-row .harness-title').allTextContents(), ['Codex', 'Antigravity', 'Claude Code', 'Pi']);
+  await page.locator('.harness-row', { hasText: 'Claude Code' }).click();
   assert.equal(await page.evaluate(() => window.__irisState().draft.engine), 'claude-code');
+  assert.equal(await page.locator('.composer-tray-head .harness-trigger').innerText(), 'Claude Code');
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  assert.equal(await page.locator('.model-menu .menu-item', { hasText: 'Offline fixture' }).count(), 0, 'non-Anthropic models are not offered for Claude Code');
+  await page.locator('.model-menu .menu-item', { hasText: 'Alternate fixture' }).click();
   assert.equal(await page.evaluate(() => window.__irisState().draft.model.id), 'alternate', 'Claude Code picks an Anthropic Messages model');
   assert.equal(await page.locator('.ultra-trigger').count(), 0, 'Pi Ultra stays out of Claude Code');
   assert.equal(await page.locator('.ultracode-trigger').count(), 1, 'Claude Code offers Ultracode');
@@ -394,7 +412,7 @@ try {
   await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
   await page.locator('.session-row', { hasText: 'Audit parser with Claude Code' }).locator('img.session-engine-logo[alt="Claude Code"]').waitFor();
   await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
-  await page.locator('.header-engine-badge', { hasText: 'Claude Code' }).waitFor();
+  await page.locator('.title-button img.title-engine-logo[alt="Claude Code"]').waitFor();
   assert.ok(ipcCalls.some(c => c.method === 'jobs' && c.args[0] === 'cc-ui'), 'opening a Claude Code session refreshes background jobs');
   await page.locator('.header-pill.live', { hasText: '1 running' }).click();
   await page.locator('.right-panel .job[data-job-id="bmon00001"]', { hasText: 'Watch CI run' }).waitFor();
@@ -404,6 +422,41 @@ try {
   await page.getByRole('button', { name: 'Stop job bmon00001', exact: true }).click();
   assert.ok(ipcCalls.some(c => c.method === 'stopBackgroundJob' && c.args[0] === 'cc-ui' && c.args[1] === 'bmon00001' && c.args[2] === 1000));
   await page.locator('.right-panel .job[data-job-id="bmon00001"]').waitFor({ state: 'detached' });
+  // ---- the right panel for each agent: speed, subagents and background tasks, as far as that agent reports them
+  const panel = page.locator('.right-panel');
+  const card = title => panel.locator('.panel-card', { has: page.locator('.panel-card-head', { hasText: title }) });
+  // Claude Code: request speed from its own timing, its Task agents, and (above) its background task.
+  assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~?40(\.0)?\s*tok\/s$/, 'Claude Code: 40 output tokens over a one-second request');
+  assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Request TPS');
+  assert.deepEqual(await card('Subagents').locator('.subagent-task-name').allInnerTexts(), ['Inspect parser module']);
+  assert.match(await card('Subagents').locator('.subagent-task-caption').innerText(), /^Explore · Completed · 2 steps · 480 tok$/);
+  await page.screenshot({ path: join(screenshots, 'right-panel-claude-code.png') });
+  // Codex: token counts and the turn's speed, the context it reports, and an agent it started.
+  const codexSession = { ...session, id: 'codex-ui', title: 'Delegate with Codex', engine: 'codex', model: null, cli: { options: [], contextUsage: { tokens: 52000, contextWindow: 400000, percent: 13 } } };
+  const agySession = { ...session, id: 'agy-ui', title: 'Summarise with Antigravity', engine: 'antigravity', model: null, cli: { options: [] } };
+  sessions.unshift(codexSession, agySession);
+  await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
+  assert.deepEqual(await page.locator('.session-row img.session-engine-logo').evaluateAll(nodes => [...new Set(nodes.map(n => n.alt))].sort()), ['Antigravity', 'Claude Code', 'Codex', 'Pi'], 'every conversation is marked with its agent, before its title');
+  assert.ok(await page.locator('.session-row-main').first().evaluate(row => row.firstElementChild.matches('.session-engine') && !!row.firstElementChild.querySelector('img.session-engine-logo')));
+  await page.getByRole('button', { name: 'Delegate with Codex' }).click();
+  await page.locator('.title-button img.title-engine-logo[alt="Codex"]').waitFor();
+  await card('Usage').locator('.usage-speed-value').waitFor();
+  assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~?50(\.0)?\s*tok\/s$/, 'Codex: 200 output tokens over a four-second turn');
+  assert.match(await card('Context').locator('.panel-card-aside').innerText(), /52K \/ 400K · 13%/);
+  assert.equal(await card('Context').locator('.context-bar > span').evaluate(bar => bar.style.width), '13%');
+  assert.deepEqual(await card('Subagents').locator('.subagent-task-name').allInnerTexts(), ['Check the parser']);
+  assert.equal(await card('Background tasks').count(), 0, 'Codex reports no background tasks');
+  await page.screenshot({ path: join(screenshots, 'right-panel-codex.png') });
+  // Antigravity: its protocol gives neither token counts nor agents, so the panel shows an estimated speed only.
+  await page.getByRole('button', { name: 'Summarise with Antigravity' }).click();
+  await page.locator('.title-button img.title-engine-logo[alt="Antigravity"]').waitFor();
+  await card('Usage').locator('.usage-speed-value').waitFor();
+  assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~80(\.0)?\s*tok\/s$/);
+  assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Estimated turn TPS');
+  assert.equal(await card('Subagents').count() + await card('Background tasks').count(), 0);
+  await page.screenshot({ path: join(screenshots, 'right-panel-antigravity.png') });
+  await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
+  await page.locator('.title-button img.title-engine-logo[alt="Claude Code"]').waitFor();
   await page.getByRole('button', { name: 'Session details', exact: true }).click();
   await page.locator('.cc-todo-card', { hasText: '1/2' }).waitFor();
   // Escaped inline `<pre>`/`<span>` inside Markdown lists must stay inline code, never swallow list items into a <pre> block.

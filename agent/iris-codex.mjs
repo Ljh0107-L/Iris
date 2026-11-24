@@ -229,6 +229,34 @@ export async function account({ bin, cwd, version, logout = false, home, env = p
   } finally { peer.close(); }
 }
 
+// Signs in with ChatGPT the way Codex's own clients do: Codex returns the page to open and tells us when
+// the browser has come back to it. The credentials stay in Codex's home; this process never sees them.
+// onUrl(url) is called once with the page; `cancelled` resolves if the user gives up.
+const SIGN_IN_MS = 10 * 60 * 1000;
+export async function signIn({ bin, cwd, version, home, env = process.env, onUrl, cancelled = new Promise(() => {}) }) {
+  let finish;
+  const completed = new Promise(resolve => { finish = resolve; });
+  let loginId = null;
+  const peer = await connect({ bin, cwd, env, version, home, handlers: {
+    onNotification: (_peer, method, params) => { if (method === 'account/login/completed' && (params.loginId == null || params.loginId === loginId)) finish(params); },
+    onClose: (_peer, reason) => finish({ success: false, error: reason?.message ?? 'Codex stopped before the sign-in finished.' }) } });
+  try {
+    const started = await peer.request('account/login/start', { type: 'chatgpt' });
+    if (!text(started?.authUrl)) throw new Error('Codex did not offer a ChatGPT sign-in.');
+    loginId = started.loginId ?? null;
+    onUrl?.(started.authUrl);
+    let timer;
+    const result = await Promise.race([completed, cancelled.then(() => ({ cancelled: true })),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ success: false, error: 'The sign-in was not finished in time.' }), SIGN_IN_MS); })]);
+    clearTimeout(timer);
+    if (result.cancelled) { if (loginId) await peer.request('account/login/cancel', { loginId }).catch(() => {}); throw new Error('Sign-in cancelled.'); }
+    if (!result.success) throw new Error(text(result.error) ? `Sign-in failed: ${result.error}` : 'Sign-in did not complete.');
+    const read = await peer.request('account/read', { refreshToken: false });
+    const [limits, models] = await Promise.all([peer.request('account/rateLimits/read', undefined).catch(() => null), peer.request('model/list', {}).catch(() => null)]);
+    return { ...accountOf(read, limits), options: optionsOf(visibleModels(models)) };
+  } finally { peer.close(); }
+}
+
 // What the composer's slash menu offers in a Codex conversation (the desktop runs it; see #compact).
 const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation to free up context', source: ENGINE }];
 const EFFORT_NAMES = { minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max', ultra: 'Ultra' };
@@ -289,7 +317,7 @@ export class CodexAdapter {
   #command(r) {
     switch (r.type) {
       case 'get_state': return this.#serial(async () => { await this.#ensureReady(); this.write({ type: 'cli_permissions', ids: [...this.permissions.keys()] }); return this.#state(); });
-      case 'cli_login': throw new Error(this.config.remote ? 'Run codex login --device-auth in the SSH host’s terminal, then reconnect.' : 'Sign in to Codex from Settings → Models, then reconnect.');
+      case 'cli_login': throw new Error(this.config.remote ? 'Run codex login --device-auth in the SSH host’s terminal, then reconnect.' : 'Sign in to Codex from Settings → Subscriptions, then reconnect.');
       case 'cli_set_config': return this.#serial(() => this.#setConfig(r.configId, r.value));
       case 'prompt': {
         const images = Array.isArray(r.images) ? r.images : [];
@@ -481,7 +509,22 @@ export class CodexAdapter {
     }
     if (item.type === 'mcpToolCall') return [{ name: `mcp__${item.server}__${item.tool}`, arguments: item.arguments && typeof item.arguments === 'object' ? item.arguments : {} }];
     if (item.type === 'webSearch') return [{ name: 'WebSearch', arguments: { query: item.query ?? '' } }];
+    // An agent Codex starts of its own (its spawn-agent tool) shows as a task, as Claude Code's agents do.
+    if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') {
+      const prompt = typeof item.prompt === 'string' ? item.prompt : '';
+      return [{ name: 'Task', arguments: { description: prompt.split('\n')[0].slice(0, 120) || 'Agent', prompt, subagent_type: 'Agent', ...(text(item.model) ? { model: item.model } : {}) } }];
+    }
     return [];
+  }
+  // Codex reports an agent's state with each of its agent tools (spawn, wait, close…), keyed by the agent's
+  // thread. The task stays open from the spawn until one of them says the agent has ended.
+  #agentStates(turn, item) {
+    const ended = { completed: false, shutdown: false, errored: true, interrupted: true, notFound: true };
+    for (const [thread, state] of Object.entries(item.agentsStates ?? {})) {
+      const tool = turn.agents?.get(thread);
+      if (!tool || tool.message || !(state?.status in ended)) continue;
+      this.#toolEnd(tool, ended[state.status], clip(state.message ?? '') || (ended[state.status] ? `The agent ended: ${state.status}.` : 'The agent finished.'));
+    }
   }
   #itemStarted(turn, item) {
     if (turn.tools.has(item.id)) return;
@@ -516,6 +559,15 @@ export class CodexAdapter {
     if (item.type === 'agentMessage' || item.type === 'reasoning') { if (turn.blockItem === item.id) this.#endBlock(turn); return; }
     if (item.type === 'fileChange') this.#patchUpdated(turn, item); else if (!turn.tools.has(item.id)) this.#itemStarted(turn, item);
     const declined = item.status === 'declined';
+    if (item.type === 'collabAgentToolCall') {
+      const [tool] = turn.tools.get(item.id) ?? [];
+      if (tool && !tool.message) {
+        if (item.status === 'failed' || item.status === 'interrupted' || !item.receiverThreadIds?.length) this.#toolEnd(tool, true, 'Codex could not start the agent.');
+        else for (const thread of item.receiverThreadIds) (turn.agents ??= new Map()).set(thread, tool);
+      }
+      this.#agentStates(turn, item);
+      return;
+    }
     for (const tool of turn.tools.get(item.id) ?? []) {
       if (tool.message) continue;
       if (item.type === 'commandExecution') {
@@ -541,7 +593,8 @@ export class CodexAdapter {
     if (this.turn !== turn) return;
     this.#cancelPermissions();
     this.#endBlock(turn);
-    for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, true, stopReason === 'aborted' ? 'Interrupted.' : 'Codex did not report the result.');
+    const agentTools = new Set(turn.agents?.values());
+    for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, stopReason === 'aborted' || !agentTools.has(tool), stopReason === 'aborted' ? 'Interrupted.' : agentTools.has(tool) ? 'The agent was still running when this turn ended.' : 'Codex did not report the result.');
     const u = turn.usage;
     const usage = u ? { input: Math.max(0, (u.inputTokens ?? 0) - (u.cachedInputTokens ?? 0)), output: u.outputTokens ?? 0, cacheRead: u.cachedInputTokens ?? 0, cacheWrite: u.cacheWriteInputTokens ?? 0,
       reasoning: u.reasoningOutputTokens ?? 0, totalTokens: u.totalTokens ?? 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } : undefined;
@@ -714,6 +767,16 @@ try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSy
 if (isMain && ['--account-check', '--account-logout'].includes(process.argv[2])) {
   try { output(process.stdout, { cliAccountStatus: await account({ bin: process.argv[3], cwd: process.cwd(), version: process.argv[4], logout: process.argv[2] === '--account-logout', home: process.argv[5] || undefined }) }); }
   catch (error) { output(process.stdout, { cliAccountError: error.message }); }
+  process.exit(0);
+} else if (isMain && process.argv[2] === '--account-login') {
+  // One line with the page to open, then the account once the browser is done. Closing stdin cancels.
+  const cancelled = new Promise(resolve => { process.stdin.on('end', resolve).on('close', resolve).on('error', resolve); for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, resolve); });
+  process.stdin.resume();
+  try {
+    const result = await signIn({ bin: process.argv[3], cwd: process.cwd(), version: process.argv[4], home: process.argv[5] || undefined, cancelled,
+      onUrl: url => output(process.stdout, { cliSignIn: { url } }) });
+    output(process.stdout, { cliAccountStatus: result });
+  } catch (error) { output(process.stdout, { cliAccountError: error.message }); }
   process.exit(0);
 } else if (isMain) {
   let boot;

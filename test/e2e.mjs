@@ -123,13 +123,14 @@ try {
   await page.locator('.update-button.downloading', { hasText: '42%' }).waitFor({ timeout: 5000 });
   await S('01b-update-downloading');
   await page.evaluate(() => window.iris.invoke('testUpdateStatus', { state: 'ready', version: '9.9.9' }));
-  await page.locator('button.update-button', { hasText: 'Update' }).waitFor({ timeout: 5000 });
+  await page.locator('button.update-button', { hasText: 'Restart to update' }).waitFor({ timeout: 5000 });
   await S('01c-update-ready');
   check('update button shows download progress, then "Update"', true);
   await page.evaluate(() => window.iris.invoke('testUpdateStatus', { state: 'idle' }));
 
   // ---- add a provider through Settings
   await page.click('.settings-button');
+  await page.click('.settings-sidebar-nav .nav-item:has-text("Models")'); // Settings opens on Subscriptions
   await page.click('.add-button:has-text("Add provider")');
   await page.click('.segmented button:has-text("Custom endpoint")');
   await page.fill('label.field:has-text("Name") input', 'Mock Lab');
@@ -165,7 +166,7 @@ try {
   await S('03-providers');
   // ---- add the SSH connection the way Codex does: pick it from ~/.ssh/config
   await page.click('.settings-sidebar-nav .nav-item:has-text("Connections")');
-  await page.click('.section-head .button.pill');
+  await page.locator('.section-head .button.pill, .add-button:has-text("Add an SSH connection")').first().click(); // one way to add: the empty row, or the button once there are connections
   await page.fill('.modal .search-field input', 'iris');
   await page.click('.pick-row:has-text("iris-test")');
   await S('03b-add-connection');

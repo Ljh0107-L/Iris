@@ -114,6 +114,23 @@ function publicSettings() {
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
 const terminals = new Terminals({ send });
 let updater = null, installingUpdate = false, updateQuit = false;
+
+// Check for Updates… in the app menu: always ends in a sentence about where things stand, as other Mac
+// apps do. The sidebar shows the check and the download while they run.
+const appIcon = () => { const icon = nativeImage.createFromPath(join(root, 'dist/renderer/app-icon.png')); return icon.isEmpty() ? {} : { icon }; };
+async function checkForUpdatesFromMenu() {
+  if (!updater) return;
+  const before = updater.status.state;
+  if (before === 'downloading') { await dialog.showMessageBox(window, { ...appIcon(), message: 'An update is downloading', detail: `Iris ${updater.status.version} will be ready to install in a moment.` }); return; }
+  const status = before === 'ready' || before === 'installing' ? updater.status : await updater.check({ manual: true }).catch(error => ({ state: 'error', message: error.message }));
+  if (status.state === 'current') await dialog.showMessageBox(window, { ...appIcon(), message: 'You’re up to date', detail: `Iris ${app.getVersion()} is the latest version.` });
+  else if (status.state === 'error') await dialog.showMessageBox(window, { type: 'warning', message: 'Couldn’t check for updates', detail: `${status.message}\n\nCheck your connection and try again.` });
+  else if (status.state === 'ready') {
+    const { response } = await dialog.showMessageBox(window, { ...appIcon(), message: `Iris ${status.version} is ready to install`, detail: `You have ${app.getVersion()}. Iris restarts to update, and running conversations are restarted afterwards.`,
+      buttons: ['Restart to Update', 'Later'], defaultId: 0, cancelId: 1 });
+    if (response === 0) await api.installUpdate().catch(error => send('notice', { level: 'error', message: error.message }));
+  }
+}
 let sessionRecovery = null, sessionUpdate = null;
 let quitting = false;
 const setSessionUpdate = (state, version, restarted = 0, failures = 0) => {
@@ -254,7 +271,9 @@ const api = {
   removeCliAccount: (engine, id) => manager.removeCliAccount(cliEngineOf(engine), id),
   antigravityInstall: (environmentId, engine) => manager.antigravityInstall(environmentId, cliEngineOf(engine)),
   cliSetConfig: (id, configId, value) => manager.cliSetConfig(id, configId, value),
-  cliOptions: (environmentId, engine) => manager.cliOptions(environmentId, cliEngineOf(engine)),
+  cliOptions: (environmentId, engine) => manager.askCliOptions(environmentId, cliEngineOf(engine)),
+  cliSignIn: (environmentId, engine, account) => manager.cliSignIn(environmentId, { engine: cliEngineOf(engine), account }),
+  cliSignInCancel: (environmentId, engine, account) => manager.cliSignInCancel(environmentId, { engine: cliEngineOf(engine), account }),
   prepareClaudeCode: environmentId => manager.prepareClaude(environmentId).then(layout => ({ ok: true, version: manager.claudeCodeInfo().version, bin: layout.bin }), error => ({ ok: false, error: error.message })),
   agents: id => manager.agents(id),
   jobs: id => manager.jobs(id),
@@ -392,7 +411,7 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: app.name, submenu: [
       { role: 'about' },
-      { label: 'Check for Updates…', click: () => updater.check({ manual: true }).then(st => { if (st.state === 'current') dialog.showMessageBox(window, { message: `Iris ${app.getVersion()} is up to date.` }); else if (st.state === 'error') dialog.showMessageBox(window, { type: 'warning', message: 'Couldn’t check for updates', detail: st.message }); }) },
+      { label: 'Check for Updates…', click: () => void checkForUpdatesFromMenu() },
       { type: 'separator' },
       { label: 'Session Update Report…', click: () => api.showSessionUpdateReport().catch(error => send('notice', { level: 'error', message: error.message })) },
       { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('open-settings', {}) },
@@ -429,7 +448,9 @@ app.whenReady().then(async () => {
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code', 'antigravity-install']) manager.on(channel, payload => send(channel, payload));
+  // A CLI's sign-in page, in the user's browser. Only an https page the CLI itself named is opened.
+  manager.on('cli-sign-in', ({ url }) => { if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url).catch(() => {}); });
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code', 'antigravity-install', 'cli-sign-in']) manager.on(channel, payload => send(channel, payload));
   manager.on('event', ({ id, event }) => attention.event(id, event));
   manager.on('question', ({ id, question }) => attention.question(id, question));
   manager.on('ultra', ({ id, ultra }) => attention.ultra(id, ultra?.task?.status === 'active'));

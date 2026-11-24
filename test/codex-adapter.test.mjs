@@ -109,6 +109,18 @@ test('commands show what was run and what Codex recognised, a patch is one diff 
   assert.deepEqual(saved.content.filter(b => b.type === 'toolCall').map(c => c.name), ['grep', 'read', 'edit', 'write', 'bash']);
 });
 
+test('an agent Codex starts is a task that stays open from the spawn until Codex says the agent has finished', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'delegate the parser check' });
+  await a.next(settled);
+  const started = a.events.filter(e => e.type === 'tool_execution_start'), ended = a.events.filter(e => e.type === 'tool_execution_end');
+  assert.deepEqual(started.map(e => [e.toolName, e.args.description, e.args.subagent_type, e.args.model]), [['Task', 'Check the parser', 'Agent', 'gpt-a']], 'one task for the spawn; the wait is not a step of its own');
+  assert.deepEqual(ended.map(e => [e.toolName, e.isError, e.result.content[0].text]), [['Task', false, 'Three edge cases: empty input, nested quotes, trailing comma.']], 'closed by the report of the wait');
+  assert.ok(a.events.indexOf(ended[0]) > a.events.indexOf(started[0]));
+  assert.equal(lastReply(a.events).content.find(b => b.type === 'text').text, 'The agent found three edge cases.');
+});
+
 test('the login-shell wrapper and unified diffs are read the way the shell and git write them', () => {
   assert.equal(shellCommand("/bin/zsh -lc 'ls -la'"), 'ls -la');
   assert.equal(shellCommand("bash -lc 'echo '\\''hi'\\'''"), "echo 'hi'");

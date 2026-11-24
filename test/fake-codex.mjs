@@ -26,6 +26,13 @@ function handle(m) {
     case 'initialize': note('home', home ?? null); return reply({ userAgent: 'fake' });
     case 'initialized': return;
     case 'account/read': return reply(signedIn() ? { account: { type: 'chatgpt', email: 'dev@example.test', planType: 'pro', workspaceName: null }, requiresOpenaiAuth: true } : { account: null, requiresOpenaiAuth: true });
+    // The browser's part is played here: the home gets its auth.json and Codex reports the sign-in done
+    // (unless FAKE_CODEX_LOGIN is "hang": then nobody finishes it, as when the user never comes back).
+    case 'account/login/start': reply({ type: 'chatgpt', loginId: 'login-1', authUrl: 'https://auth.example.test/authorize?fixture=1' });
+      if (process.env.FAKE_CODEX_LOGIN !== 'hang') setTimeout(() => { if (home) { fs.mkdirSync(home, { recursive: true }); fs.writeFileSync(home + '/auth.json', '{}'); } else fs.rmSync(process.env.FAKE_CODEX_SIGNED_OUT, { force: true });
+        send({ method: 'account/login/completed', params: { loginId: 'login-1', success: true, error: null } }); }, 30);
+      return;
+    case 'account/login/cancel': return reply({ status: 'canceled' });
     case 'account/logout': if (home) fs.rmSync(home + '/auth.json', { force: true }); else fs.writeFileSync(process.env.FAKE_CODEX_SIGNED_OUT, '1'); return reply({});
     case 'account/rateLimits/read': return reply({ rateLimits: { primary: { usedPercent: 12.4, windowDurationMins: 300, resetsAt: 1900000000 }, secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: null } } });
     case 'model/list': return reply({ data: [{ id: 'gpt-a', displayName: 'GPT A', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }], defaultReasoningEffort: 'low', serviceTiers: process.env.FAKE_CODEX_NO_ULTRAFAST ? [{ id: 'priority', name: 'Fast', description: '2x speed' }] : [{ id: 'priority', name: 'Fast', description: '2x speed' }, { id: 'ultrafast', name: 'Ultrafast', description: 'Fastest' }] }, { id: 'gpt-hidden', displayName: 'x', hidden: true, supportedReasoningEfforts: [], defaultReasoningEffort: 'low' }, { id: 'gpt-b', displayName: 'GPT B', hidden: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'medium' }] });
@@ -43,6 +50,15 @@ function handle(m) {
       if (text.includes('wait')) return; // stays active until interrupted
       if (text.includes('run')) { send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-1', command: 'npm test', status: 'inProgress' } } });
         return send({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: active, itemId: 'cmd-1', command: 'npm test', cwd: '/w', reason: 'runs the test suite' } }); }
+      // Codex's own agents: one is spawned (and is running), then a wait reports that it has finished.
+      if (text.includes('delegate')) {
+        const collab = (id, tool, fields, status = 'completed') => { const it = { type: 'collabAgentToolCall', id, tool, senderThreadId: 'thread-1', receiverThreadIds: ['agent-thread-1'], prompt: null, model: null, reasoningEffort: null, agentsStates: {}, ...fields };
+          send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { ...it, status: 'inProgress', agentsStates: {} } } }); send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { ...it, status } } }); };
+        collab('agent-1', 'spawnAgent', { prompt: 'Check the parser\\nRead src/parser.js and list the edge cases.', model: 'gpt-a', agentsStates: { 'agent-thread-1': { status: 'running', message: null } } });
+        collab('agent-2', 'wait', { agentsStates: { 'agent-thread-1': { status: 'completed', message: 'Three edge cases: empty input, nested quotes, trailing comma.' } } });
+        send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-d', delta: 'The agent found three edge cases.' } });
+        return finish('completed');
+      }
       // What a real turn looks like: commands through the login shell, a search with no match (exit 1),
       // a read, a patch over two files (one new), and a command that fails.
       if (text.includes('change')) {

@@ -27,7 +27,7 @@ One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Cod
 Notes:
 
 - Pi ships with the app. Iris downloads a pinned, checksum-verified Claude Code build on first use; it does not use a `claude` already on your PATH or a Claude subscription signed in there.
-- **Settings → Models** shows, for each machine, whether Codex and Antigravity are installed and signed in, and can install either CLI and start its sign-in for you.
+- **Settings → Subscriptions** shows, for each machine, whether Codex and Antigravity are installed and signed in, and can install either CLI and start its sign-in for you.
 - Codex and Antigravity keep their own credentials. Iris gives each its own data directory, so conversations you start in Iris do not appear in the history of the CLI you use in a terminal, and the other way round. Codex therefore asks you to sign in once inside Iris. Antigravity's Google sign-in is held in the Keychain by the CLI itself and is shared.
 - Codex and Antigravity run with full access: they run commands and edit files without asking. Pi and Claude Code also run without approval prompts, and can still ask you a question when they need a decision.
 

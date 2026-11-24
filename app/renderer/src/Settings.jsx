@@ -216,23 +216,14 @@ function ProviderEditor({ initial, onDone }) {
   );
 }
 
-// Everything a conversation can run on, in one place: plans you already have (through their own CLIs),
-// then API keys. "Accounts" links (a sign-in needed, a CLI to install) land on the first part.
-function ModelsPage({ focus }) {
+// API keys: the providers Pi can use (any of them) and Claude Code can use (the Anthropic-compatible ones).
+function ModelsPage() {
   const providers = useStore(s => s.settings.providers);
   const builtin = useStore(s => s.settings.builtinProviders);
   const [editing, setEditing] = useState(null); // provider id | 'new'
-  const subscriptions = useRef(null);
-  useEffect(() => { if (focus === 'subscriptions') subscriptions.current?.scrollIntoView({ block: 'start' }); }, [focus]);
   return <>
-    <section className="section" ref={subscriptions} aria-label="Subscriptions">
-      <div className="section-head"><h2 className="section-title">Subscriptions</h2></div>
-      <p className="section-desc">Use a plan you already pay for: ChatGPT through the Codex CLI, Google through the Antigravity CLI.</p>
-      <SubscriptionSettings />
-    </section>
     <section className="section" aria-label="API keys">
       <div className="section-head"><h2 className="section-title">API keys</h2></div>
-      <p className="section-desc">A provider is a company or endpoint that serves models: OpenAI, Anthropic, Google, DeepSeek, OpenRouter, or any compatible URL. Pi runs every model here; Claude Code runs the Anthropic ones.</p>
       <ul className="rows">
         {providers.map(p => {
           return (
@@ -362,7 +353,8 @@ function ConnectionsPage() {
     <section className="section">
       <div className="section-head">
         <h2 className="section-title">SSH connections from this Mac</h2>
-        <button className="button pill" onClick={() => setAddConnectionOpen(true)}>Add</button>
+        {/* With none yet, the empty row below is the one way to add; a second button would do the same. */}
+        {added.length > 0 && <button className="button pill" onClick={() => setAddConnectionOpen(true)}>Add</button>}
       </div>
       <ul className="rows">
         {added.map(env => <ConnectionCard key={env.id} env={env} />)}
@@ -479,12 +471,12 @@ function UsagePage() {
 export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
-    { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' }, // subscriptions (Codex, Antigravity) and API keys
+    { id: 'subscriptions', label: 'Subscriptions', icon: 'key', title: 'Subscriptions' }, // plans used through their own CLIs: Codex, Antigravity
+    { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' }, // API keys, for Pi and Claude Code
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
-  // The old Accounts page is the Subscriptions part of Models.
-  const page = pages.find(p => p.id === (tab === 'antigravity' ? 'providers' : tab)) ?? pages[0];
+  const page = pages.find(p => p.id === tab) ?? pages[0];
   return (
     <div className="settings-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) openSettings(false); }}>
       <div className="settings-page-root" role="dialog" aria-modal="true" aria-label="Settings">
@@ -501,7 +493,7 @@ export function SettingsPage() {
           <main className="settings-main">
             <div className="settings-content">
               <h1 className="settings-title">{page.title}</h1>
-              {page.id === 'providers' ? <ModelsPage focus={tab === 'antigravity' ? 'subscriptions' : null} /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
+              {page.id === 'subscriptions' ? <SubscriptionSettings /> : page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
             </div>
           </main>
         </div>

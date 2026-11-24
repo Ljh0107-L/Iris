@@ -15,6 +15,7 @@ const CONTROL_MS = 12000;
 // Transcript), so it must be generous: only a CLI that is really stuck should reach it. Together with
 // initialize it stays inside the 90s the desktop waits for the first get_state.
 const OPEN_MS = 70000;
+const MENUS_MS = 20000; // inside the time an account check is given
 const LOGIN_MS = 120000;
 const ABORT_MS = 6000;
 const STANDBY_MS = 120000; // safety net if Desktop exits without stopping its SSH spare
@@ -244,9 +245,13 @@ const personalAuth = init => Array.isArray(init?.authMethods) && init.authMethod
 
 // Settings can probe or authenticate without opening a chat. session/list is read-only;
 // its result (including the user's conversation metadata) never leaves this process.
-async function account({ bin, cwd, login, version }) {
+// menus: { dir, home } asks, once signed in, what a new conversation can choose from. ACP only says that
+// in the reply to session/new, so one is opened in `dir` (an empty folder of Iris's) under Iris's own
+// Antigravity data directory `home`, never the user's, and closed again; no message is sent.
+async function account({ bin, cwd, login, version, menus = null }) {
   if (!isAbsolute(bin ?? '')) throw new Error('Missing Antigravity CLI.');
-  const peer = new AcpPeer({ bin, cwd }, process.env, (p, r) => {
+  const probe = menus && isAbsolute(menus.dir ?? '') && text(menus.home) && /^[\w.-]+$/.test(menus.home) && !menus.home.startsWith('.') ? menus : null;
+  const peer = new AcpPeer({ bin, cwd, ...(probe ? { appDataDir: probe.home } : {}) }, process.env, (p, r) => {
     if (rpcId(r.id)) p.send({ id: r.id, error: { code: -32601, message: 'Method not supported' } });
   }, () => {});
   let canSignIn = false;
@@ -260,7 +265,18 @@ async function account({ bin, cwd, login, version }) {
       await peer.request('authenticate', { methodId: AUTH_METHOD }, LOGIN_MS);
     }
     if (canCheck) await peer.request('session/list', {});
-    return { signedIn: canCheck || login ? true : null, canSignIn };
+    const signedIn = canCheck || login ? true : null;
+    let options = [], plan = null;
+    if (signedIn && probe) {
+      try {
+        mkdirSync(probe.dir, { recursive: true });
+        const { result } = await peer.request('session/new', { cwd: probe.dir, mcpServers: [] }, MENUS_MS);
+        options = selectConfig(result?.configOptions);
+        plan = text(result?._meta?.antigravity?.tier?.name) ? result._meta.antigravity.tier.name.slice(0, 60) : null; // "Google AI Pro"
+        if (text(result?.sessionId) && object(init.agentCapabilities?.sessionCapabilities?.close)) await peer.request('session/close', { sessionId: result.sessionId }).catch(() => {});
+      } catch { /* the sign-in is known all the same; the menus appear with the first conversation */ }
+    }
+    return { signedIn, canSignIn, ...(plan ? { plan } : {}), ...(options.length ? { options } : {}) };
   } catch (error) {
     if (error.authRequired) return { signedIn: false, canSignIn };
     if (error.code === -32601 && !login) return { signedIn: null, canSignIn };
@@ -796,7 +812,8 @@ let isMain = false;
 try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { /* imported */ }
 if (isMain && ['--account-check', '--account-login'].includes(process.argv[2])) {
   try {
-    const result = await account({ bin: process.argv[3], cwd: process.cwd(), login: process.argv[2] === '--account-login', version: process.argv[4] });
+    const result = await account({ bin: process.argv[3], cwd: process.cwd(), login: process.argv[2] === '--account-login', version: process.argv[4],
+      menus: process.env.IRIS_CLI_MENUS_DIR ? { dir: process.env.IRIS_CLI_MENUS_DIR, home: process.argv[5] } : null });
     output(process.stdout, { cliAccountStatus: result });
   } catch (error) { output(process.stdout, { cliAccountError: error.message }); }
 } else if (isMain) {

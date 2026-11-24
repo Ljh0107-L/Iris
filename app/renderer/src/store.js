@@ -38,6 +38,7 @@ let state = {
   cliReadiness: {},                // machine id -> last background account check
   antigravityInstalls: {},                 // machine id -> CLI install progress or result
   cliAccounts: {},                         // engine -> { accounts: [{ id, name }], selected } (Codex can have several)
+  cliSignIns: {},                          // "engine:machine:account" -> the sign-in page open in the browser right now
   cliDraftOptions: {},                     // "engine:machine" -> the model and effort menus that CLI offered last time
   transcripts: {},                          // session id -> transcript
   sending: {},                              // session id -> true while a message is on its way to the agent
@@ -60,7 +61,7 @@ let state = {
   sidebar: true,
   sidebarAuto: false,                      // the window is too narrow for the sidebar beside the conversation
   sidebarPeek: false,                      // ...but it was asked for: shown over the conversation until used
-  settingsOpen: false, settingsTab: 'providers', addConnectionOpen: false,
+  settingsOpen: false, settingsTab: 'subscriptions', addConnectionOpen: false,
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
   composerDrafts: {},                       // in-memory text/images per conversation; never written to settings
@@ -261,6 +262,11 @@ window.iris.subscribe(({ channel, payload }) => {
     case 'environment':
       set(s => ({ envStatus: { ...s.envStatus, [payload.id]: payload } }));
       if (payload.status === 'ready') import('./dirs.js').then(d => d.prefetchDir(payload.id)); // the folder browser opens instantly
+      break;
+    case 'cli-sign-in':
+      set(s => { const next = { ...s.cliSignIns }, key = `${payload.engine}:${payload.environmentId}:${payload.account}`;
+        if (payload.url) next[key] = payload.url; else delete next[key];
+        return { cliSignIns: next }; });
       break;
     case 'antigravity-install':
       set(s => ({ antigravityInstalls: { ...s.antigravityInstalls, [payload.id]: payload } }));
@@ -575,7 +581,7 @@ export function reportCliAccount(environmentId, { installed, signedIn }, engine 
   cliChecks.delete(readinessKey(engine, environmentId));
   setCliReadiness(readinessKey(engine, environmentId), installed === false ? 'missing' : signedIn === true ? 'ready' : signedIn === false ? 'signedOut' : 'unknown');
 }
-// The accounts a CLI has here (Codex: "Default" plus the ones added in Settings → Models → Subscriptions).
+// The accounts a CLI has here (Codex: "Default" plus the ones added in Settings → Subscriptions).
 export function loadCliAccounts(engine) {
   if (!hasAccounts(engine)) return Promise.resolve();
   return api('cliAccounts', engine).then(result => set(s => ({ cliAccounts: { ...s.cliAccounts, [engine]: result },

@@ -1,7 +1,7 @@
 // A Codex conversation through the session manager and this machine's relay, with a stand-in CLI.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { SessionManager } from '../app/main/session-manager.mjs';
@@ -83,11 +83,23 @@ test('Codex: found on the login PATH, opened with the choices made beforehand, a
   const [, work] = manager.addCliAccount('codex', '  Work  ');
   assert.equal(work.name, 'Work');
   assert.throws(() => manager.addCliAccount('codex', 'work'), /already an account/);
+  // Without a name the account is numbered; the page shows who signed in instead.
+  const [, , third2] = manager.addCliAccount('codex');
+  assert.equal(third2.name, 'Account 3');
+  // Signing in through the browser: Codex names the page, then reports the account once the browser is done.
+  const pages = [];
+  manager.on('cli-sign-in', event => pages.push([event.account, event.url]));
+  const signed = await manager.cliSignIn('local', { engine: 'codex', account: third2.id });
+  assert.deepEqual([signed.signedIn, signed.identity, signed.plan, signed.limits.length], [true, 'dev@example.test', 'pro', 2]);
+  assert.deepEqual(pages, [[third2.id, 'https://auth.example.test/authorize?fixture=1'], [third2.id, null]], 'the page to open, then the end of the sign-in');
+  assert.equal(existsSync(join(dir, 'cli-accounts', 'codex', third2.id, 'auth.json')), true, 'in that account’s own home');
+  await manager.removeCliAccount('codex', third2.id);
   const home = join(dir, 'cli-accounts', 'codex', work.id);
   assert.equal((await manager.cliAccountStatus('local', { engine: 'codex', account: work.id })).signedIn, false, 'a new account starts signed out');
   assert.equal((await manager.cliAccountStatus('local', { engine: 'codex' })).signedIn, true, 'the default account is untouched');
   const login = await manager.cliTerminal('local', 'login', 'codex', work.id);
   assert.deepEqual([login.bin, login.args.slice(2)], ['sh', ['sh', home, join(bin, 'codex'), 'login']], 'sign-in runs with that home');
+  assert.equal(login.path[0], bin, 'the CLI’s own directory leads the PATH of the sign-in command, where its `env node` is looked up');
   writeFileSync(join(home, 'auth.json'), '{}'); // what `codex login` leaves behind
   assert.equal((await manager.cliAccountStatus('local', { engine: 'codex', account: work.id })).signedIn, true);
   const third = await manager.create({ environmentId: 'local', cwd: workDir, engine: 'codex', prompt: 'hi', creationId: 'pending:3', cliAccount: work.id });

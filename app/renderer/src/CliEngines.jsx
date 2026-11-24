@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Icon } from './Icons.jsx';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { EngineLogo, Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Spinner, Trigger, envIcon } from './ui.jsx';
 import { CliTerminal } from './TerminalPanel.jsx';
 import { api, askConfirm, cliDraftMenus, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
-import { CLI_ENGINES, engineCli, engineLabel, hasAccounts, readinessKey } from './engines.js';
+import { CLI_ENGINES, engineLabel, hasAccounts, readinessKey } from './engines.js';
 import './cli-engines.css';
 
 const cleanError = error => error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
 const showError = error => notify(cleanError(error), 'error');
-export const openSubscriptions = environmentId => openSettings(true, 'antigravity', { environmentId }); // the Accounts page
+export const openSubscriptions = environmentId => openSettings(true, 'subscriptions', { environmentId });
 
 export function CliSetup({ environmentId, engine = 'antigravity' }) {
   const status = useStore(s => s.cliReadiness[readinessKey(engine, environmentId)]);
@@ -57,12 +57,15 @@ export function DraftCliAccount({ engine }) {
 
 // Model and effort for a conversation that has not started: the menus this CLI offered last time on this
 // machine, with the last choices selected. They are applied when the conversation opens.
-export function DraftCliOptions({ environmentId, engine, skipModel = false }) {
+export function DraftCliOptions({ environmentId, engine }) {
   const options = useStore(s => s.cliDraftOptions[`${engine}:${environmentId}`]) ?? [];
   const chosen = useStore(s => s.draft.cliChoices) ?? {};
+  const ready = useStore(s => s.cliReadiness[readinessKey(engine, environmentId)] === 'ready');
   useEffect(() => { void loadCliOptions(environmentId, engine); }, [environmentId, engine]);
+  // Signed in, but the CLI has not said what it offers on this machine yet: it starts on its own default.
+  if (!options.length) return ready ? <span className="trigger static" title={`${engineLabel(engine)} lists its models once a conversation has started on this machine`}><span className="strong">Default model</span></span> : null;
   return <>
-    {cliDraftMenus(options, chosen).filter(option => !(skipModel && option.category === 'model')).map(option => {
+    {cliDraftMenus(options, chosen).map(option => {
       const value = option.options.some(choice => choice.value === chosen[option.id]) ? chosen[option.id] : option.currentValue;
       return <Trigger key={option.id} label={option.name} title={option.name} width={280} placement="top-start"
         menu={close => <MenuSection title={option.name}>
@@ -116,14 +119,6 @@ function SessionAccount({ session }) {
   return <span className="trigger cli-session-account" title={`${engineLabel(session.engine)} account: ${name}`}><Icon name="key" size={13} /><span>{name}</span></span>;
 }
 
-function CopyUsageCommand() {
-  const [copied, setCopied] = useState(false);
-  return <button type="button" className="button small" onClick={async () => {
-    try { await navigator.clipboard.writeText('/usage'); setCopied(true); }
-    catch { notify('Could not copy. Type /usage in the terminal instead.', 'error'); }
-  }}><Icon name={copied ? 'check' : 'copy'} size={13} />{copied ? 'Copied' : 'Copy /usage'}</button>;
-}
-
 const installLabels = { preparing: 'Preparing…', downloading: 'Downloading…', uploading: 'Uploading…', installing: 'Installing…' };
 
 function InstallProgress({ progress }) {
@@ -137,23 +132,36 @@ function InstallProgress({ progress }) {
 
 // "pro" → "Pro", "promax" → "Pro Max": plan ids as the provider names them, made readable.
 const planName = plan => plan ? `${String(plan).replace(/^(pro|plus|team|free|business|enterprise|edu)(?=.)/i, '$1 ').replace(/\b\w/g, c => c.toUpperCase())} plan` : null;
-const limitText = limit => {
-  const span = limit.windowMinutes >= 10080 ? 'weekly' : limit.windowMinutes >= 1440 ? 'daily' : limit.windowMinutes ? `${Math.round(limit.windowMinutes / 60)}-hour` : '';
-  const resets = limit.resetsAt ? `, resets ${new Date(limit.resetsAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '';
-  return `${limit.usedPercent}% of ${span ? `${span} ` : ''}limit used${resets}`;
-};
 
-function AccountRow({ environmentId, engine, profile = null, onRemove }) {
+const SUBSCRIPTION = { codex: 'ChatGPT plan', antigravity: 'Google account' };
+// How much of one limit is used, as a bar: "5-hour limit · 42% used · resets 3:00 PM".
+function LimitBar({ limit }) {
+  const span = limit.windowMinutes >= 10080 ? 'Weekly' : limit.windowMinutes >= 1440 ? 'Daily' : limit.windowMinutes ? `${Math.round(limit.windowMinutes / 60)}-hour` : 'Usage';
+  const used = Math.max(0, Math.min(100, Math.round(limit.usedPercent)));
+  const at = limit.resetsAt ? new Date(limit.resetsAt) : null;
+  const resets = at && !Number.isNaN(at.getTime()) ? ` · resets ${at.getTime() - Date.now() < 86400000 ? at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '';
+  return <div className="sub-limit">
+    <span className="sub-limit-name">{span} limit</span>
+    <span className={`sub-limit-bar ${used >= 90 ? 'high' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={used} aria-label={`${span} limit used`}><span style={{ width: `${used}%` }} /></span>
+    <span className="sub-limit-text">{used}% used{resets}</span>
+  </div>;
+}
+
+// One account of a CLI on the chosen machine. fresh: it was just added, so its sign-in starts at once and,
+// if that is given up, the account is dropped again (onAbandon).
+function AccountRow({ environmentId, engine, profile = null, fresh = false, onRemove, onAbandon, onSignedIn }) {
   const antigravity = engine === 'antigravity';
+  const local = environmentId === 'local';
   const accountId = profile?.id ?? null; // an extra Codex account; null is the CLI's own sign-in
-  const progress = useStore(s => antigravity ? s.antigravityInstalls[environmentId] : null);
+  const progress = useStore(s => s.antigravityInstalls[`${environmentId}:${engine}`] ?? (antigravity ? s.antigravityInstalls[environmentId] : null));
+  const signInUrl = useStore(s => s.cliSignIns[`${engine}:${environmentId}:${accountId ?? 'default'}`]);
   const [account, setAccount] = useState(null);
   const [checking, setChecking] = useState(true);
   const [requesting, setRequesting] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
-  const [browserFailed, setBrowserFailed] = useState(false);
   const [error, setError] = useState(null);
   const [terminal, setTerminal] = useState(null);
+  const [copied, setCopied] = useState(false);
   const installing = requesting || !!installLabels[progress?.stage];
   const check = useCallback(async () => {
     setChecking(true); setError(null);
@@ -165,102 +173,136 @@ function AccountRow({ environmentId, engine, profile = null, onRemove }) {
       setAccount(result);
       if (!accountId) reportCliAccount(environmentId, result, engine);
       if (result.signedIn) setTerminal(open => open === 'login' ? null : open);
-    } catch (err) { setError(cleanError(err)); }
+      return result;
+    } catch (err) { setError(cleanError(err)); return null; }
     finally { setChecking(false); }
   }, [environmentId, engine, accountId]);
-  useEffect(() => { if (!installing) void check(); }, [check, installing]);
   const install = async () => {
     setRequesting(true);
     try { await api('antigravityInstall', environmentId, engine); }
     catch { /* the progress event carries the error, including across navigation */ }
     finally { setRequesting(false); }
   };
-  const signIn = async () => {
-    if (!account?.canSignIn || browserFailed) { setTerminal('login'); return; }
+  // The card's callbacks are new functions on every render: read through a ref, they do not restart the check below.
+  const handlers = useRef({});
+  handlers.current = { onAbandon, onSignedIn };
+  // On this Mac the CLI signs in through the browser and Iris waits for it; on a host, in a terminal there.
+  const signIn = useCallback(async () => {
+    if (!local) { setTerminal('login'); return; }
     setSigningIn(true); setError(null);
     try {
-      const result = await api('cliAccountStatus', environmentId, true, engine, accountId);
+      const result = await api('cliSignIn', environmentId, engine, accountId);
       setAccount(result);
       if (!accountId) reportCliAccount(environmentId, result, engine);
-      if (!result.signedIn) throw new Error('Sign-in did not complete. Try again in Terminal.');
-    } catch (err) { setBrowserFailed(true); setError(cleanError(err)); }
-    finally { setSigningIn(false); }
-  };
+      if (!result.signedIn) throw new Error('Sign-in did not complete.');
+      handlers.current.onSignedIn?.();
+    } catch (err) {
+      const message = cleanError(err);
+      if (fresh) handlers.current.onAbandon?.(); else if (!/cancelled/i.test(message)) setError(message);
+    } finally { setSigningIn(false); }
+  }, [local, environmentId, engine, accountId, fresh]);
+  const started = useRef(false);
+  useEffect(() => {
+    if (installing) return;
+    if (fresh && !started.current) { started.current = true; setChecking(false); setAccount({ installed: true, signedIn: false }); void signIn(); return; }
+    if (!fresh) void check();
+  }, [check, installing, fresh, signIn]);
   const signOut = async () => {
     setChecking(true); setError(null);
     try { const result = await api('cliAccountStatus', environmentId, 'logout', engine, accountId); setAccount(result); if (!accountId) reportCliAccount(environmentId, result, engine); }
     catch (err) { setError(cleanError(err)); }
     finally { setChecking(false); }
   };
-  const terminalExited = useCallback(code => { if (!code && terminal !== 'usage') void check(); }, [check, terminal]);
+  const terminalExited = useCallback(code => { if (!code) void check(); }, [check]);
   const signedIn = account?.signedIn === true;
   const message = progress?.stage === 'error' ? progress.message : error;
-  const machine = useStore(s => s.environments.find(env => env.id === environmentId)?.label) ?? 'this computer';
-  // What is true on that machine right now, in words: the buttons alone don't say.
-  const status = installing ? `Installing on ${machine}`
-    : !account ? (checking ? `Checking ${machine}…` : `Could not check ${machine}`)
-    : account.installed === false ? `Not installed on ${machine}`
-    : signedIn ? [account.identity ? `Signed in as ${account.identity}` : antigravity ? 'Installed · signed in with Google' : 'Installed · signed in', planName(account.plan), ...(account.limits ?? []).map(limitText)].filter(Boolean).join(' · ')
-    // Codex signs in here on its own, so what Iris does never shows up in the user's Codex app.
-    : account.signedIn === false ? (engine === 'codex' ? 'Installed · not signed in here · Iris keeps its own Codex sign-in and history, apart from your Codex app' : 'Installed · not signed in')
-    : checking ? 'Installed · checking sign-in…' : 'Installed · sign-in could not be checked';
-  return <>
-    <div className="cli-setting-row">
-      <span className="cli-setting-text"><span>{profile ? `${engineLabel(engine)} · ${profile.name}` : engineCli(engine)}</span><span className="cli-setting-desc">{status}</span></span>
-      {!installing && <div className="cli-setting-actions">
-        {signingIn ? <span role="status">Finish in your browser…</span> : account?.installed ? <>
-          {signedIn ? <>{!antigravity && <button type="button" className="button" disabled={checking} onClick={signOut}>Sign out</button>}<span className="cli-account-state"><Icon name="check" size={14} /> Signed in</span></>
-            : <button type="button" className="button primary" disabled={terminal === 'login' || (environmentId === 'local' && checking)} onClick={signIn}>{browserFailed ? 'Sign in using Terminal' : 'Sign in'}</button>}
-          {antigravity && (signedIn || (!checking && account.signedIn == null)) && <button type="button" className="button" title="View quota in Terminal" disabled={terminal === 'usage'} onClick={() => setTerminal('usage')}>View quota</button>}
-        </> : checking ? <span className="cli-account-state" role="status"><Spinner size={14} /> Checking…</span>
-          : account?.installed === false ? (antigravity ? <button type="button" className="button primary" onClick={install}>Install CLI</button>
-            : <button type="button" className="button primary" disabled={terminal === 'install'} title="Runs npm install -g @openai/codex in a terminal here" onClick={() => setTerminal('install')}>Install with npm</button>)
-            : <button type="button" className="button" onClick={check}>Retry</button>}
-        {profile && <button type="button" className="button ghost" title="Remove this account from Iris" onClick={onRemove}>Remove</button>}
+  // What is true on that machine right now, in two or three words.
+  const state = installing ? 'Installing' : signingIn ? 'Signing in' : !account ? (checking ? 'Checking' : 'Could not check')
+    : account.installed === false ? 'Not installed'
+    : signedIn ? null : account.signedIn === false ? 'Not signed in'
+    : checking ? 'Checking' : 'Could not check';
+  const busy = state === 'Checking' || state === 'Installing' || state === 'Signing in';
+  // Signed in, the row is the account: who, and on which plan.
+  const who = signedIn ? (account.identity || profile?.name || 'Signed in') : profile?.name;
+  const plan = signedIn ? planName(account.plan) : null;
+  const limits = signedIn ? account.limits ?? [] : [];
+  const brand = antigravity ? 'Google' : 'ChatGPT';
+  return <div className="sub-account">
+    <div className="sub-account-row">
+      {signedIn ? <span className="sub-state ok"><span className="sub-dot" /><span className="sub-who" title={who}>{who}</span></span>
+        : <span className={`sub-state ${busy ? 'busy' : ''}`}>{busy ? <Spinner size={11} /> : <span className="sub-dot" />}{who ? `${who} · ${state}` : state}</span>}
+      {plan && <span className="sub-plan">{plan}</span>}
+      {!installing && !signingIn && <div className="sub-actions">
+        {account?.installed ? <>
+          {signedIn && <button type="button" className="tool-button" aria-label="Refresh" title="Refresh" disabled={checking} onClick={check}>{checking ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>}
+          {signedIn ? (profile ? <button type="button" className="button small" title="Sign out and remove this account from Iris" onClick={onRemove}>Remove</button>
+              : !antigravity && <button type="button" className="button small" disabled={checking} onClick={signOut}>Sign out</button>)
+            : <>
+              <button type="button" className="button small primary" disabled={terminal === 'login' || (local && checking)} onClick={signIn}>Sign in with {brand}</button>
+              {profile && <button type="button" className="button small ghost" onClick={onRemove}>Remove</button>}
+            </>}
+        </> : account?.installed === false ? (antigravity ? <button type="button" className="button small primary" onClick={install}>Install</button>
+          : <button type="button" className="button small primary" disabled={terminal === 'install'} title="Runs npm install -g @openai/codex in a terminal here" onClick={() => setTerminal('install')}>Install</button>)
+          : !checking && <button type="button" className="button small" onClick={check}>Retry</button>}
       </div>}
-      {installing && <InstallProgress progress={progress} />}
     </div>
+    {signingIn && <div className="sub-flow" role="status">
+      <span className="sub-flow-text">{signInUrl ? 'Your browser has opened. Finish signing in there, then come back.' : `Opening ${brand} sign-in in your browser…`}</span>
+      <div className="sub-actions">
+        {signInUrl && <>
+          <button type="button" className="button small" onClick={() => api('openExternal', signInUrl)}>Open again</button>
+          <button type="button" className="button small" onClick={async () => { try { await navigator.clipboard.writeText(signInUrl); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* the page is open already */ } }}>{copied ? 'Copied' : 'Copy link'}</button>
+        </>}
+        {!antigravity && <button type="button" className="button small ghost" onClick={() => api('cliSignInCancel', environmentId, engine, accountId)}>Cancel</button>}
+      </div>
+    </div>}
+    {installing && <InstallProgress progress={progress} />}
+    {limits.length > 0 && <div className="sub-limits">{limits.map((limit, index) => <LimitBar key={index} limit={limit} />)}</div>}
     {message && !installing && <p className="cli-settings-error" role="alert">{message}</p>}
     {terminal && <div className="cli-terminal-card">
       <div className="cli-terminal-head">
-        <span>{terminal === 'login' ? (antigravity ? 'Google sign-in' : 'Sign in to Codex') : terminal === 'install' ? <>Installing with <code>npm install -g @openai/codex</code></> : <>Run <code>/usage</code></>}</span>
-        <div className="cli-setting-actions">
-          {terminal === 'usage' && <CopyUsageCommand />}
-          <button type="button" className="button small ghost" aria-label="Close terminal" title="Close terminal" onClick={() => setTerminal(null)}><Icon name="x" size={14} /></button>
-        </div>
+        <span>{terminal === 'login' ? `Sign in with ${brand}` : <>Installing with <code>npm install -g @openai/codex</code></>}</span>
+        <button type="button" className="button small ghost" aria-label="Close terminal" title="Close terminal" onClick={() => setTerminal(null)}><Icon name="x" size={14} /></button>
       </div>
       <CliTerminal key={terminal} environmentId={environmentId} action={terminal} engine={engine} account={accountId} onExit={terminalExited} />
     </div>}
-  </>;
+  </div>;
 }
 
-// One CLI on the chosen machine: its own sign-in, and for Codex any accounts added beside it.
-function EngineAccounts({ environmentId, engine }) {
+// One subscription on the chosen machine, as a list of accounts. Codex can have several: "Add account" signs
+// another one in straight away, and every conversation keeps the account it was started with.
+function SubscriptionCard({ environmentId, engine, children }) {
   const accounts = useStore(s => s.cliAccounts[engine]?.accounts) ?? [];
-  const [adding, setAdding] = useState(false);
-  const [name, setName] = useState('');
+  const signedIn = useStore(s => s.cliReadiness[readinessKey(engine, environmentId)] === 'ready');
+  const [fresh, setFresh] = useState(null); // the account being added, until its sign-in ends either way
   useEffect(() => { void loadCliAccounts(engine); }, [engine]);
-  const add = async event => {
-    event.preventDefault();
-    try { setCliAccounts(engine, await api('addCliAccount', engine, name)); setName(''); setAdding(false); }
-    catch (error) { showError(error); }
+  const extra = accounts.filter(a => a.id !== 'default');
+  const add = async () => {
+    try {
+      const list = await api('addCliAccount', engine, '');
+      setFresh(list.at(-1)?.id ?? null);
+      setCliAccounts(engine, list);
+    } catch (error) { showError(error); }
   };
-  const remove = account => askConfirm({ title: `Remove ${account.name}?`, action: 'Remove',
-    message: `Iris signs this ${engineLabel(engine)} account out on this Mac and forgets it. Conversations must be deleted first.`,
-    run: () => api('removeCliAccount', engine, account.id).then(list => setCliAccounts(engine, list), showError) });
-  return <>
+  const forget = id => api('removeCliAccount', engine, id).then(list => setCliAccounts(engine, list), showError).finally(() => setFresh(current => current === id ? null : current));
+  const remove = account => askConfirm({ title: 'Remove this account?', action: 'Remove',
+    message: `Iris signs it out of ${engineLabel(engine)} on this Mac and forgets it. Conversations started with it must be deleted first.`,
+    run: () => forget(account.id) });
+  return <section className="sub-card" aria-label={engineLabel(engine)}>
+    <header className="sub-card-head">
+      <EngineLogo engine={engine} size={28} />
+      <h3 className="sub-card-title">{engineLabel(engine)}</h3>
+      <span className="sub-card-plan">{SUBSCRIPTION[engine]}</span>
+      {hasAccounts(engine) && environmentId === 'local' && signedIn && !fresh && extra.length < 8 && <button type="button" className="button small sub-add" title={`Sign in to another ${SUBSCRIPTION[engine].replace(/ .*/, '')} account, for example work and personal`} onClick={add}><Icon name="plus" size={13} />Add account</button>}
+    </header>
     <AccountRow environmentId={environmentId} engine={engine} />
-    {hasAccounts(engine) && accounts.filter(a => a.id !== 'default').map(account => <AccountRow key={account.id} environmentId={environmentId} engine={engine} profile={account} onRemove={() => remove(account)} />)}
-    {hasAccounts(engine) && <div className="cli-setting-row cli-add-account">
-      <span className="cli-setting-text"><span className="cli-setting-desc">Another {engineLabel(engine)} account (for example work and personal) gets its own sign-in; each conversation uses the one it was started with.</span></span>
-      {adding
-        ? <form className="cli-setting-actions" onSubmit={add}><input className="cli-account-name" autoFocus value={name} maxLength={40} placeholder="Account name" aria-label="Account name" onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setAdding(false); } }} />
-            <button type="submit" className="button primary" disabled={!name.trim()}>Add</button><button type="button" className="button ghost" onClick={() => setAdding(false)}>Cancel</button></form>
-        : <button type="button" className="button" onClick={() => setAdding(true)}>Add account</button>}
-    </div>}
-  </>;
+    {hasAccounts(engine) && extra.map(account => <AccountRow key={account.id} environmentId={environmentId} engine={engine} profile={account}
+      fresh={fresh === account.id} onAbandon={() => forget(account.id)} onSignedIn={() => setFresh(null)} onRemove={() => remove(account)} />)}
+    {children}
+  </section>;
 }
 
+// Which machine's sign-ins the page shows: each CLI is installed and signed in per machine.
 export function SubscriptionSettings() {
   const initialEnv = useStore(s => s.settingsEnvironmentId ?? s.draft.environmentId);
   const environments = useStore(s => s.environments.filter(e => e.kind === 'local' || (e.added && e.enabled)));
@@ -275,18 +317,19 @@ export function SubscriptionSettings() {
     catch (err) { showError(err); }
     finally { setSaving(false); }
   };
-  return <section className="cli-settings" aria-label="Account settings">
-    <div className="cli-setting-row">
-      <span className="cli-setting-text"><span>Machine</span><span className="cli-setting-desc">Each CLI is installed and signed in separately on each machine. Iris never sees the credentials.</span></span>
+  return <section className="cli-settings" aria-label="Subscriptions">
+    {environments.length > 1 && <div className="sub-machine">
+      <span>Machine</span>
       <Trigger className="cli-machine" label="Machine" width={240} placement="bottom-end"
         menu={close => <MenuSection>{environments.map(env => <MenuItem key={env.id} icon={envIcon(env)} label={env.label} checked={env.id === environmentId} onClick={() => { select(env.id); close(); }} />)}</MenuSection>}>
         <Icon name={envIcon(current)} size={14} /><span>{current?.label ?? 'This computer'}</span><Icon name="chevronDown" size={12} />
       </Trigger>
-    </div>
-    {Object.keys(CLI_ENGINES).map(engine => <EngineAccounts key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine} />)}
-    <div className="cli-setting-row">
-      <span className="cli-setting-text"><span>Antigravity: ask before running tools</span><span className="cli-setting-desc">{bypass ? 'Off: Antigravity runs commands and edits files without asking.' : 'On: each Antigravity command and file edit waits for your approval in the conversation.'} Codex always has full access.</span></span>
-      <button type="button" role="switch" aria-checked={!bypass} aria-label="Antigravity: ask before running tools" className={`switch ${!bypass ? 'on' : ''}`} disabled={saving} onClick={toggle}><span /></button>
-    </div>
+    </div>}
+    {['codex', 'antigravity'].filter(engine => CLI_ENGINES[engine]).map(engine => <SubscriptionCard key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine}>
+      {engine === 'antigravity' && <label className="sub-option">
+        <span>Ask before running commands and editing files</span>
+        <button type="button" role="switch" aria-checked={!bypass} aria-label="Antigravity: ask before running tools" className={`switch ${!bypass ? 'on' : ''}`} disabled={saving} onClick={toggle}><span /></button>
+      </label>}
+    </SubscriptionCard>)}
   </section>;
 }

@@ -36,7 +36,7 @@ export function UsageMetrics({ transcript, antigravity }) {
           <div className="usage-speed-value"><b>~{speed.tps >= 100 ? Math.round(speed.tps) : speed.tps.toFixed(1)}</b><span>tok/s</span></div>
           <span className="usage-speed-kind">Estimated turn TPS</span>
         </div>
-        <span className="muted">{(speed.durationMs / 1000).toFixed(1)}s</span>
+        <span className="usage-speed-note">{(speed.durationMs / 1000).toFixed(1)}s</span>
       </div>
     </div>;
   }
@@ -141,7 +141,7 @@ function BackgroundJobs({ sessionId }) {
     return () => clearInterval(timer);
   }, [list.length, connected]);
   if (!list.length) return null;
-  return <Card title="Background tasks">
+  return <Card title="Background tasks" aside={<span className="panel-pill">{list.length} running</span>}>
     <div className="jobs">
       <div className="jobs-summary">{list.length} running</div>
       {!connected && <div className="jobs-offline">Disconnected — showing last known state</div>}
@@ -173,6 +173,39 @@ function EnvironmentCard({ session }) {
   );
 }
 
+// Agents that Claude Code or Codex started in this conversation (their own Task / spawn-agent tools). Each has
+// its card in the conversation; here they are listed together, and a row leads to its card.
+function EngineAgents({ transcript }) {
+  const agents = useMemo(() => {
+    const out = [];
+    for (const message of transcript?.messages ?? []) {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        const tool = transcript.tools?.[block.id];
+        if (block.type !== 'toolCall' || !(block.name === 'Task' || tool?.result?.details?.kind === 'claude-code-agent')) continue;
+        const a = block.arguments ?? {}, details = tool?.result?.details ?? {};
+        const status = !tool || ['running', 'pending'].includes(tool.status) ? 'running' : ['error', 'cancelled', 'timed_out'].includes(tool.status) ? 'failed' : 'completed';
+        const steps = details.stepCount ?? details.steps?.length ?? 0, tokens = details.agentRuns?.[0]?.usage?.totalTokens;
+        out.push({ id: block.id, status, name: a.description?.trim() || String(a.prompt ?? '').split('\n')[0] || 'Delegated task',
+          caption: [a.subagent_type || 'Agent', status === 'running' ? 'Running' : status === 'failed' ? 'Failed' : 'Completed', steps ? `${steps} step${steps === 1 ? '' : 's'}` : null, tokens > 0 ? `${formatTokens(tokens)} tok` : null].filter(Boolean).join(' · ') });
+      }
+    }
+    return out;
+  }, [transcript]);
+  if (!agents.length) return null;
+  const running = agents.filter(agent => agent.status === 'running').length;
+  const show = id => document.querySelector(`[data-tool-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  return <Card title="Subagents" aside={running ? <span className="panel-pill">{running} running</span> : <span>{agents.length} completed</span>}>
+    <div>
+      {agents.slice(-8).reverse().map(agent => <button key={agent.id} type="button" className={`subagent-task-row ${agent.status}`} onClick={() => show(agent.id)}>
+        {agent.status === 'running' ? <Spinner size={13} /> : <Icon name={agent.status === 'failed' ? 'alert' : 'check'} size={14} />}
+        <span className="subagent-task-text"><span className="subagent-task-name">{agent.name}</span><span className="subagent-task-caption">{agent.caption}</span></span>
+        <Icon name="chevronRight" size={14} />
+      </button>)}
+    </div>
+  </Card>;
+}
+
 export function RightPanel({ session }) {
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
@@ -195,14 +228,13 @@ export function RightPanel({ session }) {
   return (
     <aside className="right-panel">
       <EnvironmentCard session={session} />
-      {(!antigravity || context) && <Card title="Context" aside={<>
-        <span className="muted" title="Context usage reported by the agent">{contextLabel}</span>
-        {percent != null && <span className={`meter ${percent > 100 ? 'over' : ''}`} title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
-      </>} />}
+      {(!antigravity || context) && <Card title="Context" collapsible={false} aside={<span title="Context usage reported by the agent">{contextLabel}{percent != null && Number.isFinite(context?.tokens) ? ` · ${Math.round(percent)}%` : ''}</span>}>
+        {percent != null && <div className={`context-bar ${percent > 100 ? 'over' : percent >= 80 ? 'high' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(Math.min(100, percent))} aria-label="Context window used"><span style={{ width: `${Math.max(1, Math.min(100, percent))}%` }} /></div>}
+      </Card>}
       <UsageCard transcript={transcript} antigravity={antigravity} />
-      {antigravity && !context && !transcript?.messages.some(m => antigravityTurnSpeed(m)) && <div className="grouped-empty">No usage yet</div>}
+      {antigravity && !context && !transcript?.messages.some(m => antigravityTurnSpeed(m)) && <div className="panel-note">No usage yet</div>}
       <BackgroundJobs key={session.id} sessionId={session.id} />
-      {usesPiAgents && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
+      {usesPiAgents ? <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} /> : <EngineAgents transcript={transcript} />}
     </aside>
   );
 }
