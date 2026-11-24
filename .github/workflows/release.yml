@@ -15,10 +15,10 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: 24, cache: npm }
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/electron
@@ -39,7 +39,7 @@ jobs:
         run: |
           node build/release-manifest.mjs
           sh build/smoke-test.sh "release/mac-arm64/Iris.app"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: iris-mac
           compression-level: 0 # DMGs and ZIPs are already compressed
