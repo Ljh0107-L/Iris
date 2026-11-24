@@ -177,5 +177,7 @@ test('Codex is started for the new-conversation screen, and the first message ta
   assert.equal(other.cliAccount, work.id);
   await manager.prompt(other.id, 'hi');
   await repliedOther;
-  assert.equal(calls('home').at(-1).params, join(dir, 'cli-accounts', 'codex', work.id), 'started with that account’s home');
+  // (The default account's standby is starting beside it, so the order of the two in the log is not fixed.)
+  const homes = calls('home').map(c => c.params);
+  assert.equal(homes.filter(home => home === join(dir, 'cli-accounts', 'codex', work.id)).length, 1, 'started once, with that account’s home');
 });
