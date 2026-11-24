@@ -140,8 +140,9 @@ export class SessionManager extends EventEmitter {
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
 
-  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote, claudeAdapterPath, claudeLocal = ensureLocalClaude, claudeRemote = prepareRemoteClaude, claudeEnv = {}, locateCli = findCli, locateRemoteCli = findRemoteCli }) {
+  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote, claudeAdapterPath, claudeLocal = ensureLocalClaude, claudeRemote = prepareRemoteClaude, claudeEnv = {}, locateCli = findCli, locateRemoteCli = findRemoteCli, runRemote = runSsh }) {
     super();
+    this.runRemote = runRemote; // a command on an SSH host (replaced in tests)
     this.focused = null; // the session on screen: never stopped by the sweep
     this.sweeper = setInterval(() => this.sweep().catch(() => {}), SWEEP_MS);
     this.sweeper.unref?.();
@@ -605,8 +606,9 @@ export class SessionManager extends EventEmitter {
     const job = cliSignIn({ bin, local: this.local, engine, home: this.#cliHome(env, null, engine, account),
       onUrl: url => this.emit('cli-sign-in', { environmentId: env.id, engine, account: id ?? 'default', url }) });
     const promise = job.promise.then(({ options, ...status }) => {
-      if (options && !this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length) this.#rememberCliOptions({ engine, environmentId: env.id }, { options });
+      if (options) this.#rememberCliOptions({ engine, environmentId: env.id, cliAccount: account }, { options });
       const result = { installed: true, ...status };
+      this.#rememberIdentity(engine, account, result);
       if (result.signedIn) {
         for (const [spareKey, spare] of this.spares) if (spare.record.engine === engine && spare.record.environmentId === env.id) this.#dropSpare(spareKey);
         const record = this.#recordOf(this.focused), runtime = this.runtimes.get(this.focused);
@@ -616,6 +618,23 @@ export class SessionManager extends EventEmitter {
     }).finally(() => { this.cliSignIns.delete(key); this.emit('cli-sign-in', { environmentId: env.id, engine, account: id ?? 'default', url: null }); });
     this.cliSignIns.set(key, { promise, cancel: job.cancel });
     return promise;
+  }
+  // Sign a host in with the sign-in this Mac already has: Codex keeps it in one file of its home (auth.json),
+  // and carrying that file to another machine of the same person is how Codex itself says to sign in a
+  // machine without a browser. The file goes from Iris's Codex home here to Iris's Codex home there, over
+  // SSH, readable by that user only; Iris does not look inside it.
+  async cliCopySignIn(environmentId, { engine = CODEX_ENGINE, account = null } = {}) {
+    const env = this.env(environmentId);
+    if (env.kind !== 'ssh' || engine !== CODEX_ENGINE) throw new Error('Only a Codex sign-in can be copied to an SSH host.');
+    const local = this.environments().find(e => e.kind === 'local');
+    const source = join(this.#cliHome(local, null, engine, account), 'auth.json');
+    let file;
+    try { file = readFileSync(source); } catch { throw new Error('This Mac is not signed in to that Codex account. Sign in here first.'); }
+    if (!file.length || file.length > 256 * 1024) throw new Error('The sign-in on this Mac could not be read.');
+    const facts = await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE });
+    const home = this.#cliHome(env, facts, engine, account);
+    await this.runRemote(env, `set -e; umask 077; mkdir -p ${shellQuote(home)}; cat > ${shellQuote(`${home}/auth.json.new`)}; mv -f ${shellQuote(`${home}/auth.json.new`)} ${shellQuote(`${home}/auth.json`)}`, { input: file, timeout: 60000 });
+    return this.cliAccountStatus(environmentId, { engine, account });
   }
   cliSignInCancel(environmentId, { engine = CODEX_ENGINE, account = null } = {}) {
     this.cliSignIns?.get(`${engine}:${environmentId}:${this.#cliAccount(engine, account) ?? ''}`)?.cancel();
@@ -637,9 +656,11 @@ export class SessionManager extends EventEmitter {
       const facts = env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null;
       // Antigravity names its models only in a conversation, so to learn them it opens an empty one in this folder.
       const menusDir = menus && engine === ANTIGRAVITY_ENGINE ? (env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-menus') : `${facts.root}/cli-menus`) : null;
-      const { options, ...result } = await cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account), menusDir });
-      // The CLI also said what a new conversation can choose from: its menus exist before the first one opens.
-      if (options && !this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length) this.#rememberCliOptions({ engine, environmentId: env.id }, { options });
+      const { options, ...result } = await cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account), menusDir, run: this.runRemote });
+      // The CLI also said what a new conversation can choose from: its menus exist before the first one opens,
+      // and follow the account (a plan change shows at the next check).
+      if (options) this.#rememberCliOptions({ engine, environmentId: env.id, cliAccount: account }, { options });
+      this.#rememberIdentity(engine, account, result);
       // Antigravity names the plan only together with its menus: kept for the checks that do not ask for them.
       if (engine === ANTIGRAVITY_ENGINE) {
         const plans = this.store.settings.cliPlans ??= {}, planKey = `${engine}:${env.id}`;
@@ -694,8 +715,20 @@ export class SessionManager extends EventEmitter {
   // ---- more than one account for a CLI (Codex): each is a named home directory on every machine.
   // The first, "Default", is the CLI's own home: whatever the user signed in to outside this app.
   cliAccounts(engine = CODEX_ENGINE) {
-    if (!cliEngine(engine).accounts) return [{ id: 'default', name: 'Default' }];
-    return [{ id: 'default', name: 'Default' }, ...(this.store.settings.cliAccounts?.[engine] ?? [])];
+    const who = this.store.settings.cliIdentities?.[engine] ?? {};
+    const named = account => who[account.id] ? { ...account, identity: who[account.id] } : account;
+    if (!cliEngine(engine).accounts) return [named({ id: 'default', name: 'Default' })];
+    return [{ id: 'default', name: 'Default' }, ...(this.store.settings.cliAccounts?.[engine] ?? [])].map(named);
+  }
+  // Who an account was when it was last checked (its e-mail address), so menus can name accounts by it.
+  #rememberIdentity(engine, account, status) {
+    const id = this.#cliAccount(engine, account) ?? 'default';
+    const who = (this.store.settings.cliIdentities ??= {})[engine] ??= {};
+    const identity = status?.signedIn === true && typeof status.identity === 'string' && status.identity ? status.identity : status?.signedIn === false ? null : undefined;
+    if (identity === undefined || (who[id] ?? null) === identity) return;
+    if (identity) who[id] = identity; else delete who[id];
+    try { this.store.saveSettings(); } catch { /* remembered at the next check */ }
+    this.emit('cli-accounts', { engine });
   }
   addCliAccount(engine, name) {
     if (!cliEngine(engine).accounts) throw new Error(`${cliEngine(engine).label} has one sign-in per machine.`);
@@ -721,6 +754,8 @@ export class SessionManager extends EventEmitter {
     await this.cliAccountStatus('local', { logout: true, engine, account: id }).catch(() => {});
     this.store.settings.cliAccounts[engine] = list.filter(a => a.id !== id);
     if (this.store.settings.cliAccountDefault?.[engine] === id) delete this.store.settings.cliAccountDefault[engine];
+    delete this.store.settings.cliIdentities?.[engine]?.[id];
+    for (const key of Object.keys(this.store.settings.cliOptions ?? {})) if (key.startsWith(`${engine}:`) && key.endsWith(`:${id}`)) delete this.store.settings.cliOptions[key];
     this.store.saveSettings();
     return this.cliAccounts(engine);
   }
@@ -738,7 +773,7 @@ export class SessionManager extends EventEmitter {
   // show the same menus before its first message. The CLI is the only source: nothing is guessed.
   #rememberCliOptions(record, state) {
     if (record.spare || !state || state.authRequired || !Array.isArray(state.options) || !state.options.length) return;
-    const key = `${record.engine}:${record.environmentId}`;
+    const key = this.#menuKey(record.engine, record.environmentId, record.cliAccount);
     const slim = (o, nested) => ({ id: o.id, name: o.name, category: o.category, currentValue: o.currentValue,
       options: (o.options ?? []).slice(0, 200).map(choice => ({ value: choice.value, name: choice.name, ...(typeof choice.description === 'string' ? { description: choice.description } : {}),
         // What a model has of its own (efforts, speeds), when the CLI says: shown as soon as that model is picked.
@@ -751,22 +786,28 @@ export class SessionManager extends EventEmitter {
     (this.store.settings.cliOptions ??= {})[key] = options;
     try { this.store.saveSettings(); } catch { /* shown again after the next conversation */ }
   }
-  // The menus for the new-conversation screen. Codex names its models whenever its account is checked;
-  // Antigravity has to be asked, which happens here, when the screen needs them and none are remembered
-  // (at most every half minute while that fails, for example signed out).
-  async askCliOptions(environmentId, engine = ANTIGRAVITY_ENGINE) {
-    const key = `${engine}:${environmentId}`;
-    if (engine === ANTIGRAVITY_ENGINE && !this.store.settings.cliOptions?.[key]?.length && Date.now() - ((this.cliMenusAsked ??= new Map()).get(key) ?? 0) > 30000) {
+  // Menus are kept per machine and, where a CLI has several accounts, per account: the plan decides what a
+  // model offers (a Pro plan has no Ultrafast where a Pro Max plan has).
+  #menuKey(engine, environmentId, account = null) {
+    const id = this.#cliAccount(engine, account);
+    return id ? `${engine}:${environmentId}:${id}` : `${engine}:${environmentId}`;
+  }
+  // The menus for the new-conversation screen, asked for when it needs them and none are remembered (at most
+  // every half minute while that fails, for example signed out). Codex names its models whenever its account
+  // is checked; Antigravity has to open an empty conversation to say.
+  async askCliOptions(environmentId, engine = ANTIGRAVITY_ENGINE, account = null) {
+    const key = this.#menuKey(engine, environmentId, account);
+    if (!this.store.settings.cliOptions?.[key]?.length && Date.now() - ((this.cliMenusAsked ??= new Map()).get(key) ?? 0) > 30000) {
       this.cliMenusAsked.set(key, Date.now());
       try {
         const env = this.env(environmentId);
-        if (await this.#findCli(env, engine)) await this.#readCliAccount(env, false, engine, false, null, true);
+        if (await this.#findCli(env, engine)) await this.#readCliAccount(env, false, engine, false, account, engine === ANTIGRAVITY_ENGINE);
       } catch { /* the menus come with the first conversation instead */ }
     }
-    return this.cliOptions(environmentId, engine);
+    return this.cliOptions(environmentId, engine, account);
   }
-  cliOptions(environmentId, engine = ANTIGRAVITY_ENGINE) {
-    const options = this.store.settings.cliOptions?.[`${engine}:${environmentId}`] ?? [];
+  cliOptions(environmentId, engine = ANTIGRAVITY_ENGINE, account = null) {
+    const options = this.store.settings.cliOptions?.[this.#menuKey(engine, environmentId, account)] ?? [];
     const chosen = this.store.settings.cliChoices?.[engine] ?? {};
     return options.map(o => ({ ...o, currentValue: o.options.some(choice => choice.value === chosen[o.id]) ? chosen[o.id] : o.currentValue }));
   }
@@ -829,7 +870,7 @@ export class SessionManager extends EventEmitter {
     const cached = this.cliBins.get(key);
     if (cached?.expires > Date.now()) return cached.promise;
     const entry = { expires: Infinity, promise: null };
-    entry.promise = Promise.resolve().then(() => engine === ANTIGRAVITY_ENGINE ? this.locateRemoteCli(env) : findRemoteCli(env, { name })).then(bin => {
+    entry.promise = Promise.resolve().then(() => engine === ANTIGRAVITY_ENGINE ? this.locateRemoteCli(env) : findRemoteCli(env, { name, run: this.runRemote })).then(bin => {
       entry.expires = Date.now() + (bin ? 60000 : 3000);
       return bin;
     }, error => {
@@ -900,17 +941,19 @@ export class SessionManager extends EventEmitter {
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
   spares = new Map(); // per engine/environment/workspace -> { id, record, timer }
   warmSequence = 0;
-  #spareKey(environmentId, cwd, engine) {
+  #spareKey(environmentId, cwd, engine, account = null) {
     const target = cwd ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
-    return isCliEngineId(engine) ? `${engine}\n${target}` : target;
+    // A CLI's spare is that CLI, signed in as one account: another account is another process.
+    return isCliEngineId(engine) ? `${engine}\n${this.#cliAccount(engine, account) ?? ''}\n${target}` : target;
   }
-  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder, engine }) {
+  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder, engine, cliAccount = null }) {
     const seq = ++this.warmSequence;
     if (!environmentId) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
-    if (engine === CODEX_ENGINE) return false; // Codex starts in about a second; nothing is kept warm for it
-    const antigravity = engine === ANTIGRAVITY_ENGINE;
+    // A CLI is started ahead of the first message too: Codex spends two to three seconds on its own start and
+    // on reading the account, limits and models, which the first message would otherwise wait for.
+    const antigravity = isCliEngineId(engine);
     // Claude Code: install the binary there in advance (the first message would otherwise wait for it), but
     // only once an Anthropic model is chosen: it is about 200 MB, and without such a model it cannot run.
     if (engine === CLAUDE_ENGINE) {
@@ -918,15 +961,16 @@ export class SessionManager extends EventEmitter {
       if (usable && seq === this.warmSequence) this.prepareClaude(environmentId).catch(() => {});
       return usable;
     }
-    const bin = antigravity ? await this.#findCli(env) : null;
+    const bin = antigravity ? await this.#findCli(env, engine).catch(() => null) : null;
     if (antigravity && (!bin || seq !== this.warmSequence)) return false;
+    const account = antigravity ? this.#cliAccount(engine, cliAccount) : null;
     const cwd = chosen || await this.projectlessRoot(environmentId).catch(() => null);
     if (!cwd || seq !== this.warmSequence) return false;
-    const key = this.#spareKey(environmentId, chosen, engine);
+    const key = this.#spareKey(environmentId, chosen, engine, account);
     for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
     const existing = this.spares.get(key);
     if (existing) { this.#armSpare(key, existing); return true; }
-    const options = antigravity ? { engine } : { model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed) };
+    const options = antigravity ? { engine, ...(account ? { cliAccount: account } : {}) } : { model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed) };
     const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, ...options, spare: true };
     const spare = { id: record.id, record, bin };
     this.spares.set(key, spare);
@@ -1041,7 +1085,7 @@ export class SessionManager extends EventEmitter {
       const picked = Object.entries(cliChoices).filter(([id, value]) => typeof id === 'string' && id.length <= 80 && typeof value === 'string' && value.length <= 200).slice(0, 8);
       if (picked.length) fields.cliChoices = Object.fromEntries(picked);
     }
-    const spareKey = this.#spareKey(environmentId, chosen, engine);
+    const spareKey = this.#spareKey(environmentId, chosen, engine, fields.cliAccount);
     const spare = claude ? null : this.spares.get(spareKey);
     if (spare) {
       this.spares.delete(spareKey);
@@ -1089,7 +1133,7 @@ export class SessionManager extends EventEmitter {
     const session = bin !== spare.bin ? null : runtime?.status === 'connected' ? runtime.session
       : await runtime?.starting?.catch(() => null);
     if (!session || !this.#current(record, runtime) || runtime.session !== session || runtime.status !== 'connected' ||
-      !runtime.cli?.standby || runtime.cli.permissionMode !== this.cliPermissionMode()) {
+      !runtime.cli?.standby || runtime.cli.permissionMode !== this.cliPermissionMode(record)) {
       await this.#stopSpare(spare);
       return null;
     }

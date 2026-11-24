@@ -10,7 +10,8 @@ import { gitReview, remoteGitReviewScript, decodeGitReview } from './git-review.
 import { execFile } from 'node:child_process';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
-import { Terminals } from './terminals.mjs';
+import { Terminals, spawnPty } from './terminals.mjs';
+import { readAntigravityUsage } from './antigravity-usage.mjs';
 import { Updater } from './updater.mjs';
 import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, reviewSessionUpdate, saveSessionUpdate } from './session-update.mjs';
 import { Store } from './store.mjs';
@@ -114,6 +115,7 @@ function publicSettings() {
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
 const terminals = new Terminals({ send });
 let updater = null, installingUpdate = false, updateQuit = false;
+const cliUsage = new Map(); // machine -> the last reading of a CLI's quota, and when
 
 // Check for Updates… in the app menu: always ends in a sentence about where things stand, as other Mac
 // apps do. The sidebar shows the check and the download while they run.
@@ -271,9 +273,31 @@ const api = {
   removeCliAccount: (engine, id) => manager.removeCliAccount(cliEngineOf(engine), id),
   antigravityInstall: (environmentId, engine) => manager.antigravityInstall(environmentId, cliEngineOf(engine)),
   cliSetConfig: (id, configId, value) => manager.cliSetConfig(id, configId, value),
-  cliOptions: (environmentId, engine) => manager.askCliOptions(environmentId, cliEngineOf(engine)),
+  cliOptions: (environmentId, engine, account) => manager.askCliOptions(environmentId, cliEngineOf(engine), account),
   cliSignIn: (environmentId, engine, account) => manager.cliSignIn(environmentId, { engine: cliEngineOf(engine), account }),
   cliSignInCancel: (environmentId, engine, account) => manager.cliSignInCancel(environmentId, { engine: cliEngineOf(engine), account }),
+  cliCopySignIn: (environmentId, engine, account) => manager.cliCopySignIn(environmentId, { engine: cliEngineOf(engine), account }),
+  // Antigravity's quota on this Mac, read from the CLI's own /usage screen (see antigravity-usage.mjs). It
+  // takes some seconds, so a reading is kept for five minutes unless a fresh one is asked for.
+  async cliUsage(environmentId, engine, force = false) {
+    if (cliEngineOf(engine) !== 'antigravity' || environmentId !== 'local') return null;
+    const kept = cliUsage.get(environmentId);
+    if (kept && (kept.pending || (!force && Date.now() - kept.at < 5 * 60000))) return kept.promise;
+    const entry = { at: Date.now(), pending: true, promise: null };
+    entry.promise = (async () => {
+      await manager.local.envReady;
+      const bin = await manager.locateCli();
+      if (!bin) return null;
+      const cwd = join(app.getPath('userData'), 'cli-menus');
+      mkdirSync(cwd, { recursive: true });
+      const env = { ...process.env, ...manager.local.extraEnv, TERM: 'xterm-256color' };
+      delete env.ELECTRON_RUN_AS_NODE;
+      return readAntigravityUsage({ bin, cwd, env, spawnPty });
+    })().then(result => { entry.pending = false; entry.at = Date.now(); if (!result) cliUsage.delete(environmentId); return result; },
+      () => { cliUsage.delete(environmentId); return null; });
+    cliUsage.set(environmentId, entry);
+    return entry.promise;
+  },
   prepareClaudeCode: environmentId => manager.prepareClaude(environmentId).then(layout => ({ ok: true, version: manager.claudeCodeInfo().version, bin: layout.bin }), error => ({ ok: false, error: error.message })),
   agents: id => manager.agents(id),
   jobs: id => manager.jobs(id),
@@ -450,7 +474,7 @@ app.whenReady().then(async () => {
   manager.on('environments-changed', () => send('environments', environments()));
   // A CLI's sign-in page, in the user's browser. Only an https page the CLI itself named is opened.
   manager.on('cli-sign-in', ({ url }) => { if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url).catch(() => {}); });
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code', 'antigravity-install', 'cli-sign-in']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code', 'antigravity-install', 'cli-sign-in', 'cli-accounts']) manager.on(channel, payload => send(channel, payload));
   manager.on('event', ({ id, event }) => attention.event(id, event));
   manager.on('question', ({ id, question }) => attention.question(id, question));
   manager.on('ultra', ({ id, ultra }) => attention.ultra(id, ultra?.task?.status === 'active'));

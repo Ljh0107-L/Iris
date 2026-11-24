@@ -2,6 +2,26 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.2
+
+**Fixed**
+
+- **Speeds follow the account.** Fast and Ultrafast are offered per Codex account: a model shows only the speeds that account's plan has. Before, every account showed the first account's.
+- **The first Codex message starts sooner.** Codex is started when the new-conversation screen opens, and its account, limits and models are read together, so the first message no longer waits two to three seconds for them.
+- **Subscriptions no longer flash "Checking"** each time the page opens: the last result is shown and updated quietly. Sign-in buttons wait for the first check.
+
+**New and changed**
+
+- **Antigravity shows its quota**: the account, and for each group of models how much of the weekly and the five-hour limit is used and when it refreshes. Iris reads this from the CLI's own `/usage` screen, in the background.
+- **Antigravity turns show real token counts** (input, cached, output, thinking) when the CLI reports them, and their speed is computed from those.
+- **Accounts are named by their e-mail address** in the account menu under the message box.
+- **Signing a host in to Codex:** "Use this Mac's sign-in" copies this Mac's Codex sign-in to the host over SSH, so no browser or code is needed there. Signing in on the host itself is still available, and the page to open is offered as a button beside the terminal.
+- **Adding an SSH host says what it is doing**, with sizes while it uploads ("Uploading Pi from this Mac… 21 / 91 MB").
+
+**Known limits:** Antigravity does not stream its thinking, so a long think shows only the timer. Antigravity's quota is read on this Mac only, not yet on SSH hosts. A Codex sign-in copied to a host is the same sign-in as this Mac's: if OpenAI ends it on one, sign in again and copy it once more.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.1
 
 **Fixed**

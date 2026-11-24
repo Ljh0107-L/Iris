@@ -2,6 +2,8 @@
 # Start a throwaway, unprivileged OpenSSH server on 127.0.0.1 for M0 verification.
 # Uses its own host key, client key and known_hosts under $DIR; never touches ~/.ssh.
 # Prints the ssh_config path and host alias, then runs sshd in the foreground (Ctrl-C to stop).
+# IRIS_SSHD_HOME=<dir> gives the "host" a home of its own, so what is installed or signed in there in a
+# test never lands in the developer's own home.
 set -eu
 DIR=${IRIS_SSHD_DIR:-/tmp/iris-sshd}
 PORT=${IRIS_SSHD_PORT:-$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')}
@@ -22,7 +24,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 Subsystem sftp internal-sftp
-SetEnv PATH=$(dirname "$(command -v node)"):/usr/bin:/bin:/usr/sbin:/sbin
+SetEnv PATH=$(dirname "$(command -v node)"):/usr/bin:/bin:/usr/sbin:/sbin${IRIS_SSHD_HOME:+ HOME=$IRIS_SSHD_HOME}
 EOF
 cat > "$DIR/ssh_config" <<EOF
 Host iris-test

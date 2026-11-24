@@ -263,6 +263,7 @@ window.iris.subscribe(({ channel, payload }) => {
       set(s => ({ envStatus: { ...s.envStatus, [payload.id]: payload } }));
       if (payload.status === 'ready') import('./dirs.js').then(d => d.prefetchDir(payload.id)); // the folder browser opens instantly
       break;
+    case 'cli-accounts': void loadCliAccounts(payload.engine); break; // an account's address became known
     case 'cli-sign-in':
       set(s => { const next = { ...s.cliSignIns }, key = `${payload.engine}:${payload.environmentId}:${payload.account}`;
         if (payload.url) next[key] = payload.url; else delete next[key];
@@ -440,7 +441,7 @@ const modelError = message => Object.assign(new Error(message), { action: { labe
 export const setDraft = patch => set(s => {
   let draft = { ...s.draft, ...patch };
   // Another CLI or machine offers other models: choices made for the previous one do not apply.
-  if ((Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) && !Object.hasOwn(patch, 'cliChoices')) draft.cliChoices = {};
+  if ((Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine') || Object.hasOwn(patch, 'cliAccount')) && !Object.hasOwn(patch, 'cliChoices')) draft.cliChoices = {}; // another account has its own menus
   if (Object.hasOwn(patch, 'engine') && !Object.hasOwn(patch, 'cliAccount')) draft.cliAccount = s.cliAccounts[draft.engine]?.selected ?? null;
   if (Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) {
     const preferred = draft.model ?? (isCliEngine(s.draft.engine) ? s.settings?.defaults?.model : null);
@@ -592,12 +593,14 @@ export const setCliAccounts = (engine, accounts) => set(s => ({ cliAccounts: { .
 // An extra account chosen for a new conversation (null: the CLI's own, default one).
 export const draftCliAccount = draft => hasAccounts(draft.engine) && draft.cliAccount && draft.cliAccount !== 'default' ? draft.cliAccount : null;
 // The menus a CLI offered the last time it ran on that machine, for the new-conversation screen.
-export function loadCliOptions(environmentId, engine) {
-  const key = `${engine}:${environmentId}`;
-  return api('cliOptions', environmentId, engine).then(options => set(s => ({ cliDraftOptions: { ...s.cliDraftOptions, [key]: Array.isArray(options) ? options : [] } })), () => {});
+// Menus are per machine and, for a CLI with several accounts, per account (a plan decides a model's speeds).
+export const cliOptionsKey = (engine, environmentId, account = null) => account && account !== 'default' ? `${engine}:${environmentId}:${account}` : `${engine}:${environmentId}`;
+export function loadCliOptions(environmentId, engine, account = null) {
+  const key = cliOptionsKey(engine, environmentId, account);
+  return api('cliOptions', environmentId, engine, account).then(options => set(s => ({ cliDraftOptions: { ...s.cliDraftOptions, [key]: Array.isArray(options) ? options : [] } })), () => {});
 }
 // What a new conversation starts with: the remembered choice of each menu, unless changed in the draft.
-export const cliDraftChoices = draft => Object.fromEntries(cliDraftMenus(state.cliDraftOptions[`${draft.engine}:${draft.environmentId}`] ?? [], draft.cliChoices)
+export const cliDraftChoices = draft => Object.fromEntries(cliDraftMenus(state.cliDraftOptions[cliOptionsKey(draft.engine, draft.environmentId, draftCliAccount(draft))] ?? [], draft.cliChoices)
   .map(option => [option.id, draft.cliChoices?.[option.id] ?? option.currentValue]).filter(([, value]) => typeof value === 'string'));
 // The menus to show for a draft: the model, then that model's own efforts and speeds when another model
 // than the remembered one is picked (and the CLI said what each model has), else the remembered ones.

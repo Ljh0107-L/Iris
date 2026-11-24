@@ -16,6 +16,8 @@ function ensureHelperExecutable() {
   } catch { /* read-only install: packaging sets the bit */ }
 }
 const loadPty = () => { if (!pty) { ensureHelperExecutable(); pty = require('node-pty'); } return pty; };
+// A pseudo-terminal for a program that only talks to one (antigravity-usage.mjs).
+export const spawnPty = (file, args, options) => loadPty().spawn(file, args, options);
 
 const quote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
 

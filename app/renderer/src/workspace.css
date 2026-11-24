@@ -2286,6 +2286,8 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 /* ------------------------------------------------------------ Engine logos: each engine's own icon (Icons.jsx EngineLogo) */
 .engine-logo { flex: none; display: block; object-fit: contain; }
 .code-empty > .engine-mark { width: 56px; height: 56px; opacity: 1; }
+.connection-detail { padding-left: 23px; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.connection-detail.error { color: var(--red); white-space: normal; overflow-wrap: anywhere; }
 .session-engine { flex: none; display: inline-flex; }
 .session-engine-logo, .title-engine-logo { flex: none; border-radius: 4px; }
 .title-button > .title-engine-logo { margin-right: 2px; }

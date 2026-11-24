@@ -17,7 +17,7 @@ const terms = new Map(); // session id -> { term, fit, el, termId, exited }
 const byTermId = new Map();
 
 window.iris.subscribe(({ channel, payload }) => {
-  if (channel === 'term-data') byTermId.get(payload.id)?.term.write(payload.data);
+  if (channel === 'term-data') { const entry = byTermId.get(payload.id); entry?.term.write(payload.data); entry?.onData?.(payload.data); }
   if (channel === 'term-exit') {
     const entry = byTermId.get(payload.id);
     if (entry) {
@@ -80,7 +80,9 @@ export function closeTerminal(sessionId) {
 
 // Short-lived CLI process inside Settings. Keep Google device codes and quota
 // output in the terminal only, not in the session transcript or notifications.
-export function CliTerminal({ environmentId, action, engine = 'antigravity', account = null, onExit }) {
+// onLink(url): the first web page the command prints (a sign-in prints the page to open). A terminal wraps a long
+// address over several lines, where it cannot be clicked, so the page is offered as buttons beside the terminal.
+export function CliTerminal({ environmentId, action, engine = 'antigravity', account = null, onExit, onLink }) {
   const host = useRef(null);
   const [error, setError] = useState(null);
   useEffect(() => {
@@ -97,9 +99,16 @@ export function CliTerminal({ environmentId, action, engine = 'antigravity', acc
     api('termOpenCli', environmentId, action, term.cols, term.rows, engine, account).then(termId => {
       if (disposed) { api('termClose', termId).catch(() => {}); return; }
       id = termId;
+      let printed = '', linked = false;
       byTermId.set(id, { term, onExit: code => {
         term.write(`\r\n\x1b[2m[${engine === 'codex' ? 'Codex' : 'Antigravity'} exited${code ? ` with code ${code}` : ''}]\x1b[0m\r\n`);
         onExit?.(code);
+      }, onData: data => {
+        if (linked || !onLink) return;
+        printed = (printed + data).slice(-8000);
+        // Complete once something follows it (the address is printed in one piece, then a new line).
+        const found = /(https:\/\/[^\s\x1b"'<>]+)[\s\x1b]/.exec(printed.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''));
+        if (found) { linked = true; onLink(found[1]); }
       } });
       return api('termReady', id);
     }).catch(err => { if (!disposed) setError(err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); });
@@ -109,7 +118,7 @@ export function CliTerminal({ environmentId, action, engine = 'antigravity', acc
       if (id) { byTermId.delete(id); api('termClose', id).catch(() => {}); }
       term.dispose();
     };
-  }, [environmentId, action, engine, account, onExit]);
+  }, [environmentId, action, engine, account, onExit, onLink]);
   return <>{error && <p className="cli-settings-error" role="alert">{error}</p>}<div className="cli-settings-terminal" ref={host} /></>;
 }
 

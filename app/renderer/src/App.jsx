@@ -93,9 +93,9 @@ function NewSessionView() {
   // Warm the selected engine's runtime without waiting for the first message.
   useEffect(() => {
     if (!draft.model && !isClaude && !cli) return;
-    const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, engine: draft.engine }).catch(() => {}), 400);
+    const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, engine: draft.engine, cliAccount: draft.cliAccount ?? null }).catch(() => {}), 400);
     return () => clearTimeout(t);
-  }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id, draft.engine, isClaude, cli]);
+  }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id, draft.engine, draft.cliAccount, isClaude, cli]);
   return (
     <div className="new-session">
       <div className="welcome-stage">

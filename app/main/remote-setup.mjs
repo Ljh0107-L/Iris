@@ -246,8 +246,11 @@ async function installNode(env, host, root, cacheDir, onProgress, run, { uploadO
     }
   }
   const local = await downloadLocalNode(release, cacheDir, onProgress);
-  onProgress('Uploading Node.js…');
-  await run(env, `set -e\nmkdir -p ${shellQuote(root)}\n${extract('-')}`, { upload: { path: local, size: statSync(local).size }, timeout: 600000 });
+  const nodeBytes = statSync(local).size, nodeSize = Math.round(nodeBytes / 1048576);
+  onProgress(`Uploading Node.js… 0 / ${nodeSize} MB`);
+  let sent = -1;
+  await run(env, `set -e\nmkdir -p ${shellQuote(root)}\n${extract('-')}`, { upload: { path: local, size: nodeBytes }, timeout: 600000,
+    onUpload: f => { const done = Math.min(nodeSize, Math.floor(f * nodeSize)); if (done !== sent) { sent = done; onProgress(`Uploading Node.js… ${done} / ${nodeSize} MB`); } } });
   return `${dest}/bin/node`;
 }
 
@@ -293,11 +296,11 @@ export async function piBundle(piPackageDir, cacheDir) {
 async function uploadPi(env, root, bundle, onProgress) {
   const q = shellQuote(root);
   const bytes = statSync(bundle.path).size, size = Math.round(bytes / 1048576);
-  onProgress(`Uploading Pi from this Mac (${size} MB)…`);
+  onProgress(`Uploading Pi from this Mac… 0 / ${size} MB`);
   let last = -1;
   await runSsh(env, `set -e; rm -rf ${q}/pi.new; mkdir -p ${q}/pi.new/node_modules; tar -xzf - -C ${q}/pi.new/node_modules; printf '{"private":true}\\n' > ${q}/pi.new/package.json; rm -rf ${q}/pi.old; [ -d ${q}/pi ] && mv ${q}/pi ${q}/pi.old; mv ${q}/pi.new ${q}/pi; rm -rf ${q}/pi.old`, {
     upload: { path: bundle.path, size: bytes }, timeout: 1800000, // streamed from disk, never held in memory
-    onUpload: f => { const pct = Math.floor(f * 100 / 5) * 5; if (pct !== last) { last = pct; onProgress(`Uploading Pi from this Mac… ${pct}%`); } },
+    onUpload: f => { const done = Math.min(size, Math.floor(f * size)); if (done !== last) { last = done; onProgress(`Uploading Pi from this Mac… ${done} / ${size} MB`); } },
   });
 }
 

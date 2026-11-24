@@ -233,6 +233,7 @@ export async function account({ bin, cwd, version, logout = false, home, env = p
 // the browser has come back to it. The credentials stay in Codex's home; this process never sees them.
 // onUrl(url) is called once with the page; `cancelled` resolves if the user gives up.
 const SIGN_IN_MS = 10 * 60 * 1000;
+const STANDBY_MS = 3 * 60 * 1000;
 export async function signIn({ bin, cwd, version, home, env = process.env, onUrl, cancelled = new Promise(() => {}) }) {
   let finish;
   const completed = new Promise(resolve => { finish = resolve; });
@@ -291,7 +292,10 @@ function speedOption(model, speed) {
 
 export class CodexAdapter {
   constructor({ boot, write, env = process.env }) {
-    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, home } = boot?.codex ?? {};
+    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, home, standby } = boot?.codex ?? {};
+    // Standby: started for the new-conversation screen, before there is a conversation. Codex is running and
+    // has said who is signed in and what it offers; the thread is opened when the first message names its folder.
+    this.standby = standby === true && sessionFile == null;
     this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true, home: text(home) && isAbsolute(home) ? home : undefined };
     this.write = write; this.env = env;
     this.controls = Promise.resolve();
@@ -316,7 +320,8 @@ export class CodexAdapter {
   }
   #command(r) {
     switch (r.type) {
-      case 'get_state': return this.#serial(async () => { await this.#ensureReady(); this.write({ type: 'cli_permissions', ids: [...this.permissions.keys()] }); return this.#state(); });
+      case 'get_state': return this.#serial(async () => { if (this.standby) await this.#connect(); else await this.#ensureReady(); this.write({ type: 'cli_permissions', ids: [...this.permissions.keys()] }); return this.#state(); });
+      case 'cli_activate': return this.#serial(() => this.#activate(r.cwd));
       case 'cli_login': throw new Error(this.config.remote ? 'Run codex login --device-auth in the SSH host’s terminal, then reconnect.' : 'Sign in to Codex from Settings → Subscriptions, then reconnect.');
       case 'cli_set_config': return this.#serial(() => this.#setConfig(r.configId, r.value));
       case 'prompt': {
@@ -347,7 +352,7 @@ export class CodexAdapter {
   #cliState() {
     return { authRequired: this.authRequired, canSignIn: false, options: this.#options(), image: true,
       permissionMode: this.config.bypassPermissions ? 'bypassPermissions' : 'confirm', commands: COMMANDS, contextUsage: this.contextUsage,
-      ...(this.account ? { account: this.account } : {}) };
+      ...(this.account ? { account: this.account } : {}), ...(this.standby ? { standby: true } : {}) };
   }
   #state() {
     return { engine: ENGINE, sessionId: this.transcript?.header.id ?? null, sessionFile: this.transcript?.file ?? null,
@@ -356,23 +361,37 @@ export class CodexAdapter {
   }
   #updateState() { if (!this.closed) this.write({ type: 'cli_state', cli: this.#cliState() }); }
 
-  async #ensureReady() {
-    const tr = this.#transcript();
-    if (this.peer && !this.peer.closed && (this.threadId || this.authRequired)) return;
+  // Codex itself, running: who is signed in, the limits and the models. The three are asked together: each
+  // waits on Codex's start-up or the network, and one after another they held the first message for seconds.
+  async #connect() {
+    if (this.peer && !this.peer.closed) return this.peer;
     if (!text(this.config.bin)) throw new Error('The configured Codex CLI could not be started.');
-    this.write({ type: 'cli_opening' });
     const peer = await connect({ bin: this.config.bin, cwd: this.config.cwd, env: this.env, version: this.config.clientVersion, home: this.config.home, handlers: {
       onNotification: (from, method, params) => this.#notification(from, method, params),
       onRequest: (from, id, method, params) => this.#request(from, id, method, params),
       onClose: (from, reason) => this.#disconnected(from, reason),
     } });
     this.peer = peer;
-    const read = await peer.request('account/read', { refreshToken: false });
-    if (!read?.account && read?.requiresOpenaiAuth !== false) { this.authRequired = true; this.account = null; this.#updateState(); return; }
-    this.authRequired = false;
-    const [limits, models] = await Promise.all([peer.request('account/rateLimits/read', undefined).catch(() => null), peer.request('model/list', {}).catch(() => ({ data: [] }))]);
-    this.account = accountOf(read, limits);
-    this.models = visibleModels(models);
+    const [read, limits, models] = await Promise.all([peer.request('account/read', { refreshToken: false }),
+      peer.request('account/rateLimits/read', undefined).catch(() => null), peer.request('model/list', {}).catch(() => ({ data: [] }))]);
+    if (!read?.account && read?.requiresOpenaiAuth !== false) { this.authRequired = true; this.account = null; this.models = []; }
+    else { this.authRequired = false; this.account = accountOf(read, limits); this.models = visibleModels(models); }
+    return peer;
+  }
+  async #activate(cwd) {
+    if (!text(cwd) || !isAbsolute(cwd) || (!this.standby && cwd !== this.config.cwd)) throw new Error('Invalid Codex workspace.');
+    this.config.cwd = cwd;
+    this.standby = false;
+    await this.#ensureReady();
+    return this.#state();
+  }
+  async #ensureReady() {
+    if (this.standby) throw new Error('Open the Codex conversation first.');
+    const tr = this.#transcript();
+    if (this.peer && !this.peer.closed && (this.threadId || this.authRequired)) return;
+    this.write({ type: 'cli_opening' });
+    const peer = await this.#connect();
+    if (this.authRequired) { this.#updateState(); return; }
     // "Ask before running tools" means ask: with `on-request` Codex runs anything inside the workspace
     // without a word. `untrusted` lets only commands it knows to be read-only pass unasked.
     const policy = this.config.bypassPermissions ? { approvalPolicy: 'never', sandbox: 'danger-full-access' } : { approvalPolicy: 'untrusted', sandbox: 'workspace-write' };
@@ -793,4 +812,6 @@ if (isMain && ['--account-check', '--account-logout'].includes(process.argv[2]))
   for (const event of ['end', 'close', 'error']) process.stdin.on(event, shutdown);
   process.stdout.on('error', shutdown);
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, shutdown);
+  // A standby nobody took over does not stay: the app drops it too, this is for an app that went away.
+  if (adapter.standby) setTimeout(() => { if (adapter.standby) shutdown(); }, STANDBY_MS).unref();
 }

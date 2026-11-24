@@ -304,6 +304,14 @@ function selectConfig(options) {
   });
 }
 
+// What the CLI reports for a finished turn: tokens read (of which from cache), written, and of those, thought.
+function turnUsage(usage) {
+  const n = value => Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+  const input = n(usage?.inputTokens), output = n(usage?.outputTokens);
+  if (input == null || output == null) return null;
+  const cacheRead = n(usage.cachedReadTokens) ?? 0, cacheWrite = n(usage.cachedWriteTokens) ?? 0, reasoning = n(usage.thoughtTokens);
+  return { input: Math.max(0, input - cacheRead), output, cacheRead, cacheWrite, ...(reasoning == null ? {} : { reasoning }), totalTokens: n(usage.totalTokens) ?? input + output };
+}
 const STOP = new Map([['end_turn', 'stop'], ['max_tokens', 'length'], ['max_turn_requests', 'length'], ['refusal', 'stop'], ['cancelled', 'aborted']]);
 const PERMISSIONS = new Map([['allow_once', 'Allow once'], ['allow_always', 'Allow and remember'], ['reject_once', 'Reject once'], ['reject_always', 'Reject and remember']]);
 const cancelled = { outcome: { outcome: 'cancelled' } };
@@ -587,6 +595,7 @@ class AntigravityAdapter {
     turn.done = this.peer.request('session/prompt', { sessionId: turn.sessionId, prompt: user.content }, null).then(
       ({ result }) => {
         const reason = STOP.get(result?.stopReason);
+        turn.usage = turnUsage(result?.usage);
         this.#finishTurn(turn, reason ?? 'error', reason ? null : 'Antigravity returned an unrecognized stop reason.');
         return !!reason;
       }, error => {
@@ -666,7 +675,8 @@ class AntigravityAdapter {
     // ACP does not expose individual model request timestamps or token counts.
     // Keep elapsed turn time separate from the provider metering used by Pi.
     const __agyTurn = { durationMs: Math.max(1, Math.round(performance.now() - turn.requestedAt)), tokenEstimate: estimateOutput(turn.content) };
-    let message = { ...this.#assistant(turn, turn.content), __agyTurn, stopReason, ...(errorMessage ? { errorMessage } : {}) };
+    // The CLI's own token counts for the turn, when it gives them (with the turn's length, they give its speed).
+    let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
     const results = [...turn.tools.values()].map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
     catch { message = { ...message, stopReason: 'error', errorMessage: 'Could not save this turn to the Antigravity transcript.' }; }

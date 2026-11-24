@@ -26,7 +26,9 @@ function Card({ title, children, open: initial = true, aside, collapsible = true
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
 export function UsageMetrics({ transcript, antigravity }) {
-  if (antigravity) {
+  // Antigravity: token counts when the CLI reported them (then it is shown as the others are); from an older
+  // CLI, or a turn without counts, only an estimate of the turn's speed.
+  if (antigravity && !(transcript?.messages ?? []).some(m => m.role === 'assistant' && m.usage)) {
     const reply = (transcript?.messages ?? []).findLast(m => antigravityTurnSpeed(m));
     const speed = antigravityTurnSpeed(reply);
     if (!speed) return null;

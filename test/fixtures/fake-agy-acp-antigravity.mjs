@@ -123,6 +123,8 @@ lines.on('line', line => {
         save({ ...cache(), signedIn: false });
         authRequired(r.id); break;
       }
+      // A turn with the token counts the CLI gives (cached tokens are part of the input it reports).
+      if (text === 'counted') { chunk('Counted.'); reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 24, cachedReadTokens: 600, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 1024 } }); break; }
       if (text === 'simple' || bypass) { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }
       turn = { id: r.id, permission: `permission-${++nextPermission}`, text };
       chunk('foreign session should be ignored', 'wrong-session');

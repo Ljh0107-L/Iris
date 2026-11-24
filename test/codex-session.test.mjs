@@ -1,7 +1,8 @@
 // A Codex conversation through the session manager and this machine's relay, with a stand-in CLI.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { SessionManager } from '../app/main/session-manager.mjs';
@@ -77,7 +78,7 @@ test('Codex: found on the login PATH, opened with the choices made beforehand, a
   await manager.delete(first.id); await manager.delete(second.id);
 
   // A second account is a second home directory: its own sign-in, and conversations that stay with it.
-  assert.deepEqual(manager.cliAccounts('codex'), [{ id: 'default', name: 'Default' }]);
+  assert.deepEqual(manager.cliAccounts('codex'), [{ id: 'default', name: 'Default', identity: 'dev@example.test' }], 'named by who signed in, once it has been checked');
   assert.deepEqual(manager.cliAccounts('antigravity'), [{ id: 'default', name: 'Default' }]);
   assert.throws(() => manager.addCliAccount('antigravity', 'Second'), /one sign-in per machine/);
   const [, work] = manager.addCliAccount('codex', '  Work  ');
@@ -107,5 +108,74 @@ test('Codex: found on the login PATH, opened with the choices made beforehand, a
   assert.equal(calls('home').at(-1).params, home, 'the conversation runs as that account');
   await assert.rejects(manager.removeCliAccount('codex', work.id), /1 conversation uses this account/);
   await manager.delete(third.id);
-  assert.deepEqual(await manager.removeCliAccount('codex', work.id), [{ id: 'default', name: 'Default' }]);
+  assert.deepEqual(await manager.removeCliAccount('codex', work.id), [{ id: 'default', name: 'Default', identity: 'dev@example.test' }]);
+});
+
+test('a host is signed in with this Mac’s Codex sign-in: the one file, into Iris’s Codex home there, for that user only', { timeout: 20000 }, async t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pdx-copy-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const store = new Store(join(dir, 'data'), null, { insecureTestStorage: true });
+  const root = resolve('.'), hostRoot = join(dir, 'host', '.iris');
+  const ran = [];
+  // The host is played by this machine: the same shell script runs here, fed the same bytes.
+  const runRemote = async (env, script, { input } = {}) => { if (!script.includes('auth.json')) return ''; ran.push({ host: env.host, script }); return execFileSync('sh', ['-c', script], { input, encoding: 'utf8' }); }; // no Codex is found on this "host"
+  const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'This computer' }, { id: 'ssh:lab', kind: 'ssh', enabled: true, added: true, label: 'Lab', host: 'lab' }],
+    piVersion: '0', bridgePath: join(root, 'agent/iris-bridge.js'), relayPath: join(root, 'agent/iris-relay.mjs'), cacheDir: join(dir, 'cache'),
+    local: { node: process.execPath, piCli: join(dir, 'no-pi.js'), agentDir: join(dir, 'agent'), runDir: join(dir, 'run'), uploadDir: join(dir, 'uploads'), extraEnv: {} },
+    remoteSetup: async () => ({ root: hostRoot, node: '/usr/bin/node' }), locateRemoteCli: async () => null, runRemote });
+  t.after(() => manager.shutdown?.().catch(() => {}));
+  await assert.rejects(manager.cliCopySignIn('ssh:lab', { engine: 'codex' }), /not signed in to that Codex account/, 'nothing to copy before this Mac is signed in');
+  await assert.rejects(manager.cliCopySignIn('local', { engine: 'codex' }), /Only a Codex sign-in can be copied to an SSH host/);
+  const here = join(dir, 'cli-accounts', 'codex', 'default');
+  mkdirSync(here, { recursive: true }); writeFileSync(join(here, 'auth.json'), '{"fixture":"sign-in"}');
+  const status = await manager.cliCopySignIn('ssh:lab', { engine: 'codex' });
+  assert.deepEqual(status, { installed: false }, 'the host is then checked the usual way (this fixture has no Codex there)');
+  const there = join(hostRoot, 'cli-accounts', 'codex', 'default');
+  assert.equal(readFileSync(join(there, 'auth.json'), 'utf8'), '{"fixture":"sign-in"}');
+  assert.equal(statSync(join(there, 'auth.json')).mode & 0o777, 0o600, 'readable by that user only');
+  assert.equal(statSync(there).mode & 0o077, 0, 'in a private directory');
+  assert.equal(existsSync(join(there, 'auth.json.new')), false);
+  assert.ok(ran.length === 1 && ran[0].host === 'lab' && !ran[0].script.includes('fixture'), 'the file travels on standard input, not in the command line');
+});
+
+test('Codex is started for the new-conversation screen, and the first message takes that process over', { timeout: 60000 }, async t => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pdx-warm-')));
+  const bin = join(dir, 'bin'), log = join(dir, 'calls.jsonl'), workDir = join(dir, 'work');
+  for (const d of [bin, workDir]) mkdirSync(d);
+  writeFileSync(join(bin, 'codex'), FAKE_CODEX); chmodSync(join(bin, 'codex'), 0o755); writeFileSync(log, '');
+  const calls = method => readFileSync(log, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(c => c.method === method);
+  const root = resolve('.');
+  const store = new Store(join(dir, 'data'), null, { insecureTestStorage: true });
+  const manager = new SessionManager({ store, environments: () => listEnvironments({ sshConfig: '/dev/null' }), piVersion: '0', bridgePath: join(root, 'agent/iris-bridge.js'), relayPath: join(root, 'agent/iris-relay.mjs'), cacheDir: join(dir, 'cache'),
+    local: { node: process.execPath, piCli: join(dir, 'no-pi.js'), agentDir: join(dir, 'agent'), runDir: join(dir, 'run'), uploadDir: join(dir, 'uploads'),
+      extraEnv: { PATH: `${bin}${delimiter}${process.env.PATH}`, FAKE_CODEX_LOG: log, FAKE_CODEX_SIGNED_OUT: join(dir, 'signed-out') } } });
+  t.after(async () => { await manager.shutdown?.().catch(() => {}); rmSync(dir, { recursive: true, force: true }); });
+  // Iris's own Codex home is signed in (what `codex login` leaves there).
+  mkdirSync(join(dir, 'cli-accounts', 'codex', 'default'), { recursive: true }); writeFileSync(join(dir, 'cli-accounts', 'codex', 'default', 'auth.json'), '{}');
+  assert.equal(await manager.prewarm({ environmentId: 'local', cwd: workDir, engine: 'codex' }), true);
+  const [spare] = manager.spares.values();
+  await manager.ensureStarted(spare.id, spare.record);
+  assert.deepEqual([calls('initialize').length, calls('account/read').length, calls('model/list').length, calls('thread/start').length], [1, 1, 1, 0], 'running, account and models read; no conversation yet');
+  assert.equal(manager.runtimes.get(spare.id).cli.standby, true);
+  assert.deepEqual(store.sessions, [], 'a standby is not a conversation');
+  const settled = () => new Promise(done => { const on = ({ event }) => { if (event.type === 'agent_settled') { manager.off('event', on); done(); } }; manager.on('event', on); });
+  const replied = settled();
+  const created = await manager.create({ environmentId: 'local', cwd: workDir, engine: 'codex', prompt: 'hi', creationId: 'pending:warm' });
+  assert.equal(created.id, spare.id, 'the first message takes the standby over');
+  assert.equal(manager.spares.size, 0);
+  await manager.prompt(created.id, 'hi');
+  await replied;
+  const threads = calls('thread/start').filter(c => !c.params.ephemeral); // (the title is asked for in a thread of its own)
+  assert.deepEqual([calls('initialize').length, calls('account/read').length, threads.length], [1, 1, 1], 'the same Codex process: nothing is started or read again');
+  assert.equal(threads[0].params.cwd, workDir);
+  // Another account is another process: a standby for the default account is not used for it.
+  await manager.prewarm({ environmentId: 'local', cwd: workDir, engine: 'codex' });
+  const [, work] = manager.addCliAccount('codex', 'Work');
+  mkdirSync(join(dir, 'cli-accounts', 'codex', work.id), { recursive: true }); writeFileSync(join(dir, 'cli-accounts', 'codex', work.id, 'auth.json'), '{}');
+  const repliedOther = settled();
+  const other = await manager.create({ environmentId: 'local', cwd: workDir, engine: 'codex', prompt: 'hi', creationId: 'pending:other', cliAccount: work.id });
+  assert.equal(other.cliAccount, work.id);
+  await manager.prompt(other.id, 'hi');
+  await repliedOther;
+  assert.equal(calls('home').at(-1).params, join(dir, 'cli-accounts', 'codex', work.id), 'started with that account’s home');
 });

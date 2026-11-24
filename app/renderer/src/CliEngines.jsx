@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Spinner, Trigger, envIcon } from './ui.jsx';
 import { CliTerminal } from './TerminalPanel.jsx';
-import { api, askConfirm, cliDraftMenus, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
+import { api, askConfirm, cliDraftMenus, cliOptionsKey, draftCliAccount, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
 import { CLI_ENGINES, engineLabel, hasAccounts, readinessKey } from './engines.js';
 import './cli-engines.css';
 
@@ -36,6 +36,8 @@ export function CliSetup({ environmentId, engine = 'antigravity' }) {
   </button>;
 }
 
+// An account by who it is (its e-mail address, once it has been checked), else by its name in Iris.
+const accountLabel = account => account.identity || account.name;
 // Which of the CLI's accounts a new conversation uses (Codex), once there is more than one.
 export function DraftCliAccount({ engine }) {
   const known = useStore(s => s.cliAccounts[engine]);
@@ -47,21 +49,23 @@ export function DraftCliAccount({ engine }) {
   return <Trigger label="Account" title={`${engineLabel(engine)} account for this conversation`} width={260} placement="top-start"
     menu={close => <>
       <MenuSection title={`${engineLabel(engine)} account`}>
-        {accounts.map(a => <MenuItem key={a.id} icon="key" label={a.name} checked={a.id === current.id} onClick={() => { close(); setDraft({ cliAccount: a.id }); }} />)}
+        {accounts.map(a => <MenuItem key={a.id} icon="key" label={accountLabel(a)} checked={a.id === current.id} onClick={() => { close(); setDraft({ cliAccount: a.id }); }} />)}
       </MenuSection>
       <div className="menu-foot"><MenuItem icon="settings" label="Manage accounts…" onClick={() => { close(); openSubscriptions(); }} /></div>
     </>}>
-    <Icon name="key" size={13} /><span>{current.name}</span><Icon name="chevronDown" size={11} />
+    <Icon name="key" size={13} /><span>{accountLabel(current)}</span><Icon name="chevronDown" size={11} />
   </Trigger>;
 }
 
 // Model and effort for a conversation that has not started: the menus this CLI offered last time on this
 // machine, with the last choices selected. They are applied when the conversation opens.
 export function DraftCliOptions({ environmentId, engine }) {
-  const options = useStore(s => s.cliDraftOptions[`${engine}:${environmentId}`]) ?? [];
+  // The account the conversation will use: each has the menus of its own plan.
+  const account = useStore(s => draftCliAccount(s.draft));
+  const options = useStore(s => s.cliDraftOptions[cliOptionsKey(engine, environmentId, account)]) ?? [];
   const chosen = useStore(s => s.draft.cliChoices) ?? {};
   const ready = useStore(s => s.cliReadiness[readinessKey(engine, environmentId)] === 'ready');
-  useEffect(() => { void loadCliOptions(environmentId, engine); }, [environmentId, engine]);
+  useEffect(() => { void loadCliOptions(environmentId, engine, account); }, [environmentId, engine, account]);
   // Signed in, but the CLI has not said what it offers on this machine yet: it starts on its own default.
   if (!options.length) return ready ? <span className="trigger static" title={`${engineLabel(engine)} lists its models once a conversation has started on this machine`}><span className="strong">Default model</span></span> : null;
   return <>
@@ -115,7 +119,8 @@ function SessionAccount({ session }) {
   const accounts = useStore(s => s.cliAccounts[session.engine]?.accounts);
   useEffect(() => { if (session.cliAccount) void loadCliAccounts(session.engine); }, [session.engine, session.cliAccount]);
   if (!session.cliAccount) return null;
-  const name = accounts?.find(a => a.id === session.cliAccount)?.name ?? 'Removed account';
+  const found = accounts?.find(a => a.id === session.cliAccount);
+  const name = found ? accountLabel(found) : 'Removed account';
   return <span className="trigger cli-session-account" title={`${engineLabel(session.engine)} account: ${name}`}><Icon name="key" size={13} /><span>{name}</span></span>;
 }
 
@@ -136,32 +141,55 @@ const planName = plan => plan ? `${String(plan).replace(/^(pro|plus|team|free|bu
 const SUBSCRIPTION = { codex: 'ChatGPT plan', antigravity: 'Google account' };
 // How much of one limit is used, as a bar: "5-hour limit · 42% used · resets 3:00 PM".
 function LimitBar({ limit }) {
-  const span = limit.windowMinutes >= 10080 ? 'Weekly' : limit.windowMinutes >= 1440 ? 'Daily' : limit.windowMinutes ? `${Math.round(limit.windowMinutes / 60)}-hour` : 'Usage';
+  const span = limit.label ?? `${limit.windowMinutes >= 10080 ? 'Weekly' : limit.windowMinutes >= 1440 ? 'Daily' : limit.windowMinutes ? `${Math.round(limit.windowMinutes / 60)}-hour` : 'Usage'} limit`;
   const used = Math.max(0, Math.min(100, Math.round(limit.usedPercent)));
   const at = limit.resetsAt ? new Date(limit.resetsAt) : null;
   const resets = at && !Number.isNaN(at.getTime()) ? ` · resets ${at.getTime() - Date.now() < 86400000 ? at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : '';
   return <div className="sub-limit">
-    <span className="sub-limit-name">{span} limit</span>
-    <span className={`sub-limit-bar ${used >= 90 ? 'high' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={used} aria-label={`${span} limit used`}><span style={{ width: `${used}%` }} /></span>
+    <span className="sub-limit-name" title={span}>{span}</span>
+    <span className={`sub-limit-bar ${used >= 90 ? 'high' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={used} aria-label={`${span} used`}><span style={{ width: `${used}%` }} /></span>
     <span className="sub-limit-text">{used}% used{resets}</span>
   </div>;
 }
 
 // One account of a CLI on the chosen machine. fresh: it was just added, so its sign-in starts at once and,
 // if that is given up, the account is dropped again (onAbandon).
+const lastAccountStatus = new Map(); // "engine:machine:account" -> what its last check found, while the app runs
+const lastUsage = new Map();         // the same key -> Antigravity's last quota reading
 function AccountRow({ environmentId, engine, profile = null, fresh = false, onRemove, onAbandon, onSignedIn }) {
   const antigravity = engine === 'antigravity';
   const local = environmentId === 'local';
   const accountId = profile?.id ?? null; // an extra Codex account; null is the CLI's own sign-in
   const progress = useStore(s => s.antigravityInstalls[`${environmentId}:${engine}`] ?? (antigravity ? s.antigravityInstalls[environmentId] : null));
   const signInUrl = useStore(s => s.cliSignIns[`${engine}:${environmentId}:${accountId ?? 'default'}`]);
-  const [account, setAccount] = useState(null);
+  // What the last check found is shown at once when the page opens again; the new check then updates it
+  // quietly, so a row says "Checking" only the first time.
+  const statusKey = `${engine}:${environmentId}:${accountId ?? 'default'}`;
+  const [account, setAccountState] = useState(() => lastAccountStatus.get(statusKey) ?? null);
+  const setAccount = useCallback(value => setAccountState(previous => {
+    const next = typeof value === 'function' ? value(previous) : value;
+    if (next?.installed != null) lastAccountStatus.set(statusKey, next);
+    return next;
+  }), [statusKey]);
   const [checking, setChecking] = useState(true);
   const [requesting, setRequesting] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState(null);
   const [terminal, setTerminal] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [terminalLink, setTerminalLink] = useState(null); // the page a sign-in in the terminal says to open
+  // Antigravity's quota and account come from the CLI's own /usage screen, read in the background: it takes
+  // some seconds, so the last reading is shown meanwhile.
+  const [usage, setUsage] = useState(() => lastUsage.get(statusKey) ?? null);
+  const [readingUsage, setReadingUsage] = useState(false);
+  const readUsage = useCallback(async force => {
+    if (!antigravity || !local) return;
+    setReadingUsage(true);
+    try { const found = await api('cliUsage', environmentId, engine, !!force); if (found) { lastUsage.set(statusKey, found); setUsage(found); } }
+    catch { /* the row still says who is signed in */ }
+    finally { setReadingUsage(false); }
+  }, [antigravity, local, environmentId, engine, statusKey]);
   const installing = requesting || !!installLabels[progress?.stage];
   const check = useCallback(async () => {
     setChecking(true); setError(null);
@@ -176,7 +204,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
       return result;
     } catch (err) { setError(cleanError(err)); return null; }
     finally { setChecking(false); }
-  }, [environmentId, engine, accountId]);
+  }, [environmentId, engine, accountId, setAccount]);
   const install = async () => {
     setRequesting(true);
     try { await api('antigravityInstall', environmentId, engine); }
@@ -200,7 +228,18 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
       const message = cleanError(err);
       if (fresh) handlers.current.onAbandon?.(); else if (!/cancelled/i.test(message)) setError(message);
     } finally { setSigningIn(false); }
-  }, [local, environmentId, engine, accountId, fresh]);
+  }, [local, environmentId, engine, accountId, fresh, setAccount]);
+  // On a host, Codex can take the sign-in this Mac already has: no browser or code needed there.
+  const copySignIn = async () => {
+    setCopying(true); setError(null);
+    try {
+      const result = await api('cliCopySignIn', environmentId, engine, accountId);
+      setAccount(result);
+      if (!accountId) reportCliAccount(environmentId, result, engine);
+      if (!result.signedIn) throw new Error('The host did not accept the sign-in. Sign in on the host instead.');
+    } catch (err) { setError(cleanError(err)); }
+    finally { setCopying(false); }
+  };
   const started = useRef(false);
   useEffect(() => {
     if (installing) return;
@@ -213,8 +252,9 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     catch (err) { setError(cleanError(err)); }
     finally { setChecking(false); }
   };
-  const terminalExited = useCallback(code => { if (!code) void check(); }, [check]);
+  const terminalExited = useCallback(code => { setTerminalLink(null); if (!code) void check(); }, [check]);
   const signedIn = account?.signedIn === true;
+  useEffect(() => { if (signedIn) void readUsage(false); }, [signedIn, readUsage]);
   const message = progress?.stage === 'error' ? progress.message : error;
   // What is true on that machine right now, in two or three words.
   const state = installing ? 'Installing' : signingIn ? 'Signing in' : !account ? (checking ? 'Checking' : 'Could not check')
@@ -223,9 +263,9 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     : checking ? 'Checking' : 'Could not check';
   const busy = state === 'Checking' || state === 'Installing' || state === 'Signing in';
   // Signed in, the row is the account: who, and on which plan.
-  const who = signedIn ? (account.identity || profile?.name || 'Signed in') : profile?.name;
+  const who = signedIn ? (account.identity || usage?.identity || profile?.name || 'Signed in') : profile?.name;
   const plan = signedIn ? planName(account.plan) : null;
-  const limits = signedIn ? account.limits ?? [] : [];
+  const limits = signedIn ? (account.limits?.length ? account.limits : usage?.limits ?? []) : [];
   const brand = antigravity ? 'Google' : 'ChatGPT';
   return <div className="sub-account">
     <div className="sub-account-row">
@@ -234,11 +274,12 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
       {plan && <span className="sub-plan">{plan}</span>}
       {!installing && !signingIn && <div className="sub-actions">
         {account?.installed ? <>
-          {signedIn && <button type="button" className="tool-button" aria-label="Refresh" title="Refresh" disabled={checking} onClick={check}>{checking ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>}
+          {signedIn && <button type="button" className="tool-button" aria-label="Refresh" title="Refresh" disabled={checking || readingUsage} onClick={() => { void check(); void readUsage(true); }}>{checking || readingUsage ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>}
           {signedIn ? (profile ? <button type="button" className="button small" title="Sign out and remove this account from Iris" onClick={onRemove}>Remove</button>
               : !antigravity && <button type="button" className="button small" disabled={checking} onClick={signOut}>Sign out</button>)
             : <>
-              <button type="button" className="button small primary" disabled={terminal === 'login' || (local && checking)} onClick={signIn}>Sign in with {brand}</button>
+              {!local && !antigravity && <button type="button" className="button small primary" disabled={checking || copying || terminal === 'login'} title="Copies this Mac’s Codex sign-in to the host over SSH" onClick={copySignIn}>{copying ? 'Copying…' : 'Use this Mac’s sign-in'}</button>}
+              <button type="button" className={`button small ${!local && !antigravity ? '' : 'primary'}`} disabled={terminal === 'login' || checking || copying} onClick={signIn}>{!local && !antigravity ? 'Sign in on the host' : `Sign in with ${brand}`}</button>
               {profile && <button type="button" className="button small ghost" onClick={onRemove}>Remove</button>}
             </>}
         </> : account?.installed === false ? (antigravity ? <button type="button" className="button small primary" onClick={install}>Install</button>
@@ -258,13 +299,20 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     </div>}
     {installing && <InstallProgress progress={progress} />}
     {limits.length > 0 && <div className="sub-limits">{limits.map((limit, index) => <LimitBar key={index} limit={limit} />)}</div>}
+    {signedIn && !limits.length && readingUsage && <div className="sub-reading" role="status"><Spinner size={11} />Reading quota from the CLI…</div>}
     {message && !installing && <p className="cli-settings-error" role="alert">{message}</p>}
     {terminal && <div className="cli-terminal-card">
       <div className="cli-terminal-head">
         <span>{terminal === 'login' ? `Sign in with ${brand}` : <>Installing with <code>npm install -g @openai/codex</code></>}</span>
-        <button type="button" className="button small ghost" aria-label="Close terminal" title="Close terminal" onClick={() => setTerminal(null)}><Icon name="x" size={14} /></button>
+        <div className="sub-actions">
+          {terminal === 'login' && terminalLink && <>
+            <button type="button" className="button small primary" onClick={() => api('openExternal', terminalLink)}>Open sign-in page</button>
+            <button type="button" className="button small" onClick={async () => { try { await navigator.clipboard.writeText(terminalLink); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* it is in the terminal too */ } }}>{copied ? 'Copied' : 'Copy link'}</button>
+          </>}
+          <button type="button" className="button small ghost" aria-label="Close terminal" title="Close terminal" onClick={() => setTerminal(null)}><Icon name="x" size={14} /></button>
+        </div>
       </div>
-      <CliTerminal key={terminal} environmentId={environmentId} action={terminal} engine={engine} account={accountId} onExit={terminalExited} />
+      <CliTerminal key={terminal} environmentId={environmentId} action={terminal} engine={engine} account={accountId} onExit={terminalExited} onLink={setTerminalLink} />
     </div>}
   </div>;
 }

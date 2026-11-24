@@ -184,6 +184,17 @@ async function ask(peer, message) {
 
 const answer = (peer, question, payload) => peer.send({ type: 'extension_ui_response', id: question.id, ...payload });
 
+test('a turn carries the token counts the CLI reports: input apart from cached, output, and thought', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'counted' });
+  await peer.next(event('agent_settled'));
+  const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
+  assert.deepEqual(reply.usage, { input: 400, output: 24, cacheRead: 600, cacheWrite: 0, reasoning: 22, totalTokens: 1024 });
+  assert.ok(reply.durationMs > 0, 'with the length of the turn, for its speed');
+});
+
 test('negotiates ACP v1 as Iris, handles personal auth and serializes concurrent sign-in', { timeout: 12000 }, async t => {
   const f = fixture(t, { loginFailure: true });
   const peer = f.start();

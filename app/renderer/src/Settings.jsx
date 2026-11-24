@@ -276,6 +276,8 @@ function ConnectionCard({ env }) {
         <Toggle on={env.enabled} label={`Use ${env.label}`} onChange={async on => { setEnvironments(await api('setConnectionEnabled', env.id, on)); if (on) check(false); }} />
         <div className="connection-main">
           <div className="row-identity"><Icon name={env.source === 'manual' ? 'globe' : 'terminal'} size={15} className="connection-icon" /><span className="row-name" title={env.detail}>{env.label}</span></div>
+          {/* What is happening on the host, in words: setting one up takes a while (Node and Pi are uploaded). */}
+          {state !== 'off' && status.text && <span className={`connection-detail ${state}`} role={state === 'preparing' ? 'status' : undefined} title={status.text}>{status.text}</span>}
         </div>
         <div className="row-actions">
           <span className={`connection-state ${state}`} title={status.text}>{state === 'preparing' ? <Spinner size={12} /> : <span className={`status-dot ${status.dot}`} />}</span>

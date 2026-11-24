@@ -27,8 +27,9 @@
 .sub-actions .button { white-space: nowrap; }
 .sub-waiting { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--muted); }
 .sub-limits { display: grid; gap: 7px; padding: 8px 0 4px; }
-.sub-limit { display: grid; grid-template-columns: 96px minmax(80px, 1fr) 190px; align-items: center; gap: 12px; font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
-.sub-limit-name { color: var(--text-2); }
+.sub-limit { display: grid; grid-template-columns: minmax(96px, 170px) minmax(80px, 1fr) 190px; align-items: center; gap: 12px; font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
+.sub-limit-name { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-reading { display: flex; align-items: center; gap: 7px; padding: 6px 0 2px; font-size: var(--fs-sm); color: var(--muted); }
 .sub-limit-text { text-align: right; white-space: nowrap; }
 .sub-limit-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 [data-theme="dark"] .sub-limit-bar { background: rgba(255, 255, 255, 0.09); }
