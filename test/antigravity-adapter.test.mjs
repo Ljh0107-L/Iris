@@ -184,14 +184,29 @@ async function ask(peer, message) {
 
 const answer = (peer, question, payload) => peer.send({ type: 'extension_ui_response', id: question.id, ...payload });
 
-test('a turn carries the token counts the CLI reports: input apart from cached, output, and thought', { timeout: 12000 }, async t => {
+test('the task list is one Tasks card kept current, and an agent Antigravity starts is a task with its role and brief', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'steps' });
+  await peer.next(event('agent_settled'));
+  const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
+  const calls = reply.content.filter(block => block.type === 'toolCall');
+  assert.deepEqual(calls.map(call => call.name), ['TodoWrite', 'Task'], 'three calls of the list tool are one card');
+  assert.deepEqual(calls[0].arguments.todos, [{ content: 'Start sub-agent', status: 'completed' }, { content: 'Report', status: 'completed' }], 'as the list stood at the end');
+  assert.deepEqual(calls[1].arguments, { description: 'Greeter', prompt: 'Reply with the word hi', subagent_type: 'Agent', model: 'flash_lite' });
+  const ended = peer.events.filter(event('tool_execution_end'));
+  assert.deepEqual(ended.map(e => [e.toolName, e.isError]), [['TodoWrite', false], ['Task', false]], 'each ends once');
+});
+
+test('a turn carries the token counts the CLI reports: input, cached, output, and thought', { timeout: 12000 }, async t => {
   const f = fixture(t, {}, true);
   const peer = f.start();
   const state = await peer.request('get_state');
   await peer.request('prompt', { message: 'counted' });
   await peer.next(event('agent_settled'));
   const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
-  assert.deepEqual(reply.usage, { input: 400, output: 24, cacheRead: 600, cacheWrite: 0, reasoning: 22, totalTokens: 1024 });
+  assert.deepEqual(reply.usage, { input: 1000, output: 24, cacheRead: 600, cacheWrite: 0, reasoning: 22, totalTokens: 1624 });
   assert.ok(reply.durationMs > 0, 'with the length of the turn, for its speed');
 });
 

@@ -221,10 +221,11 @@ export async function account({ bin, cwd, version, logout = false, home, env = p
   const peer = await connect({ bin, cwd, env, version, home });
   try {
     if (logout) await peer.request('account/logout', undefined);
-    const read = await peer.request('account/read', { refreshToken: false });
+    // Asked together: the account and the limits are each a request to OpenAI of about a second.
+    const [read, limits, models] = await Promise.all([peer.request('account/read', { refreshToken: false }),
+      peer.request('account/rateLimits/read', undefined).catch(() => null), peer.request('model/list', {}).catch(() => null)]);
     if (!read?.account) return accountOf(read, null);
     // Signed in: also what a new conversation can choose from, so its menus exist before the first one opens.
-    const [limits, models] = await Promise.all([peer.request('account/rateLimits/read', undefined).catch(() => null), peer.request('model/list', {}).catch(() => null)]);
     return { ...accountOf(read, limits), options: optionsOf(visibleModels(models)) };
   } finally { peer.close(); }
 }
@@ -528,22 +529,60 @@ export class CodexAdapter {
     }
     if (item.type === 'mcpToolCall') return [{ name: `mcp__${item.server}__${item.tool}`, arguments: item.arguments && typeof item.arguments === 'object' ? item.arguments : {} }];
     if (item.type === 'webSearch') return [{ name: 'WebSearch', arguments: { query: item.query ?? '' } }];
-    // An agent Codex starts of its own (its spawn-agent tool) shows as a task, as Claude Code's agents do.
-    if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') {
-      const prompt = typeof item.prompt === 'string' ? item.prompt : '';
-      return [{ name: 'Task', arguments: { description: prompt.split('\n')[0].slice(0, 120) || 'Agent', prompt, subagent_type: 'Agent', ...(text(item.model) ? { model: item.model } : {}) } }];
+    // An agent Codex starts of its own shows as a task, as Claude Code's agents do. Codex announces it with a
+    // "started" activity that names the agent's own thread; what the agent then does arrives as that thread's
+    // events (#agentEvent), and a later activity says how it ended (#agentEnded).
+    if (item.type === 'subAgentActivity' && item.kind === 'started' && text(item.agentThreadId)) {
+      const name = String(item.agentPath ?? '').split('/').filter(Boolean).at(-1)?.replace(/[_-]+/g, ' ').trim();
+      return [{ name: 'Task', arguments: { description: name ? name[0].toUpperCase() + name.slice(1) : 'Agent', prompt: '', subagent_type: 'Agent', ...(text(item.model) ? { model: item.model } : {}) } }];
     }
     return [];
   }
-  // Codex reports an agent's state with each of its agent tools (spawn, wait, close…), keyed by the agent's
-  // thread. The task stays open from the spawn until one of them says the agent has ended.
-  #agentStates(turn, item) {
-    const ended = { completed: false, shutdown: false, errored: true, interrupted: true, notFound: true };
-    for (const [thread, state] of Object.entries(item.agentsStates ?? {})) {
-      const tool = turn.agents?.get(thread);
-      if (!tool || tool.message || !(state?.status in ended)) continue;
-      this.#toolEnd(tool, ended[state.status], clip(state.message ?? '') || (ended[state.status] ? `The agent ended: ${state.status}.` : 'The agent finished.'));
+  // What an agent's own thread reports: its brief (the message it was started with), each thing it does, and
+  // what it says. Shown as the steps of its task; nothing of it is part of the conversation's own reply.
+  #agentEvent(turn, agent, method, params) {
+    const item = params.item, tool = agent.tool;
+    if (!item || tool.message) return;
+    if (method === 'item/completed' && item.type === 'userMessage' && !tool.call.arguments.prompt) {
+      const brief = (item.content ?? []).filter(part => part?.type === 'text').map(part => part.text).join('\n').trim();
+      if (!brief) return;
+      Object.assign(tool.call.arguments, { prompt: clip(brief, 4000), description: brief.split('\n')[0].slice(0, 120) });
+      this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: tool.call });
+      return;
     }
+    if (method === 'item/completed' && item.type === 'agentMessage' && text(item.text)) { agent.text = item.text; agent.steps.push({ type: 'text', text: clip(item.text, 2000) }); }
+    else if (method === 'item/started') for (const { diff, ...shape } of this.#toolsOf(item)) agent.steps.push({ type: 'tool', id: `${item.id}:${agent.steps.length}`, name: shape.name, arguments: shape.arguments });
+    else return;
+    const last = agent.steps.at(-1);
+    this.write({ type: 'tool_execution_update', toolCallId: tool.call.id, toolName: tool.call.name, args: {}, partialResult: { content: [{ type: 'text', text: last.type === 'tool' ? `${last.name} ${JSON.stringify(last.arguments ?? {}).slice(0, 200)}` : last.text.split('\n')[0] }],
+      details: { kind: 'claude-code-agent', engine: ENGINE, stepCount: agent.steps.length, steps: agent.steps.slice(-50) } } });
+  }
+  // Codex's plan for the turn (its update-plan tool), shown as the Tasks card Claude Code's checklist has. Each
+  // update is the whole plan: the card is made with the first and kept current after that.
+  #planUpdated(turn, plan) {
+    const todos = (Array.isArray(plan) ? plan : []).filter(step => text(step?.step)).slice(0, 50)
+      .map(step => ({ content: step.step.slice(0, 300), status: step.status === 'inProgress' ? 'in_progress' : step.status === 'completed' ? 'completed' : 'pending' }));
+    if (!todos.length) return;
+    if (!turn.plan) {
+      this.#endBlock(turn);
+      const call = { type: 'toolCall', id: randomUUID(), name: 'TodoWrite', arguments: { todos } };
+      turn.plan = { call, index: turn.content.push(call) - 1, start: Date.now(), output: '' };
+      turn.tools.set(`plan:${call.id}`, [turn.plan]);
+      this.#delta({ type: 'toolcall_start', contentIndex: turn.plan.index, id: call.id, toolName: call.name });
+      this.#delta({ type: 'toolcall_end', contentIndex: turn.plan.index, toolCall: call });
+      this.write({ type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: call.arguments });
+      this.#toolEnd(turn.plan, false, 'Tasks updated.');
+      return;
+    }
+    turn.plan.call.arguments = { todos };
+    this.#delta({ type: 'toolcall_end', contentIndex: turn.plan.index, toolCall: turn.plan.call });
+  }
+  #agentEnded(turn, item) {
+    const agent = turn.agents?.get(item.agentThreadId);
+    if (!agent || agent.tool.message) return;
+    const failed = item.kind !== 'completed';
+    this.#toolEnd(agent.tool, failed, clip(agent.text ?? '') || (failed ? `The agent ended: ${item.kind}.` : 'The agent finished.'),
+      { kind: 'claude-code-agent', stepCount: agent.steps.length, steps: agent.steps.slice(-200) });
   }
   #itemStarted(turn, item) {
     if (turn.tools.has(item.id)) return;
@@ -556,6 +595,7 @@ export class CodexAdapter {
       this.#delta({ type: 'toolcall_start', contentIndex: tool.index, id: call.id, toolName: call.name });
       this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: call });
       this.write({ type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: call.arguments });
+      if (item.type === 'subAgentActivity') (turn.agents ??= new Map()).set(item.agentThreadId, { tool, steps: [], text: '' });
       return tool;
     }));
   }
@@ -578,15 +618,7 @@ export class CodexAdapter {
     if (item.type === 'agentMessage' || item.type === 'reasoning') { if (turn.blockItem === item.id) this.#endBlock(turn); return; }
     if (item.type === 'fileChange') this.#patchUpdated(turn, item); else if (!turn.tools.has(item.id)) this.#itemStarted(turn, item);
     const declined = item.status === 'declined';
-    if (item.type === 'collabAgentToolCall') {
-      const [tool] = turn.tools.get(item.id) ?? [];
-      if (tool && !tool.message) {
-        if (item.status === 'failed' || item.status === 'interrupted' || !item.receiverThreadIds?.length) this.#toolEnd(tool, true, 'Codex could not start the agent.');
-        else for (const thread of item.receiverThreadIds) (turn.agents ??= new Map()).set(thread, tool);
-      }
-      this.#agentStates(turn, item);
-      return;
-    }
+    if (item.type === 'subAgentActivity') { if (item.kind !== 'started') this.#agentEnded(turn, item); return; } // its start is a task of its own (#itemStarted)
     for (const tool of turn.tools.get(item.id) ?? []) {
       if (tool.message) continue;
       if (item.type === 'commandExecution') {
@@ -603,8 +635,8 @@ export class CodexAdapter {
       }
     }
   }
-  #toolEnd(tool, isError, shown) {
-    const content = [{ type: 'text', text: shown }], details = { engine: ENGINE };
+  #toolEnd(tool, isError, shown, more = null) {
+    const content = [{ type: 'text', text: shown }], details = { engine: ENGINE, ...more };
     tool.message = { role: 'toolResult', toolCallId: tool.call.id, toolName: tool.call.name, content, details, isError, timestamp: Date.now() };
     this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError, durationMs: Date.now() - tool.start });
   }
@@ -612,7 +644,7 @@ export class CodexAdapter {
     if (this.turn !== turn) return;
     this.#cancelPermissions();
     this.#endBlock(turn);
-    const agentTools = new Set(turn.agents?.values());
+    const agentTools = new Set([...(turn.agents?.values() ?? [])].map(agent => agent.tool));
     for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, stopReason === 'aborted' || !agentTools.has(tool), stopReason === 'aborted' ? 'Interrupted.' : agentTools.has(tool) ? 'The agent was still running when this turn ended.' : 'Codex did not report the result.');
     const u = turn.usage;
     const usage = u ? { input: Math.max(0, (u.inputTokens ?? 0) - (u.cachedInputTokens ?? 0)), output: u.outputTokens ?? 0, cacheRead: u.cachedInputTokens ?? 0, cacheWrite: u.cacheWriteInputTokens ?? 0,
@@ -691,9 +723,12 @@ export class CodexAdapter {
       return;
     }
     const turn = this.turn;
+    const agent = turn?.agents?.get(params.threadId); // an agent Codex started in this turn reports on a thread of its own
+    if (agent) { this.#agentEvent(turn, agent, method, params); return; }
     if (!turn || params.threadId !== this.threadId) return;
     switch (method) {
       case 'turn/started': turn.id ??= params.turn?.id; break;
+      case 'turn/plan/updated': this.#planUpdated(turn, params.plan); break;
       case 'item/started': if (params.item) this.#itemStarted(turn, params.item); break;
       case 'item/agentMessage/delta': this.#chunk(turn, 'text', params.itemId, params.delta); break;
       case 'item/reasoning/summaryTextDelta': case 'item/reasoning/textDelta': this.#chunk(turn, 'thinking', params.itemId, params.delta); break;

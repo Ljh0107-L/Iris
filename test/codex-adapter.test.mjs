@@ -109,16 +109,23 @@ test('commands show what was run and what Codex recognised, a patch is one diff 
   assert.deepEqual(saved.content.filter(b => b.type === 'toolCall').map(c => c.name), ['grep', 'read', 'edit', 'write', 'bash']);
 });
 
-test('an agent Codex starts is a task that stays open from the spawn until Codex says the agent has finished', { timeout: 20000 }, async t => {
+test('an agent Codex starts is a task with the agent’s brief, steps and answer; its plan is a Tasks card kept current', { timeout: 20000 }, async t => {
   const f = fixture(t), a = f.start();
   await a.rpc('get_state');
   await a.rpc('prompt', { message: 'delegate the parser check' });
   await a.next(settled);
-  const started = a.events.filter(e => e.type === 'tool_execution_start'), ended = a.events.filter(e => e.type === 'tool_execution_end');
-  assert.deepEqual(started.map(e => [e.toolName, e.args.description, e.args.subagent_type, e.args.model]), [['Task', 'Check the parser', 'Agent', 'gpt-a']], 'one task for the spawn; the wait is not a step of its own');
-  assert.deepEqual(ended.map(e => [e.toolName, e.isError, e.result.content[0].text]), [['Task', false, 'Three edge cases: empty input, nested quotes, trailing comma.']], 'closed by the report of the wait');
-  assert.ok(a.events.indexOf(ended[0]) > a.events.indexOf(started[0]));
-  assert.equal(lastReply(a.events).content.find(b => b.type === 'text').text, 'The agent found three edge cases.');
+  const reply = lastReply(a.events);
+  const calls = reply.content.filter(b => b.type === 'toolCall');
+  assert.deepEqual(calls.map(c => c.name), ['TodoWrite', 'Task'], 'one Tasks card and one task: the agent’s own steps are not steps of the conversation');
+  assert.deepEqual(calls[0].arguments.todos, [{ content: 'Check the parser', status: 'completed' }, { content: 'Report', status: 'in_progress' }], 'the last plan Codex sent');
+  assert.deepEqual([calls[1].arguments.description, calls[1].arguments.subagent_type, calls[1].arguments.model], ['Check the parser', 'Agent', 'gpt-a']);
+  assert.match(calls[1].arguments.prompt, /Read src\/parser\.js/, 'the brief is what the agent was started with');
+  const ended = a.events.filter(e => e.type === 'tool_execution_end' && e.toolName === 'Task');
+  assert.equal(ended.length, 1, 'ended once: the later "interrupted" is Codex closing an agent that had finished');
+  assert.deepEqual([ended[0].isError, ended[0].result.content[0].text], [false, 'Three edge cases: empty input, nested quotes, trailing comma.']);
+  assert.deepEqual([ended[0].result.details.kind, ended[0].result.details.stepCount, ended[0].result.details.steps.map(s => s.type === 'tool' ? s.name : 'text')], ['claude-code-agent', 2, ['read', 'text']]);
+  assert.ok(a.events.some(e => e.type === 'tool_execution_update' && e.toolName === 'Task' && e.partialResult.details.stepCount === 1), 'steps show while the agent works');
+  assert.equal(reply.content.filter(b => b.type === 'text').map(b => b.text).join(''), 'The agent found three edge cases.', 'nothing the agent said is in the reply');
 });
 
 test('the login-shell wrapper and unified diffs are read the way the shell and git write them', () => {

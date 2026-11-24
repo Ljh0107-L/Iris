@@ -304,13 +304,28 @@ function selectConfig(options) {
   });
 }
 
-// What the CLI reports for a finished turn: tokens read (of which from cache), written, and of those, thought.
+// Antigravity's own tools, by what the CLI sends for them: `update_steps` carries the whole task list,
+// `invoke_subagent` the role and the brief of an agent it starts.
+function stepsOf(update) {
+  const steps = update?.rawInput?.steps;
+  if (!/update_steps/i.test(update?.title ?? '') || !Array.isArray(steps)) return null;
+  return steps.filter(step => text(step?.title)).slice(0, 50).map(step => ({ content: step.title.slice(0, 300),
+    status: step.status === 'done' || step.status === 'completed' ? 'completed' : step.status === 'in_progress' ? 'in_progress' : 'pending' }));
+}
+function agentOf(tool) {
+  const raw = tool.raw;
+  if (!/invoke_subagent/i.test(tool.title ?? '') || !text(raw?.Prompt)) return null;
+  return { name: 'Task', arguments: { description: (text(raw.Role) ? raw.Role : raw.Prompt.split('\n')[0]).slice(0, 120), prompt: raw.Prompt.slice(0, 4000),
+    subagent_type: text(raw.TypeName) && raw.TypeName !== 'self' ? raw.TypeName.slice(0, 40) : 'Agent', ...(text(raw.Model) ? { model: raw.Model.slice(0, 60) } : {}) } };
+}
+// What the CLI reports for a finished turn: tokens read, read from cache (counted apart: its total is the sum of
+// input, cached and output), written, and of those written, thought.
 function turnUsage(usage) {
   const n = value => Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
   const input = n(usage?.inputTokens), output = n(usage?.outputTokens);
   if (input == null || output == null) return null;
   const cacheRead = n(usage.cachedReadTokens) ?? 0, cacheWrite = n(usage.cachedWriteTokens) ?? 0, reasoning = n(usage.thoughtTokens);
-  return { input: Math.max(0, input - cacheRead), output, cacheRead, cacheWrite, ...(reasoning == null ? {} : { reasoning }), totalTokens: n(usage.totalTokens) ?? input + output };
+  return { input, output, cacheRead, cacheWrite, ...(reasoning == null ? {} : { reasoning }), totalTokens: n(usage.totalTokens) ?? input + cacheRead + output };
 }
 const STOP = new Map([['end_turn', 'stop'], ['max_tokens', 'length'], ['max_turn_requests', 'length'], ['refusal', 'stop'], ['cancelled', 'aborted']]);
 const PERMISSIONS = new Map([['allow_once', 'Allow once'], ['allow_always', 'Allow and remember'], ['reject_once', 'Reject once'], ['reject_always', 'Reject and remember']]);
@@ -332,7 +347,7 @@ const estimateOutput = blocks => Math.max(0, Math.round(blocks.reduce((n, block)
   return n + cjk + (printed.length - cjk) / 4;
 }, 0)));
 
-class AntigravityAdapter {
+export class AntigravityAdapter {
   constructor({ boot, write, env = process.env }) {
     const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, standby, home } = boot?.antigravity ?? {};
     // home: Iris's own Antigravity data directory, so its conversations stay out of the user's own
@@ -632,25 +647,35 @@ class AntigravityAdapter {
   #tool(turn, update) {
     if (!text(update.toolCallId)) return;
     let tool = turn.tools.get(update.toolCallId);
+    // Antigravity keeps its task list with a tool it calls again for every change. All of a turn's calls are
+    // one Tasks card, kept current, as the list is one thing.
+    const steps = stepsOf(update);
+    if (!tool && steps && turn.plan) { tool = turn.plan; turn.tools.set(update.toolCallId, tool); }
     if (!tool) {
       this.#endBlock(turn);
       tool = { id: randomUUID(), index: turn.content.length, start: Date.now(), paths: [], result: [] };
       turn.tools.set(update.toolCallId, tool);
+      if (steps) turn.plan = tool;
     }
     if (text(update.kind)) tool.kind = update.kind;
     if (text(update.title)) tool.title = update.title;
+    if (update.rawInput && typeof update.rawInput === 'object') tool.raw = update.rawInput;
     if (Array.isArray(update.locations)) tool.paths = shownPaths(update.locations);
     if (Array.isArray(update.content)) tool.result = shownContent(update.content);
-    const call = { type: 'toolCall', id: tool.id, name: tool.title ?? tool.kind ?? 'Antigravity tool',
+    // Its task list and the agents it starts are shown as Claude Code's are: a Tasks card, and a task with its brief.
+    const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } } : agentOf(tool);
+    const call = known ? { type: 'toolCall', id: tool.id, ...known } : { type: 'toolCall', id: tool.id, name: tool.title ?? tool.kind ?? 'Antigravity tool',
       arguments: tool.paths.length ? { path: tool.paths[0], ...(tool.paths.length > 1 ? { paths: tool.paths } : {}) } : {} };
+    if (known) tool.fallback = known.name === 'TodoWrite' ? 'Tasks updated.' : 'The agent was started; it reports back to Antigravity.';
     turn.content[tool.index] = call;
     if (!tool.call) this.#delta({ type: 'toolcall_start', contentIndex: tool.index, id: call.id, toolName: call.name });
     this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: call });
     if (!tool.call) this.write({ type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: call.arguments });
     tool.call = call;
     if (update.status === 'completed' || update.status === 'failed') {
+      if (tool.message) return; // the Tasks card of an earlier call, updated above
       tool.finished = true;
-      this.#toolEnd(tool, update.status === 'failed', update.status === 'failed' ? 'Tool failed.' : 'Tool completed.');
+      this.#toolEnd(tool, update.status === 'failed', update.status === 'failed' ? 'Tool failed.' : tool.fallback ?? 'Tool completed.');
     } else if (!tool.finished && !turn.cancelled && tool.result.length) {
       this.write({ type: 'tool_execution_update', toolCallId: call.id, toolName: call.name, args: call.arguments,
         partialResult: { content: tool.result, details: { engine: ENGINE } } });

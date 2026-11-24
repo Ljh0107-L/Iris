@@ -1,7 +1,8 @@
 /* Workspace visual system: Prism. White light and its spectrum, after the app's mark (a rainbow >_ on white).
    Surfaces are cool neutrals and controls are ink (--accent); the canvas and the sidebar are split by hairlines.
-   The spectrum (--spectrum) is kept for what is alive: the focused composer, the open conversation's marker,
-   the working cursor and progress. One blue (--signal) marks state that needs colour: links, "on", attention.
+   The spectrum (--spectrum) is kept for what is alive: the focused composer, the working cursor and progress.
+   It is not decoration: nothing that only marks a place or a value is drawn in it. One blue (--signal) marks
+   state that needs colour: links, "on", attention.
    Type scale 12 / 13 / 14 on a 21px reading line · radius scale 6 / 8 / 10 / 12. */
 :root {
   color-scheme: light;
@@ -43,6 +44,7 @@
   --code-border: transparent;
   --code-text: #26262b;
   --code-block: #f6f6f8;
+  --terminal-bg: #f6f6f8;
   --code-head: #eeeef2;
   --text: #111114;
   --prose: #16161a;
@@ -66,7 +68,6 @@
   /* The mark's six colours. The looping one starts and ends on the same colour, so it can slide without a seam. */
   --spectrum: linear-gradient(90deg, #ff5e57, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de);
   --spectrum-loop: linear-gradient(90deg, #ff5e57, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de, #ff5e57);
-  --spectrum-v: linear-gradient(180deg, #ff5e57, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de);
   --specular: none;
   --shadow-pop: 0 16px 40px rgba(17, 17, 20, 0.12), 0 2px 8px rgba(17, 17, 20, 0.06);
   --shadow-card: none;
@@ -99,6 +100,7 @@
   --code-border: transparent;
   --code-text: #dedee2;
   --code-block: #0d0d0f;
+  --terminal-bg: #0d0d0f;
   --code-head: #18181b;
   --text: #f2f2f4;
   --prose: #f2f2f4;
@@ -293,7 +295,6 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .session-row { margin: 0 0 2px; border-radius: var(--r-md); }
 .session-row:hover { background: var(--row-hover); }
 .session-row.active { position: relative; background: var(--row-current); box-shadow: var(--row-current-edge); }
-.session-row.active::before { content: ''; position: absolute; left: 0; top: 7px; bottom: 7px; width: 3px; border-radius: 2px; background: var(--spectrum-v); }
 .session-row-main { height: 32px; padding: 0 4px 0 10px; gap: 8px; }
 .session-title {
   font-size: var(--fs-base);
@@ -338,6 +339,9 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 }
 .main-head.welcome-head { border-bottom-color: transparent; }
 .main-head.no-sidebar { padding-left: 84px; }
+/* Full screen has no traffic lights to leave room for. */
+:root[data-fullscreen] .sidebar-top { padding-left: 8px; }
+:root[data-fullscreen] .main-head.no-sidebar { padding-left: 12px; }
 .header-context {
   flex: 1;
   min-width: 0;
@@ -1870,7 +1874,7 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .usage-speed-note { font-size: var(--fs-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
 .spark { height: 30px; max-width: 110px; gap: 3px; }
 .spark span { width: 5px; border-radius: 2px; background: var(--border-strong); }
-.spark span:last-child { background: var(--spectrum-v); }
+.spark span:last-child { background: var(--muted); }
 .usage-table { gap: 6px 14px; font-size: var(--fs-xs); line-height: 1.4; padding-top: 10px; border-top: 1px solid var(--hairline); }
 .usage-table > span { color: var(--text); }
 .usage-table .th { font-size: 11px; font-weight: 400; color: var(--faint); padding-bottom: 0; }
@@ -2011,7 +2015,7 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
   display: flex;
   flex-direction: column;
   padding: 17px 16px 12px;
-  background: var(--bg);
+  background: var(--sidebar);
   border-right: 1px solid var(--divider);
   overflow-y: auto;
 }
@@ -2028,7 +2032,7 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 }
 .settings-sidebar .nav-item > svg { width: 18px; height: 18px; margin: 0; color: var(--text); }
 .settings-sidebar .nav-item.active { background: var(--row-active); color: var(--text); font-weight: 400; }
-.settings-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
+.settings-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 .settings-content { flex: 1; overflow-y: auto; padding: 16px 28px 40px 17px; }
 .settings-content > * { max-width: none; margin-left: 0; margin-right: 0; }
 .settings-title {
@@ -2080,7 +2084,7 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .add-button:hover { background: var(--row-hover); border-color: var(--border-strong); color: var(--text); }
 .settings-empty { border: 1px solid var(--border); background: var(--bg-raised); padding: 32px; }
 
-.toasts { top: 56px; right: 14px; bottom: auto; left: auto; transform: none; justify-items: end; gap: 6px; max-width: 380px; }
+.toasts { top: 56px; left: 50%; right: auto; bottom: auto; transform: translateX(-50%); justify-items: center; gap: 6px; max-width: min(420px, calc(100vw - 32px)); }
 .toast {
   background: var(--bg-raised);
   border: 1px solid var(--border);
@@ -2173,7 +2177,9 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .sidebar-update > .update-button { width: 100%; height: 32px; margin-bottom: 6px; justify-content: center; border-radius: var(--r-md); }
 .update-button { background: var(--accent); color: var(--accent-fg); box-shadow: none; }
 .update-button.downloading { background: var(--surface-2); color: var(--text); }
-.update-fill { background: var(--spectrum); opacity: 0.55; }
+/* A progress bar is the whole spectrum, uncovered from the left as the work advances: the colours stay where
+   they are, and how far they reach is the progress. (--progress: 0 to 1.) */
+.update-fill { inset: 0; background: var(--spectrum); opacity: 0.55; clip-path: inset(0 calc(100% - var(--progress, 0) * 100%) 0 0); transition: clip-path .3s ease; }
 .turn-stats .stat.accent, .turn-stats .stat.accent svg { color: var(--signal); }
 .resize-handle:hover::after, body.resizing .resize-handle::after { background: var(--border-strong); }
 
@@ -2197,9 +2203,10 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .hljs-type, .hljs-title.class_, .hljs-class .hljs-title { color: #0284c7; }
 .hljs-attr, .hljs-attribute, .hljs-property, .hljs-variable, .hljs-params { color: #4f46e5; }
 .hljs-deletion { color: var(--red); }
-.fp-image img { background: repeating-conic-gradient(#ece9e0 0 25%, #faf9f5 0 50%) 0 0 / 16px 16px; }
-.terminal-bar, .terminal-bar .tool-button { color: #9c9b97; }
-.terminal-bar .tool-button:hover { background: rgba(255, 255, 255, 0.08); color: #f0f0f0; }
+.fp-image img { background: repeating-conic-gradient(#eaeaee 0 25%, #fdfdfd 0 50%) 0 0 / 16px 16px; }
+.terminal-panel, .cli-settings-terminal { background: var(--terminal-bg); }
+.terminal-bar, .terminal-bar .tool-button { color: var(--muted); }
+.terminal-bar .tool-button:hover { background: var(--row-hover); color: var(--text); }
 
 /* Dark theme overrides */
 [data-theme="dark"] {
@@ -2237,7 +2244,6 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
   .segmented { background: var(--field); }
   .segmented button.on { background: var(--surface-2); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
   .fp-image img { background: repeating-conic-gradient(#1f1f1e 0 25%, #282827 0 50%) 0 0 / 16px 16px; }
-  .terminal-panel { background: #0d0d0f; }
 }
 
 /* Settings controls: fields and buttons are quiet filled shapes without outlines */
@@ -2247,6 +2253,8 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
   border-radius: var(--r-md);
   font-size: var(--fs-base);
 }
+.settings-content :is(.check, .pick-row) input[type=checkbox] { background: rgba(113, 113, 122, 0.28); border: 1px solid var(--border-strong); border-radius: 5px; }
+.settings-content :is(.check, .pick-row) input[type=checkbox]:checked { background: var(--accent); border-color: var(--accent); }
 .settings-content :is(.field input, .field select, .field textarea, .manual-form input, .model-row input, .model-advanced input:not([type=checkbox]), .level-row select, .level-row input, .search-field):focus {
   border-color: var(--border-strong);
   outline: none;
@@ -2288,7 +2296,19 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .code-empty > .engine-mark { width: 56px; height: 56px; opacity: 1; }
 .connection-detail { padding-left: 23px; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .connection-detail.error { color: var(--red); white-space: normal; overflow-wrap: anywhere; }
+.ub-code { margin: 6px 0; padding: 8px 10px; border-radius: var(--r-md); background: var(--bg-raised); font: 12.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-theme="dark"] .ub-code { background: rgba(0, 0, 0, 0.28); }
+.ub-inline-code { padding: 1px 5px; border-radius: 5px; background: var(--code-bg); font: 0.92em var(--mono); }
+.turn-foot .turn-action { opacity: 0.4; }
+.turn-foot.last .turn-action, .turn-foot:hover .turn-action { opacity: 1; }
+.welcome-start { margin: -4px 0 0; font-size: var(--fs-base); color: var(--muted); }
+.welcome-link { padding: 0; color: var(--link); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent); text-underline-offset: 3px; }
+.welcome-link:hover { text-decoration-color: currentColor; }
+/* The conversation's own scrollbar is a thin mark at its edge: beside an open file pane a full one looks adrift. */
+.transcript::-webkit-scrollbar { width: 8px; }
 .session-engine { flex: none; display: inline-flex; }
 .session-engine-logo, .title-engine-logo { flex: none; border-radius: 4px; }
 .title-button > .title-engine-logo { margin-right: 2px; }
 body.window-inactive .session-engine-logo, body.window-inactive .title-engine-logo { opacity: 0.6; }
+
+.palette-note { padding: 8px 16px 10px; font-size: var(--fs-xs); color: var(--faint); }

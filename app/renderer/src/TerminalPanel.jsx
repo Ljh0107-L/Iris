@@ -43,11 +43,26 @@ async function start(sessionId, entry) {
   byTermId.set(entry.termId, entry);
 }
 
+// The terminal follows the app's appearance. A light terminal needs colours of its own: the sixteen that
+// read on a dark screen (yellow, white, bright green) wash out on a light one.
+const TERMINAL_THEMES = {
+  dark: { background: '#0d0d0f', foreground: '#f2f2f4', cursor: '#f2f2f4', selectionBackground: 'rgba(142,162,255,.32)', black: '#1f1f23', brightBlack: '#8a8a92' },
+  light: { background: '#f6f6f8', foreground: '#16161a', cursor: '#16161a', cursorAccent: '#f6f6f8', selectionBackground: 'rgba(59,91,219,.22)',
+    black: '#16161a', red: '#b3362b', green: '#2f7a3d', yellow: '#8a6100', blue: '#2f5fd0', magenta: '#8b3fb5', cyan: '#0f7f8c', white: '#62626b',
+    brightBlack: '#70707a', brightRed: '#c9433a', brightGreen: '#3b8f4b', brightYellow: '#9a6f00', brightBlue: '#3b5bdb', brightMagenta: '#9d4fc7', brightCyan: '#1a8f9c', brightWhite: '#111114' },
+};
+const terminalTheme = () => TERMINAL_THEMES[document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'];
+const openTerminals = new Set();
+new MutationObserver(() => { for (const term of openTerminals) term.options.theme = terminalTheme(); })
+  .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 function makeTerminal() {
   const term = new Terminal({
     fontFamily: TERMINAL_FONTS, fontSize: 12.5, lineHeight: 1.25, cursorBlink: true, allowProposedApi: true,
-    theme: { background: '#0d0d0f', foreground: '#f2f2f4', cursor: '#f2f2f4', selectionBackground: 'rgba(142,162,255,.32)', black: '#1f1f23', brightBlack: '#8a8a92' },
+    theme: terminalTheme(),
   });
+  openTerminals.add(term);
+  const dispose = term.dispose.bind(term);
+  term.dispose = () => { openTerminals.delete(term); dispose(); };
   const fit = new FitAddon();
   term.loadAddon(fit);
   return { term, fit };

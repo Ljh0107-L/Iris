@@ -233,20 +233,11 @@ try {
   await send('hello from the desktop');
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
   check('local session streamed a reply', true);
-  await page.getByRole('button', { name: 'Session details', exact: true }).click();
+  await page.getByRole('button', { name: 'Conversation details', exact: true }).click();
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const rightTitles = await page.locator('.right-panel .panel-card-head').allInnerTexts();
   check('right panel shows Environment, Context and Usage, and no Outputs card', ['Environment', 'Context', 'Usage'].every(name => rightTitles.some(t => t.includes(name))) && !rightTitles.some(t => /Outputs/.test(t)), rightTitles.join(' | '));
-  check('Subagents has plain text followed only by its disclosure arrow, without helper text',
-    await page.locator('.subagent-list-head').innerText() === 'Subagents' &&
-    await page.locator('.subagent-list-head').evaluate(el => el.firstElementChild.tagName === 'SPAN') &&
-    await page.locator('.subagent-list-head svg').count() === 1 &&
-    await page.getByText('Delegated tasks will appear here.').count() === 0);
-  await page.locator('.subagent-list-head').click();
-  check('empty Subagents section can collapse', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false');
-  await page.locator('.subagent-list-head').press('Enter');
-  check('Subagents expands from keyboard like Usage', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'true');
-  check('empty Subagents has no finished records to clear', await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).isDisabled());
+  check('no Subagents card while the conversation has started none', await page.locator('.right-panel .subagent-list').count() === 0 && await page.getByText('Delegated tasks will appear here.').count() === 0);
   await S('04-plain-subagent-header');
   await send('recover this reply [[drop-once]]');
   await page.locator('.working', { hasText: 'Reconnecting to model' }).waitFor({ timeout: 15000 });
@@ -570,16 +561,20 @@ try {
   await checkFilePreview({ page, id: (await activeRecord()).id, project: remoteProject, environmentId: 'ssh:iris-test', shots: opts.shots });
   check('SSH file preview: relative images/links, anchors, image refresh/errors, clean file switching and complete source', true);
 
-  await page.locator('.subagent-list-head').click();
   await waitNew('.session-main .markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);
   await page.locator('.send-button.stop').waitFor({ state: 'detached' });
   const delegationCallId = await mainTranscript().locator('.subagent-summary').filter({ hasText: 'Inspect cwd' }).getAttribute('data-call-id');
   const delegation = () => mainTranscript().locator(`.subagent-summary[data-call-id="${delegationCallId}"]`);
   check('subagent tasks are visible without expanding a command group', await delegation().locator('.subagent-task-row.completed').count() === 2);
-  check('collapsed Subagents stays closed as work runs and completes', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false' && await page.locator('.subagent-list .subagent-task-row').count() === 0);
-  await S('08a1-subagents-collapsed');
+  // The card comes with the first delegation: plain title, its disclosure arrow, the tasks.
+  check('Subagents appears with the first delegation, with a plain title and its disclosure arrow',
+    await page.locator('.subagent-list-head').innerText() === 'Subagents' && await page.locator('.subagent-list-head svg').count() === 1 &&
+    await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
   await page.locator('.subagent-list-head').click();
-  check('reopening Subagents restores completed tasks without rerunning work', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
+  check('Subagents collapses', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false' && await page.locator('.subagent-list .subagent-task-row').count() === 0);
+  await S('08a1-subagents-collapsed');
+  await page.locator('.subagent-list-head').press('Enter');
+  check('reopening Subagents from the keyboard restores completed tasks without rerunning work', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'true' && await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
   await S('08a2-subagents-expanded');
   await delegation().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
   await inspector().locator('.transcript').waitFor();
@@ -905,7 +900,7 @@ try {
   check('clear finished removes all task rows but retains delegation summaries',
     await mainTranscript().locator('.subagent-task-row').count() === 0 &&
     await mainTranscript().locator('.subagent-summary-head:disabled', { hasText: 'Task history cleared' }).count() === 2 &&
-    await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).isDisabled());
+    await page.locator('.right-panel .subagent-list').count() === 0); // (nothing left to list, so the card goes too)
   check('clear finished preserves conversation, usage, original JSONL and generated files',
     await conversationSnapshot() === beforeClearAll && await page.locator('.usage-table').innerText() === beforeAllUsage &&
     readFileSync(storedBeforeClear.piSessionFile, 'utf8') === originalJsonl &&
@@ -916,9 +911,9 @@ try {
   await page.reload();
   await page.locator('.session-row', { hasText: 'hello from the server' }).click();
   await waitText('.session-main .markdown', 'Tool result: after-quit', 90000);
-  await page.locator('.subagent-list-head').waitFor();
+  await page.locator('.usage-table').waitFor();
   check('finished-all clearing survives reload without hiding main replies',
-    await page.locator('.subagent-list .subagent-task-row').count() === 0 &&
+    await page.locator('.right-panel .subagent-list').count() === 0 &&
     await mainTranscript().locator('.subagent-task-row').count() === 0 &&
     await mainTranscript().locator('.markdown', { hasText: 'Subagents: 2/2 completed' }).count() === 2 &&
     (await activeRecord()).clearedSubagentIds?.length === 4);

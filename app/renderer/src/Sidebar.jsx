@@ -1,10 +1,10 @@
-import { useMemo, useRef, useState } from 'react';
+import { memo, useMemo, useRef, useState } from 'react';
 import { engineCli, engineLabel, isCliEngine } from './engines.js';
 import { Icon, EngineLogo } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, useResizable } from './ui.jsx';
 import { groupSessions } from './session-groups.js';
 import { setAppearance } from './store.js';
-import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openPalette, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
+import { api, archiveSession, askConfirm, cancelWarm, deleteSession, forkSession, goBack, goForward, newSession, notify, openPalette, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
 
 export function SessionMenuItems({ session, close, onRename }) {
   const active = useStore(s => s.activeId === session.id);
@@ -13,7 +13,7 @@ export function SessionMenuItems({ session, close, onRename }) {
   return <>
     <MenuItem icon="edit" label="Rename" onClick={() => { close(); onRename(); }} />
     <MenuItem icon="fork" label="Fork" disabled={!!forkUnavailable} title={forkUnavailable ?? undefined} onClick={() => { close(); forkSession(session.id).catch(failed); }} />
-    <MenuItem icon="archive" label="Archive" onClick={() => { close(); api('archive', session.id); if (active) newSession(); }} />
+    <MenuItem icon="archive" label="Archive" onClick={() => { close(); archiveSession(session.id); }} />
     <MenuItem icon="trash" label="Delete" className="danger" onClick={() => { close(); askConfirm({ title: 'Delete conversation?', message: session.title, action: 'Delete', run: () => deleteSession(session.id).catch(failed) }); }} />
   </>;
 }
@@ -21,7 +21,9 @@ export function SessionMenuItems({ session, close, onRename }) {
 // A menu opened at the pointer (right-click).
 const pointAnchor = (x, y) => ({ current: { getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y, width: 0, height: 0 }), contains: () => false } });
 
-function SessionRow({ session, active }) {
+// A row is drawn again only when its own conversation changes: a status change in one conversation arrives
+// as a new list, and there can be hundreds of rows.
+const SessionRow = memo(function SessionRow({ session, active }) {
   const anchor = useRef(null);
   const [menu, setMenu] = useState(false);
   const [pointMenu, setPointMenu] = useState(null);
@@ -40,13 +42,13 @@ function SessionRow({ session, active }) {
         ? <input className="rename-input" autoFocus value={title} onChange={e => setTitle(e.target.value)}
             onBlur={() => { setEditing(false); if (title.trim() && title !== session.title) api('rename', session.id, title.trim()); }}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setTitle(session.title); setEditing(false); } }} />
-        : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
+        : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onMouseLeave={cancelWarm} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
             {/* Which agent the conversation runs on, before its title: all four are told apart at a glance. */}
             <span className="session-engine" aria-hidden="true" title={engineLabel(session.engine)}><EngineLogo engine={session.engine ?? 'pi'} size={15} className="session-engine-logo" title={engineLabel(session.engine)} /></span>
             <span className="session-title">{session.title}</span>
             {indicator && <span className="session-indicator">{indicator}</span>}
           </button>}
-      <button ref={anchor} className="row-more" onClick={() => setMenu(m => !m)} aria-label="Session actions"><Icon name="more" size={16} /></button>
+      <button ref={anchor} className="row-more" onClick={() => setMenu(m => !m)} aria-label="Conversation actions"><Icon name="more" size={16} /></button>
       <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={200} placement="bottom-end">
         <SessionMenuItems session={session} close={() => setMenu(false)} onRename={rename} />
       </Popover>
@@ -55,7 +57,7 @@ function SessionRow({ session, active }) {
       </Popover>}
     </div>
   );
-}
+});
 
 function Group({ group, activeId, view }) {
   const [open, setOpen] = useState(true);
@@ -71,7 +73,7 @@ function Group({ group, activeId, view }) {
   );
 }
 
-export function Sidebar({ peek = false }) {
+export const Sidebar = memo(function Sidebar({ peek = false }) {
   // The project-first layout replaces the experimental flat-list preference.
   const [grouped, setGrouped] = useState(() => { try { return localStorage.getItem('iris.sidebar.view') !== 'recents'; } catch { return true; } });
   const changeView = projects => {
@@ -121,7 +123,7 @@ export function Sidebar({ peek = false }) {
       <div className="sidebar-update">
         {update?.state === 'checking' && update.manual && <span className="update-button downloading" role="status"><Spinner size={12} /> Checking for updates…</span>}
         {update?.state === 'downloading' && <div className="update-button downloading" role="progressbar" aria-valuenow={Math.round((update.progress ?? 0) * 100)} title={`Downloading Iris ${update.version}`}>
-          <span className="update-fill" style={{ width: `${Math.max(4, Math.round((update.progress ?? 0) * 100))}%` }} />
+          <span className="update-fill" style={{ '--progress': Math.max(0.04, Math.min(1, update.progress ?? 0)) }} />
           <span className="update-label">Downloading update… {Math.round((update.progress ?? 0) * 100)}%</span>
         </div>}
         {update?.state === 'ready' && sessionUpdate?.state !== 'restarting' && <button className="update-button" onClick={() => api('installUpdate').catch(updateError)} title={`Iris ${update.version} is ready. Running conversations are restarted afterwards.`}><Icon name="download" size={13} /> Restart to update</button>}
@@ -136,4 +138,4 @@ export function Sidebar({ peek = false }) {
       </div>
     </aside>
   );
-}
+});

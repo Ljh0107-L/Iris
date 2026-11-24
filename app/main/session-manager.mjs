@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
-import { searchSessionFiles } from './message-search.mjs';
+import { decodeRemoteSearch, remoteSearchScript, searchSessionFiles } from './message-search.mjs';
 import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelayCommand, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
 import { builtinModelRoute, listBuiltinModels } from './builtin-providers.mjs';
@@ -18,7 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/iris-speed.mjs';
 import { readHistory } from '../../agent/iris-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter } from './cli-engines.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -47,7 +47,10 @@ const CLAUDE_MODEL_ONLY = 'Claude Code works only with Anthropic Messages models
 // A conversation record keeps a speed only when it isn't standard.
 const speedField = speed => SPEEDS.includes(speed) && speed !== 'standard' ? { speed } : {};
 
-const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
+// A conversation's title until its first message names it. (Ones made by earlier versions say "New session".)
+const UNTITLED = 'New conversation';
+const untitled = title => title === UNTITLED || title === 'New session';
+const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || UNTITLED; };
 
 // ---- No folder, as Codex's projectless chats ----
 // A conversation started without a folder gets its own directory under a shared root (~/Iris here, ~/iris on
@@ -609,6 +612,7 @@ export class SessionManager extends EventEmitter {
       if (options) this.#rememberCliOptions({ engine, environmentId: env.id, cliAccount: account }, { options });
       const result = { installed: true, ...status };
       this.#rememberIdentity(engine, account, result);
+      this.#rememberStatus(engine, env.id, account, result);
       if (result.signedIn) {
         for (const [spareKey, spare] of this.spares) if (spare.record.engine === engine && spare.record.environmentId === env.id) this.#dropSpare(spareKey);
         const record = this.#recordOf(this.focused), runtime = this.runtimes.get(this.focused);
@@ -668,6 +672,7 @@ export class SessionManager extends EventEmitter {
         else if (result.signedIn && !result.plan && plans[planKey]) result.plan = plans[planKey];
         else if (result.signedIn === false && plans[planKey]) delete plans[planKey];
       }
+      this.#rememberStatus(engine, env.id, account, result);
       return result;
     })().finally(() => this.cliAccountChecks.delete(key));
     this.cliAccountChecks.set(key, { login, menus, promise });
@@ -719,6 +724,33 @@ export class SessionManager extends EventEmitter {
     const named = account => who[account.id] ? { ...account, identity: who[account.id] } : account;
     if (!cliEngine(engine).accounts) return [named({ id: 'default', name: 'Default' })];
     return [{ id: 'default', name: 'Default' }, ...(this.store.settings.cliAccounts?.[engine] ?? [])].map(named);
+  }
+  // What the last check of an account found, kept across restarts: the Subscriptions page shows it at once and
+  // the new check, which takes a second or two of network, then corrects it.
+  #rememberStatus(engine, environmentId, account, status) {
+    if (!status || status.installed == null) return;
+    const { installed, signedIn, identity, plan, limits } = status;
+    const kept = { installed, ...(signedIn == null ? {} : { signedIn }), ...(identity ? { identity } : {}), ...(plan ? { plan } : {}), ...(limits?.length ? { limits } : {}) };
+    const all = this.store.settings.cliStatus ??= {}, key = this.#menuKey(engine, environmentId, account);
+    (this.cliStatusAt ??= new Map()).set(key, Date.now()); // when it was found: a recent one need not be asked for again
+    if (JSON.stringify(all[key]) === JSON.stringify(kept)) return;
+    all[key] = kept;
+    clearTimeout(this.cliStatusSave);
+    this.cliStatusSave = setTimeout(() => { try { this.store.saveSettings(); } catch { /* kept until the next check */ } }, 1500);
+    this.cliStatusSave.unref?.();
+  }
+  cliAccountLast(environmentId, engine = ANTIGRAVITY_ENGINE, account = null) {
+    const key = this.#menuKey(engine, environmentId, account), last = this.store.settings.cliStatus?.[key];
+    return last ? { ...last, ageMs: this.cliStatusAt?.has(key) ? Date.now() - this.cliStatusAt.get(key) : null } : null;
+  }
+  // Soon after start-up, what the Subscriptions page will want on this Mac is asked for in the background (the
+  // CLIs each need a second or two of network), so the page has it when it is opened.
+  async warmCliAccounts() {
+    const local = this.environments().find(env => env.kind === 'local');
+    if (!local) return;
+    await Promise.all(Object.keys(CLI_ENGINES).flatMap(engine => this.cliAccounts(engine).map(async account => {
+      try { if (await this.#findCli(local, engine)) await this.#readCliAccount(local, false, engine, false, account.id); } catch { /* shown when the page asks */ }
+    })));
   }
   // Who an account was when it was last checked (its e-mail address), so menus can name accounts by it.
   #rememberIdentity(engine, account, status) {
@@ -971,7 +1003,7 @@ export class SessionManager extends EventEmitter {
     const existing = this.spares.get(key);
     if (existing) { this.#armSpare(key, existing); return true; }
     const options = antigravity ? { engine, ...(account ? { cliAccount: account } : {}) } : { model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed) };
-    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, ...options, spare: true };
+    const record = { id: randomUUID(), title: UNTITLED, environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, ...options, spare: true };
     const spare = { id: record.id, record, bin };
     this.spares.set(key, spare);
     this.#armSpare(key, spare);
@@ -1071,7 +1103,7 @@ export class SessionManager extends EventEmitter {
     const noFolder = !chosen;
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
     const fields = {
-      title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
+      title: UNTITLED, environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
     };
     // Which of the CLI's accounts the conversation belongs to, for its whole life.
@@ -1629,7 +1661,7 @@ export class SessionManager extends EventEmitter {
       // Antigravity owns session options and permissions. No Pi setup prompts or automatic turn retry.
       await this.#applyCliChoices(record, runtime, session);
       const sent = await session.prompt(message, images.length ? { images } : {});
-      if (record.title === 'New session' && (text.trim() || attachments.length) && this.#current(record, runtime) && runtime.session === session) {
+      if (untitled(record.title) && (text.trim() || attachments.length) && this.#current(record, runtime) && runtime.session === session) {
         // The first words until the CLI names it (Codex does after its first reply); a rename here wins.
         const title = titleFrom(text || attachments[0]?.name || 'Attachment');
         this.#save(record, { title, autoTitle: title });
@@ -1659,7 +1691,7 @@ export class SessionManager extends EventEmitter {
     let nameIt = null;
     const send = () => this.#withModel(record, runtime, session, selected, () => {
       // Name the conversation only once its first prompt is ready to send.
-      if (record.title === 'New session' && text.trim()) {
+      if (untitled(record.title) && text.trim()) {
         const title = titleFrom(text);
         this.#save(record, { title, autoTitle: title });
         session.request('set_session_name', { name: title }).catch(() => {});
@@ -1916,13 +1948,41 @@ export class SessionManager extends EventEmitter {
   // UI pages are projected on the session's machine; never transport get_entries for opening a chat.
   // ⌘K: conversations on this Mac whose messages mention `query`, newest first (message-search.mjs). The
   // files of SSH conversations stay on their hosts; those are found by title in the renderer.
-  async searchMessages(query) {
-    const local = new Set(this.environments().filter(env => env.kind === 'local').map(env => env.id));
-    const conversations = this.store.sessions
-      .filter(record => !record.archived && !record.spare && record.piSessionFile && local.has(record.environmentId))
-      .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0))
-      .map(record => ({ id: record.id, file: record.piSessionFile }));
-    return searchSessionFiles(conversations, query);
+  // What was said, in every conversation that can be read now: those on this Mac, and those on SSH hosts
+  // that are set up in this run, each host reading its own files. A search never starts a connection or waits
+  // for a host that is away; `unsearched` counts the conversations left out, and `partial` says the time ran
+  // out before all were read.
+  async searchMessages(query, { limit = 20 } = {}) {
+    const environments = new Map(this.environments().map(env => [env.id, env]));
+    const records = this.store.sessions
+      .filter(record => !record.archived && !record.spare && record.piSessionFile)
+      .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+    const order = new Map(records.map((record, index) => [record.id, index])), places = new Map();
+    for (const record of records) {
+      if (!places.has(record.environmentId)) places.set(record.environmentId, []);
+      places.get(record.environmentId).push({ id: record.id, file: record.piSessionFile });
+    }
+    const hits = [];
+    let unsearched = 0, partial = false;
+    await Promise.all([...places].map(async ([environmentId, conversations]) => {
+      const env = environments.get(environmentId);
+      try {
+        let found;
+        if (env?.kind === 'local') found = await searchSessionFiles(conversations, query, { limit });
+        else {
+          // Set up in this run (for Pi, or for a CLI alone). A set-up still under way is not waited for.
+          const known = this.prepared.get(environmentId) ?? (this.cliPrepared.get(environmentId)?.ready ? this.cliPrepared.get(environmentId).promise : null);
+          const facts = env?.kind === 'ssh' && env.enabled !== false && known ? await Promise.race([Promise.resolve(known).catch(() => null), new Promise(resolve => setTimeout(resolve, 250, null))]) : null;
+          if (!facts?.node) { unsearched += conversations.length; return; }
+          found = decodeRemoteSearch(await this.runRemote(env, remoteSearchScript(facts.node, query, { limit }), { input: JSON.stringify(conversations), timeout: 6000 }));
+          found = Object.assign(found.hits.filter(hit => order.has(hit.id)), { partial: found.partial });
+        }
+        hits.push(...found);
+        if (found.partial) partial = true;
+      } catch { unsearched += conversations.length; }
+    }));
+    hits.sort((a, b) => order.get(a.id) - order.get(b.id));
+    return { hits: hits.slice(0, limit), unsearched, partial };
   }
 
   async historyPage(id, options = {}) {

@@ -69,10 +69,10 @@ export function UsageMetrics({ transcript, antigravity }) {
           <div className="usage-speed-value"><b>{speed.value}</b><span>tok/s</span></div>
           <span className="usage-speed-kind">{speed.label}{tier && <span className={`usage-speed-tier ${tier.slower ? 'slower' : ''}`} title={tier.title}>{tier.label}</span>}</span>
         </div>
-        <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
+        {recent.length > 1 && <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>}
       </div>
       <div className="usage-table" title="Provider-reported counts. Reasoning is already included in output.">
-        <span /><span className="th">Last turn</span><span className="th">Session</span>
+        <span /><span className="th">Last turn</span><span className="th">Total</span>
         {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{formatTokens(a)}</span>, <span key={label + 'b'}>{formatTokens(b)}</span>])}
         <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
       </div>

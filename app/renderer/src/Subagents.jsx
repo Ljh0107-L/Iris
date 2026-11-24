@@ -86,12 +86,13 @@ export function SubagentList({ sessionId, batches, selectedCallId }) {
   const ordered = [...batches].reverse();
   const visible = selected ? [selected] : showAll ? ordered : ordered.slice(0, 5);
   const hasFinished = batches.some(batch => batch.tasks.some(isSubagentFinished));
+  if (!batches.length) return null;
   return <section className="panel-card subagent-list">
     <div className="subagent-list-header">
       <button type="button" className="panel-card-head subagent-list-head" onClick={() => setOpen(v => !v)} aria-expanded={open} aria-controls={bodyId}>
         <span>Subagents</span><Icon name={open ? 'caretDown' : 'caretRight'} size={13} className="muted" />
       </button>
-      <button className="link-button subagent-clear" aria-label="Clear finished subagents" title="Clear finished task records from this session’s task history" disabled={!hasFinished} onClick={() => clearSubagentRecords(sessionId)}>Clear</button>
+      <button className="link-button subagent-clear" aria-label="Clear finished subagents" title="Clear finished task records from this conversation’s task history" disabled={!hasFinished} onClick={() => clearSubagentRecords(sessionId)}>Clear</button>
       {open && selected && <button className="link-button" onClick={() => closeSubagent(sessionId)}>Show all</button>}
     </div>
     <div id={bodyId} hidden={!open}>

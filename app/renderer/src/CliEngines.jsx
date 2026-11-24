@@ -131,7 +131,9 @@ function InstallProgress({ progress }) {
   const percent = progress?.percent ?? undefined;
   return <div className="cli-install">
     <div role="status"><span>{label}</span>{percent !== undefined && <span>{percent}%</span>}</div>
-    <progress aria-label={label} max={100} value={percent} />
+    <div className={`cli-install-bar ${percent === undefined ? 'indeterminate' : ''}`} role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+      <span style={percent === undefined ? undefined : { '--progress': Math.max(0, Math.min(100, percent)) / 100 }} />
+    </div>
   </div>;
 }
 
@@ -154,6 +156,7 @@ function LimitBar({ limit }) {
 
 // One account of a CLI on the chosen machine. fresh: it was just added, so its sign-in starts at once and,
 // if that is given up, the account is dropped again (onAbandon).
+const RECENT_MS = 60000;             // a check this recent is not repeated when the page opens
 const lastAccountStatus = new Map(); // "engine:machine:account" -> what its last check found, while the app runs
 const lastUsage = new Map();         // the same key -> Antigravity's last quota reading
 function AccountRow({ environmentId, engine, profile = null, fresh = false, onRemove, onAbandon, onSignedIn }) {
@@ -244,8 +247,17 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   useEffect(() => {
     if (installing) return;
     if (fresh && !started.current) { started.current = true; setChecking(false); setAccount({ installed: true, signedIn: false }); void signIn(); return; }
-    if (!fresh) void check();
-  }, [check, installing, fresh, signIn]);
+    if (fresh) return;
+    // What was found within the last minute (by this page, or by the app in the background) is shown as it is;
+    // anything older is shown too, and checked again beside it.
+    let alive = true;
+    api('cliAccountLast', environmentId, engine, accountId).then(last => {
+      if (!alive) return;
+      if (last) setAccountState(now => now ?? last);
+      if (last?.ageMs != null && last.ageMs < RECENT_MS) { if (!accountId) reportCliAccount(environmentId, last, engine); setChecking(false); } else void check();
+    }, () => { if (alive) void check(); });
+    return () => { alive = false; };
+  }, [check, installing, fresh, signIn, environmentId, engine, accountId]);
   const signOut = async () => {
     setChecking(true); setError(null);
     try { const result = await api('cliAccountStatus', environmentId, 'logout', engine, accountId); setAccount(result); if (!accountId) reportCliAccount(environmentId, result, engine); }
@@ -254,7 +266,14 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   };
   const terminalExited = useCallback(code => { setTerminalLink(null); if (!code) void check(); }, [check]);
   const signedIn = account?.signedIn === true;
-  useEffect(() => { if (signedIn) void readUsage(false); }, [signedIn, readUsage]);
+  // Read beside the account check, not after it; and until either answers, what the last run of the app found.
+  useEffect(() => { void readUsage(false); }, [readUsage]);
+  useEffect(() => {
+    if (fresh) return;
+    let alive = true;
+    if (antigravity && local && !lastUsage.has(statusKey)) api('cliUsageLast', environmentId, engine).then(last => { if (alive && last) setUsage(now => now ?? last); }, () => {});
+    return () => { alive = false; };
+  }, [statusKey, environmentId, engine, accountId, antigravity, local, fresh]);
   const message = progress?.stage === 'error' ? progress.message : error;
   // What is true on that machine right now, in two or three words.
   const state = installing ? 'Installing' : signingIn ? 'Signing in' : !account ? (checking ? 'Checking' : 'Could not check')

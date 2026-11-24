@@ -27,8 +27,8 @@ function ModelRow({ model, onChange, onRemove, lockedId = false, outputTitle }) 
   return (
     <div className={`model-entry ${model.open ? 'open' : ''}`}>
       <div className="model-row">
-        <input value={model.id} readOnly={lockedId} onChange={e => set({ id: e.target.value })} placeholder="model-id" spellCheck={false} />
-        <input value={model.name} onChange={e => set({ name: e.target.value })} placeholder={model.id || 'Display name'} />
+        <input value={model.id} readOnly={lockedId} onChange={e => set({ id: e.target.value })} placeholder="Model ID" aria-label="Model ID" title="Model ID, as the provider names it" spellCheck={false} />
+        <input value={model.name} onChange={e => set({ name: e.target.value })} placeholder="Name in menus (optional)" aria-label="Name shown in menus" title="Name shown in menus; the ID is used when this is empty" />
         <button type="button" className="icon-button" onClick={() => set({ open: !model.open })} aria-label="Parameters"><Icon name="chevronDown" size={16} className={model.open ? 'flip' : ''} /></button>
         <button type="button" className="icon-button danger" onClick={onRemove} aria-label="Remove model"><Icon name="trash" size={15} /></button>
       </div>
@@ -223,7 +223,6 @@ function ModelsPage() {
   const [editing, setEditing] = useState(null); // provider id | 'new'
   return <>
     <section className="section" aria-label="API keys">
-      <div className="section-head"><h2 className="section-title">API keys</h2></div>
       <ul className="rows">
         {providers.map(p => {
           return (

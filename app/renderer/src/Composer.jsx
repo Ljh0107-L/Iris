@@ -689,7 +689,7 @@ export function ComposerBar({ session }) {
       <div className="composer-bar-left">
         {hasValidModel
           ? <Trigger width={320} placement="top-start" label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} engine={engine} onChange={changeModel} close={close} />}>
-              <span className="strong">{modelLabel(model, catalog)}</span>{effortLevels.length === 0 && <Icon name="chevronDown" size={11} />}
+              <span className="strong">{modelLabel(model, catalog)}</span><Icon name="chevronDown" size={11} />
             </Trigger>
           : loadingModels
             ? <span className="bar-status" role="status"><Spinner size={11.5} /><span>Loading models…</span></span>

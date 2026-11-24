@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { engineLabel, isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
@@ -78,7 +78,7 @@ function describeCall(call) {
     return { verb: `MCP · ${server}`, subject: method, detail: hint ? String(hint).split('\n')[0].slice(0, 64) : '', title: `${server} / ${method}` };
   }
   switch (call.name) {
-    case 'subagent': return { verb: 'Subagents', subject: (a.tasks ?? []).map(t => t.name).join(' · '), title: 'Delegated tasks on this session’s machine' };
+    case 'subagent': return { verb: 'Subagents', subject: (a.tasks ?? []).map(t => t.name).join(' · '), title: 'Delegated tasks on this conversation’s machine' };
     case 'subagent_message': return { verb: 'Messaged agent', subject: a.message ?? '', detail: a.id, title: a.message };
     case 'subagent_stop': return { verb: 'Stopped agent', subject: a.id ?? '' };
     case 'Task': return { verb: a.subagent_type ? `Agent · ${a.subagent_type}` : 'Agent', subject: a.description || String(a.prompt ?? '').split('\n')[0].slice(0, 90) || 'Delegated task', title: a.prompt };
@@ -652,18 +652,38 @@ function renderInlineMentions(str, onFileContextMenu) {
   if (last < str.length) parts.push(str.slice(last));
   return parts;
 }
+// A user's message is shown as typed, with the three things people do type as Markdown made readable: lists,
+// fenced code and `inline code`.
+const USER_FENCE = /(?:^|\n)```[^\n]*\n([\s\S]*?)\n```[ \t]*(?=\n|$)/g;
 function UserText({ text }) {
+  if (!text.includes('```')) return <UserLines text={text} />;
+  const parts = [];
+  let at = 0;
+  for (const m of text.matchAll(USER_FENCE)) {
+    if (m.index > at) parts.push(<UserLines key={at} text={text.slice(at, m.index)} />);
+    parts.push(<pre key={`c${m.index}`} className="ub-code">{m[1]}</pre>);
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) parts.push(<UserLines key={at} text={text.slice(at).replace(/^\n/, '')} />);
+  return parts;
+}
+function userInline(text, onFileContextMenu) {
+  if (!text.includes('`')) return renderInlineMentions(text, onFileContextMenu);
+  return text.split(/(`[^`\n]+`)/).map((part, i) => part.length > 2 && part.startsWith('`') && part.endsWith('`')
+    ? <code key={i} className="ub-inline-code">{part.slice(1, -1)}</code> : <Fragment key={i}>{renderInlineMentions(part, onFileContextMenu)}</Fragment>);
+}
+function UserLines({ text }) {
   const { onFileContextMenu } = useContext(DisclosureContext) ?? {};
   const lines = text.split('\n');
   const width = m => m[1].replace(/\t/g, '   ').length;
   const items = lines.map(l => LIST_ITEM.exec(l));
-  if (!items.some(Boolean)) return renderInlineMentions(text, onFileContextMenu);
+  if (!items.some(Boolean)) return userInline(text, onFileContextMenu);
   const base = Math.min(...items.filter(Boolean).map(width)); // the shallowest item is the top level
   return lines.map((line, i) => {
     const m = items[i];
-    if (!m) return <div key={i} className="ub-line">{line ? renderInlineMentions(line, onFileContextMenu) : '\u00a0'}</div>;
+    if (!m) return <div key={i} className="ub-line">{line ? userInline(line, onFileContextMenu) : '\u00a0'}</div>;
     const depth = Math.floor((width(m) - base) / 3);
-    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{renderInlineMentions(m[3], onFileContextMenu)}</div>;
+    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{userInline(m[3], onFileContextMenu)}</div>;
   });
 }
 
@@ -746,7 +766,7 @@ function WorkingRow({ session, transcript, sending = false }) {
       preparing: cli ? connecting : preparingText,
       starting: `Starting ${agentName}…`,
       opening: 'Opening conversation…',
-      configuring: 'Restoring session…',
+      configuring: 'Restoring conversation…',
     }[session.phase] ?? connecting;
     return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
   }

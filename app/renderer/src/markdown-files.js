@@ -4,8 +4,15 @@ import { headingSlug, resolveMarkdownReference } from './file-paths.js';
 // live DOM, so Electron never tries to fetch project files relative to index.html.
 export function prepareFileMarkdown(html, documentPath) {
   const template = document.createElement('template');
+  template.content.append(prepareFileFragment(html, documentPath));
+  return template.innerHTML;
+}
+
+// The same, as nodes ready to insert. `used` carries the heading ids of what is already on the page, when a
+// document is rendered a block at a time (a streaming reply): ids stay unique across the whole of it.
+export function prepareFileFragment(html, documentPath, used = new Set()) {
+  const template = document.createElement('template');
   template.innerHTML = html;
-  const used = new Set();
   for (const heading of template.content.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
     const base = headingSlug(heading.textContent);
     let id = base, n = 0;
@@ -33,7 +40,7 @@ export function prepareFileMarkdown(html, documentPath) {
   }
   // A picture source would otherwise override the resolved img with a renderer URL.
   for (const source of template.content.querySelectorAll('picture source')) source.remove();
-  return template.innerHTML;
+  return template.content;
 }
 
 // One bounded batch per rendered document/refresh; no persistent cache of stale image

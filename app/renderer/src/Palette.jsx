@@ -12,7 +12,7 @@ function Highlighted({ text, query }) {
   return <>{text.slice(0, at)}<mark>{text.slice(at, at + query.length)}</mark>{text.slice(at + query.length)}</>;
 }
 
-const TABS = ['All', 'Sessions', 'Projects', 'Environments'];
+const TABS = ['All', 'Conversations', 'Projects', 'Environments'];
 
 export function Palette() {
   const sessions = useStore(s => s.sessions);
@@ -26,13 +26,20 @@ export function Palette() {
   const list = useRef(null);
   const q = query.trim().toLowerCase();
   const match = text => !q || text.toLowerCase().includes(q);
-  // What was said in conversations on this Mac (searched in the main process, a moment after typing stops).
-  const [said, setSaid] = useState({ q: '', hits: [] });
-  const searchesMessages = q.length >= 2 && (TABS[tab] === 'All' || TABS[tab] === 'Sessions');
+  // What was said in conversations, on this Mac and on connected hosts (searched a moment after typing stops).
+  const [said, setSaid] = useState({ q: '', hits: [], note: '' });
+  const searchesMessages = q.length >= 2 && (TABS[tab] === 'All' || TABS[tab] === 'Conversations');
   useEffect(() => {
-    if (!searchesMessages) { setSaid({ q, hits: [] }); return; }
+    if (!searchesMessages) { setSaid({ q, hits: [], note: '' }); return; }
     let alive = true;
-    const timer = setTimeout(() => api('searchMessages', q).then(hits => { if (alive) setSaid({ q, hits: Array.isArray(hits) ? hits : [] }); }, () => {}), 160);
+    const timer = setTimeout(() => api('searchMessages', q).then(found => {
+      if (!alive) return;
+      // Say what was left out, so that "no results" is not read as "never said".
+      const left = found?.unsearched ?? 0;
+      const note = left ? `${left} conversation${left === 1 ? '' : 's'} on hosts that are not connected ${left === 1 ? 'was' : 'were'} not searched.`
+        : found?.partial ? 'Older conversations were not searched: this took too long.' : '';
+      setSaid({ q, hits: Array.isArray(found?.hits) ? found.hits : [], note });
+    }, () => {}), 160);
     return () => { alive = false; clearTimeout(timer); };
   }, [q, searchesMessages]);
   const envLabel = id => environments.find(e => e.id === id)?.label ?? (id === 'local' ? 'This computer' : id.replace(/^ssh:/, ''));
@@ -40,12 +47,12 @@ export function Palette() {
   const sections = useMemo(() => {
     const out = [];
     const kind = TABS[tab];
-    if (kind === 'All' || kind === 'Sessions') {
+    if (kind === 'All' || kind === 'Conversations') {
       const engineOf = s => s.engine ?? 'pi';
       const items = sessions.filter(s => match(`${s.title} ${s.project} ${s.environmentLabel} ${engineLabel(engineOf(s))} ${s.engine === 'claude-code' ? 'cc' : ''}`)).slice(0, kind === 'All' ? 6 : 50)
         .map(s => ({ key: s.id, logo: engineOf(s), label: s.title,
           detail: `${s.project} · ${s.environmentLabel}${engineOf(s) === 'pi' ? '' : ` · ${engineLabel(engineOf(s))}`}`, run: () => openSession(s.id) }));
-      if (items.length) out.push({ title: q ? 'Sessions' : 'Recents', items });
+      if (items.length) out.push({ title: q ? 'Conversations' : 'Recents', items });
       // Conversations whose messages mention it (not already listed by title): opened with Find filled in.
       const listed = new Set(items.map(item => item.key));
       const messageHits = said.q === q ? said.hits.filter(hit => !listed.has(hit.id) && sessions.some(s => s.id === hit.id)).slice(0, kind === 'All' ? 6 : 30) : [];
@@ -58,18 +65,18 @@ export function Palette() {
     if (kind === 'All' || kind === 'Projects') {
       const items = Object.entries(recentFolders).flatMap(([envId, folders]) => folders.map(folder => ({ envId, folder })))
         .filter(({ envId, folder }) => match(`${folder} ${envLabel(envId)}`)).slice(0, kind === 'All' ? 4 : 50)
-        .map(({ envId, folder }) => ({ key: envId + folder, icon: 'folder', label: baseName(folder), detail: `${envLabel(envId)} · ${folder}`, hint: 'New session', run: () => { newSession(); pickRecent(envId, folder); } }));
+        .map(({ envId, folder }) => ({ key: envId + folder, icon: 'folder', label: baseName(folder), detail: `${envLabel(envId)} · ${folder}`, hint: 'New conversation', run: () => { newSession(); pickRecent(envId, folder); } }));
       if (items.length) out.push({ title: 'Projects', items });
     }
     if (kind === 'Environments' || (kind === 'All' && q)) {
       const items = environments.filter(e => match(`${e.label} ${e.detail ?? ''}`)).slice(0, kind === 'All' ? 4 : 100)
-        .map(e => ({ key: e.id, icon: e.kind === 'ssh' ? 'terminal' : 'laptop', label: e.label, detail: e.kind === 'ssh' ? e.detail : 'Local', hint: 'New session', run: () => { newSession(); pickRecent(e.id, defaultFolder({ recentFolders }, e.id)); } }));
+        .map(e => ({ key: e.id, icon: e.kind === 'ssh' ? 'terminal' : 'laptop', label: e.label, detail: e.kind === 'ssh' ? e.detail : 'Local', hint: 'New conversation', run: () => { newSession(); pickRecent(e.id, defaultFolder({ recentFolders }, e.id)); } }));
       if (items.length) out.push({ title: 'Environments', items });
     }
     if (kind === 'All') {
       const actions = [
-        { key: 'new', icon: 'plus', label: 'New session', run: () => { newSession(); setDraft({ engine: 'pi' }); } },
-        ...['claude-code', 'codex', 'antigravity'].map(engine => ({ key: `new-${engine}`, logo: engine, label: `New ${engineLabel(engine)} session`, run: () => { newSession(); setDraft({ engine }); } })),
+        { key: 'new', icon: 'plus', label: 'New conversation', run: () => { newSession(); setDraft({ engine: 'pi' }); } },
+        ...['claude-code', 'codex', 'antigravity'].map(engine => ({ key: `new-${engine}`, logo: engine, label: `New ${engineLabel(engine)} conversation`, run: () => { newSession(); setDraft({ engine }); } })),
         { key: 'models', icon: 'key', label: 'Models & API keys', run: () => openSettings(true, 'providers') },
         { key: 'accounts', icon: 'key', label: 'Subscriptions: Codex and Antigravity sign-in', run: () => openSettings(true, 'subscriptions') },
         { key: 'envs', icon: 'server', label: 'SSH connections', run: () => openSettings(true, 'connections') },
@@ -121,6 +128,7 @@ export function Palette() {
             </div>
           ))}
           {!flat.length && <div className="palette-empty">{searchesMessages && said.q !== q ? 'Searching…' : `No results for “${query}”`}</div>}
+          {searchesMessages && said.q === q && said.note && <div className="palette-note" role="status">{said.note}</div>}
         </div>
         <div className="palette-foot">
           <span>Close <kbd>Esc</kbd></span>

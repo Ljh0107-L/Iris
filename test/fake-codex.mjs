@@ -50,12 +50,21 @@ function handle(m) {
       if (text.includes('wait')) return; // stays active until interrupted
       if (text.includes('run')) { send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-1', command: 'npm test', status: 'inProgress' } } });
         return send({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: active, itemId: 'cmd-1', command: 'npm test', cwd: '/w', reason: 'runs the test suite' } }); }
-      // Codex's own agents: one is spawned (and is running), then a wait reports that it has finished.
+      // Codex's own agent, as the real CLI reports one: a "started" activity naming the agent's thread, that
+      // thread's own events (its brief, a command, its answer), then a "completed" activity; and a plan.
       if (text.includes('delegate')) {
-        const collab = (id, tool, fields, status = 'completed') => { const it = { type: 'collabAgentToolCall', id, tool, senderThreadId: 'thread-1', receiverThreadIds: ['agent-thread-1'], prompt: null, model: null, reasoningEffort: null, agentsStates: {}, ...fields };
-          send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { ...it, status: 'inProgress', agentsStates: {} } } }); send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { ...it, status } } }); };
-        collab('agent-1', 'spawnAgent', { prompt: 'Check the parser\\nRead src/parser.js and list the edge cases.', model: 'gpt-a', agentsStates: { 'agent-thread-1': { status: 'running', message: null } } });
-        collab('agent-2', 'wait', { agentsStates: { 'agent-thread-1': { status: 'completed', message: 'Three edge cases: empty input, nested quotes, trailing comma.' } } });
+        const child = 'agent-thread-1', main = (method, params) => send({ method, params: { threadId: 'thread-1', turnId: active, ...params } }), sub = (method, params) => send({ method, params: { threadId: child, turnId: 'child-turn', ...params } });
+        const activity = (id, kind) => { for (const m of ['item/started', 'item/completed']) main(m, { item: { type: 'subAgentActivity', id, kind, agentThreadId: child, agentPath: '/root/parser_check', model: kind === 'started' ? 'gpt-a' : null, reasoningEffort: null } }); };
+        main('turn/plan/updated', { explanation: null, plan: [{ step: 'Check the parser', status: 'inProgress' }, { step: 'Report', status: 'pending' }] });
+        activity('act-1', 'started');
+        sub('turn/started', { turn: { id: 'child-turn' } });
+        sub('item/completed', { item: { type: 'userMessage', id: 'u-1', content: [{ type: 'text', text: 'Check the parser\\nRead src/parser.js and list the edge cases.' }] } });
+        sub('item/started', { item: { type: 'commandExecution', id: 'cc-1', command: "/bin/zsh -lc 'cat src/parser.js'", commandActions: [{ type: 'read', command: 'cat src/parser.js', name: 'parser.js', path: cwd + '/src/parser.js' }], status: 'inProgress' } });
+        sub('item/completed', { item: { type: 'agentMessage', id: 'cm-1', text: 'Three edge cases: empty input, nested quotes, trailing comma.' } });
+        sub('turn/completed', { turn: { id: 'child-turn', status: 'completed', error: null } });
+        activity('act-2', 'completed');
+        activity('act-3', 'interrupted'); // closing it afterwards is reported too
+        main('turn/plan/updated', { explanation: null, plan: [{ step: 'Check the parser', status: 'completed' }, { step: 'Report', status: 'inProgress' }] });
         send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-d', delta: 'The agent found three edge cases.' } });
         return finish('completed');
       }

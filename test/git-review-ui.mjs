@@ -457,7 +457,7 @@ try {
   await page.screenshot({ path: join(screenshots, 'right-panel-antigravity.png') });
   await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
   await page.locator('.title-button img.title-engine-logo[alt="Claude Code"]').waitFor();
-  await page.getByRole('button', { name: 'Session details', exact: true }).click();
+  await page.getByRole('button', { name: 'Conversation details', exact: true }).click();
   await page.locator('.cc-todo-card', { hasText: '1/2' }).waitFor();
   // Escaped inline `<pre>`/`<span>` inside Markdown lists must stay inline code, never swallow list items into a <pre> block.
   const ccMd = await page.locator('.markdown', { hasText: 'Audit complete:' }).evaluate(el => ({

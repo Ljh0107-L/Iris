@@ -2,6 +2,36 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.3
+
+**Fixed**
+
+- **A reply can be selected while it is being written.** Only the part being written is redrawn as text arrives; before, the whole reply was replaced on every frame, which dropped any selection in it, made long replies stutter and left a lot of memory in use after one.
+- **Moving the pointer down the sidebar no longer starts an agent for every conversation it passes.** An agent is started ahead of the click only when the pointer rests on a row.
+- **Only one Iris runs per profile.** Starting it again brings the running one forward, instead of a second copy writing the same conversation list and settings.
+- **With the window closed, Settings… and a click on a notification open a window again.** Before, they did nothing.
+- **Archive takes effect at once**, like Delete, and says why if it fails.
+- **The Git review pane keeps itself current quietly.** Its refresh button no longer turns into a spinner, and Commit is no longer disabled, every five seconds. Nothing is read while the window is hidden, and an SSH host is asked less often.
+- **Antigravity's input tokens** are no longer under-counted in turns that read from the cache.
+- **Search finds text that contains quotes or backslashes.**
+- Check boxes in the model editor show clearly when they are on; code in your own messages is shown as code; the terminal follows the light appearance; notices no longer cover the toolbar in a narrow window.
+
+**New and changed**
+
+- **Codex and Antigravity show their plan and their sub-agents**: the steps of a plan as a task list that is kept current, and each sub-agent as a card with what it was asked and what it answered.
+- **Subscriptions open with what was last read**: accounts and quota are remembered between starts and read again shortly after the app opens. Reading Antigravity's quota takes about two seconds instead of several.
+- **The window remembers its size and place**, opens in the appearance you chose (no flash of the other one), is named after the open conversation, and in full screen gives the traffic lights' room back to the title bar.
+- **A File menu**: New Conversation (⌘N), Search (⌘K), Find in Conversation (⌘F) and Close Window (⌘W); Show or Hide Sidebar (⌘\\) is in View.
+- **Unsent text is kept** across a restart, for each conversation and for the new-conversation box. Attachments are not.
+- **Search reads conversations on connected SSH hosts** as well as on this Mac, and says when some could not be searched.
+- **The first screen says how to start** when nothing is set up: sign in with a ChatGPT or Google plan, or add an API key.
+- **The rainbow is used less**: the marker beside the open conversation and the coloured bar beside the speed are gone. A progress bar is one spectrum across its whole length, uncovered as the work advances.
+- The Subagents card appears only when a conversation has sub-agents. The interface says "conversation" throughout.
+
+**Known limits:** Search reaches an SSH host only once Iris has connected to it since it was started. Antigravity's quota is still read on this Mac only.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.2
 
 **Fixed**

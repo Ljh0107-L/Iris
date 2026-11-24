@@ -43,34 +43,54 @@ export function parseUsageScreen(raw, now = Date.now()) {
   return limits.length || identity ? { identity, limits: limits.slice(0, 8) } : null;
 }
 
+// The plan, as the CLI's heading names it beside the account: "name@example.com (Google AI Ultra)". The two are
+// drawn separately (other parts of the screen come between), so it is looked for by its own form.
+export function headingPlan(screen) {
+  return /[\w.+-]+@[\w.-]+/.test(screen) ? /\((Google [^)\n]{2,50})\)/.exec(screen)?.[1]?.trim() ?? null : null;
+}
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-// Runs the CLI's interface, asks for /usage and returns parseUsageScreen's result (null if the screen never came).
-export async function readAntigravityUsage({ bin, cwd, env, spawnPty, timeoutMs = 40000 }) {
+// Runs the CLI's interface, asks for /usage and returns parseUsageScreen's result with the plan from the
+// CLI's heading ("name@example.com (Google AI Ultra)"); null if the screen never came. The CLI needs about
+// two seconds for it, so nothing here waits a fixed time: each step goes as soon as the screen shows the last.
+export async function readAntigravityUsage({ bin, cwd, env, spawnPty, timeoutMs = 30000 }) {
   const term = spawnPty(bin, [], { name: 'xterm-256color', cols: 140, rows: 50, cwd, env });
-  let out = '', exited = false;
-  term.onData(data => { out = (out + data).slice(-400000); });
-  term.onExit(() => { exited = true; });
-  const until = async (test, ms) => { for (const end = Date.now() + ms; Date.now() < end && !exited;) { if (test()) return true; await wait(150); } return test(); };
+  let out = '', exited = false, changed = null, last = Date.now();
+  term.onData(data => { out = (out + data).slice(-400000); last = Date.now(); changed?.(); });
+  term.onExit(() => { exited = true; changed?.(); });
+  // Resolves true as soon as test() holds for what has been printed, false once `ms` have gone by.
+  const until = (test, ms) => new Promise(resolve => {
+    const end = setTimeout(() => { changed = null; resolve(test()); }, ms);
+    const look = () => { if (exited || test()) { clearTimeout(end); changed = null; resolve(!exited || test()); } };
+    changed = look; look();
+  });
+  const type = text => { try { term.write(text); } catch { /* gone */ } };
   try {
-    // Ready once its prompt line is drawn; a start-up notice may sit over it, which Escape puts away. In a
-    // folder it has not seen, the CLI first asks whether to trust it: this one is Iris's own, and empty.
+    // In a folder it has not seen, the CLI first asks whether to trust it: this one is Iris's own, and empty.
     let trusted = false;
     const ready = () => {
       const screen = screenText(out);
-      if (!trusted && /Do you trust the contents of this project\?/.test(screen)) { trusted = true; setTimeout(() => { try { term.write('\r'); } catch { /* gone */ } }, 300); }
+      if (!trusted && /Do you trust the contents of this project\?/.test(screen)) { trusted = true; setTimeout(() => type('\r'), 150); }
       return /for shortcuts/.test(screen);
     };
-    if (!await until(ready, Math.min(25000, timeoutMs))) return null;
-    await wait(400); term.write('\x1b'); await wait(500);
-    const mark = out.length;
-    for (const key of '/usage') { term.write(key); await wait(60); }
-    await wait(500); term.write('\r');
+    if (!await until(ready, Math.min(20000, timeoutMs))) return null;
+    let mark = out.length;
     const shown = () => /Models & Quota[\s\S]*\]\s*\d+(?:\.\d+)?\s*%/.test(screenText(out.slice(mark)));
-    if (!await until(shown, Math.min(20000, timeoutMs))) return null;
-    await wait(900); // the rest of the screen
-    return parseUsageScreen(out.slice(mark));
+    type('/usage\r');
+    if (!await until(shown, 3500)) {
+      // A start-up notice can swallow the keys: put it away, clear the line, and ask again, key by key.
+      type('\x1b'); await wait(300); type('\x15'); mark = out.length;
+      for (const key of '/usage') { type(key); await wait(50); }
+      await wait(250); type('\r');
+      if (!await until(shown, Math.min(15000, timeoutMs))) return null;
+    }
+    // The rest of the screen follows the first bar: read once nothing more has come for a moment.
+    for (const end = Date.now() + 2500; Date.now() < end && Date.now() - last < 250 && !exited;) await wait(40);
+    const usage = parseUsageScreen(out.slice(mark));
+    // The CLI's heading names the plan beside the account: "name@example.com (Google AI Ultra)".
+    const plan = headingPlan(screenText(out));
+    return usage ? { ...usage, ...(plan ? { plan } : {}) } : null;
   } finally {
-    try { term.write('\x1b'); await wait(150); term.write('\x03'); await wait(150); term.write('\x03'); } catch { /* already gone */ }
-    setTimeout(() => { try { term.kill(); } catch { /* exited */ } }, 400);
+    type('\x1b'); setTimeout(() => { type('\x03'); type('\x03'); }, 100);
+    setTimeout(() => { try { term.kill(); } catch { /* exited */ } }, 500);
   }
 }

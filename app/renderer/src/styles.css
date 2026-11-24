@@ -253,7 +253,6 @@ code, pre, kbd { font-family: var(--mono); }
 .markdown th, .markdown td { border: 0.5px solid var(--border-strong); padding: 6px 12px; text-align: left; }
 .markdown th { background: rgba(255, 255, 255, .04); font-weight: 600; }
 .markdown hr { border: 0; border-top: 0.5px solid var(--border-strong); margin: 18px 0; }
-.markdown.streaming > :last-child::after { content: ''; display: inline-block; width: 10px; height: 3px; margin-left: 4px; border-radius: 1.5px; background: var(--spectrum); vertical-align: baseline; animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
 .markdown .code-block { margin: 8px 0 14px; border: 0.5px solid var(--border); border-radius: 12px; overflow: hidden; background: #1c1c1c; }
 .markdown .code-head { display: flex; align-items: center; justify-content: space-between; height: 32px; padding: 0 6px 0 14px; background: rgba(255, 255, 255, .035); border-bottom: 0.5px solid var(--hairline); font: 12px var(--mono); color: var(--muted); user-select: none; }

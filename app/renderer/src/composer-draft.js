@@ -32,3 +32,19 @@ export function recoverComposerDraft(draft) {
   if (draft.text || draft.attachments.length) remaining.push(contents(draft));
   return { ...draft, ...recovered, recoveries: remaining, generation: draft.generation + 1, revision: draft.revision + 1 };
 }
+
+// Unsent text is kept across a restart (and a closed window): what was typed into each conversation, and into
+// the new-conversation box. Attachments are not: they are files and pictures read into memory, and stay there.
+const MAX_SAVED_TEXT = 200000;
+export function savedDraftTexts(drafts) {
+  const texts = {};
+  for (const [key, draft] of Object.entries(drafts ?? {})) if (draft?.text?.trim() && draft.text.length <= MAX_SAVED_TEXT) texts[key] = draft.text;
+  return texts;
+}
+// Drafts from what was saved, for the conversations that still exist (`keys`: their ids, and 'new').
+export function draftsFromSaved(saved, keys) {
+  const drafts = {};
+  if (!saved || typeof saved !== 'object') return drafts;
+  for (const key of keys) if (typeof saved[key] === 'string' && saved[key].trim() && saved[key].length <= MAX_SAVED_TEXT) drafts[key] = createComposerDraft(saved[key]);
+  return drafts;
+}

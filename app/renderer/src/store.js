@@ -1,6 +1,6 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { engineLabel, hasAccounts, isCliEngine, readinessKey } from './engines.js';
-import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
+import { createComposerDraft, draftReadToken, draftsFromSaved, savedDraftTexts, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { backgroundSnapshot } from './background-jobs.js';
 import { relativeSessionPath } from './file-paths.js';
 import { clampEffort, claudeEffortsFor, effortsFor, modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
@@ -64,7 +64,7 @@ let state = {
   settingsOpen: false, settingsTab: 'subscriptions', addConnectionOpen: false,
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
-  composerDrafts: {},                       // in-memory text/images per conversation; never written to settings
+  composerDrafts: {},                       // text/images per conversation; the text is kept across restarts (saveDrafts)
   draft: { environmentId: 'local', cwd: null, model: null, engine: 'pi', thinkingLevel: 'medium', effort: 'medium', speed: 'standard', ultra: false, ultracode: false },
 };
 
@@ -199,7 +199,13 @@ window.iris.subscribe(({ channel, payload }) => {
       setSettings(payload); loadCatalog();
       break;
     case 'open-settings':
-      openSettings(true);
+      whenReady(() => openSettings(true));
+      break;
+    case 'menu':
+      whenReady(() => runCommand(payload.command, { menu: true }));
+      break;
+    case 'fullscreen':
+      showFullscreen(payload);
       break;
     case 'update':
       set({ update: payload });
@@ -214,7 +220,7 @@ window.iris.subscribe(({ channel, payload }) => {
       set(s => ({ ultra: { ...s.ultra, [payload.id]: payload.ultra } }));
       break;
     case 'open-session':
-      openSession(payload.id).catch(() => {});
+      whenReady(() => { if (state.sessions.some(s => s.id === payload.id)) openSession(payload.id).catch(() => {}); });
       break;
     case 'agents':
       set(s => ({ agents: { ...s.agents, [payload.id]: Object.fromEntries((payload.agents ?? []).map(agent => [agent.id, agent])) } }));
@@ -228,7 +234,7 @@ window.iris.subscribe(({ channel, payload }) => {
         pendingSessions: { ...s.pendingSessions, [pending.id]: { ...pending, phase: payload.phase } },
       } : {}), sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
       if (payload.status === 'connected' && state.activeId === payload.id && !isCliEngine(state.sessions.find(s => s.id === payload.id)?.engine)) refreshStats(payload.id);
-      if (!pending && (payload.status === 'error' || (payload.status === 'disconnected' && payload.message))) notify(payload.message ?? 'Session disconnected', 'error');
+      if (!pending && (payload.status === 'error' || (payload.status === 'disconnected' && payload.message))) notify(payload.message ?? 'Conversation disconnected', 'error');
       if (payload.status === 'error' || payload.status === 'disconnected') {
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
       }
@@ -278,14 +284,38 @@ window.iris.subscribe(({ channel, payload }) => {
   }
 });
 
+// Full screen has no traffic lights; the title bar takes back the room it leaves for them (workspace.css).
+function showFullscreen(on) { if (on) document.documentElement.dataset.fullscreen = 'true'; else delete document.documentElement.dataset.fullscreen; }
+
+// What the main process asks of a window it has just opened (a notification's conversation, Settings…) can
+// arrive before the conversations have loaded: it is done once they have.
+let waitingForReady = [];
+function whenReady(run) { if (state.ready) run(); else waitingForReady.push(run); }
+
+// What the app menu and the keyboard both ask for. One key press can arrive both ways within a moment (the
+// menu's shortcut and the page's own key handler), so a repeat that close is the same request.
+let lastCommand = { name: null, at: 0 };
+export function runCommand(name, { menu = false } = {}) {
+  const now = Date.now();
+  if (lastCommand.name === name && now - lastCommand.at < 50) return;
+  lastCommand = { name, at: now };
+  if (name === 'new') newSession();
+  else if (name === 'search') openPalette(!state.paletteOpen);
+  else if (name === 'sidebar') toggleSidebar();
+  else if (name === 'settings') openSettings(menu ? true : !state.settingsOpen); // the menu item opens; the key also closes
+  else if (name === 'find' && state.view === 'session' && state.activeId) set({ findRequest: { id: state.activeId } });
+}
+
 export async function bootstrap() {
   api('updateStatus').then(update => set({ update })).catch(() => {});
   const boot = await api('bootstrap');
+  showFullscreen(boot.fullscreen);
   const d = boot.settings.defaults;
   const engine = ['claude-code', 'antigravity', 'codex'].includes(d.engine) ? d.engine : 'pi';
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     sessionUpdate: state.sessionUpdate ?? boot.sessionUpdate,
+    composerDrafts: { ...restoreDrafts(boot.sessions), ...state.composerDrafts },
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
     draft: {
       environmentId: d.environmentId ?? 'local',
@@ -299,6 +329,7 @@ export async function bootstrap() {
       ultracode: false,
     },
   });
+  for (const run of waitingForReady.splice(0)) run();
   loadCatalog();
   // First run (no engine chosen yet, no API keys): start on a CLI that is already signed in on this Mac, so
   // someone with a ChatGPT plan or a Google account can begin without setting anything up.
@@ -460,8 +491,27 @@ const changeComposerDraft = (key, transform) => {
     result = transform(previous);
     return result === previous ? {} : { composerDrafts: { ...s.composerDrafts, [key]: result } };
   });
+  saveDraftsSoon();
   return result;
 };
+// Unsent text survives a restart: written a moment after typing stops, and as the window goes away.
+const DRAFTS_KEY = 'iris.drafts';
+let draftsTimer = null, draftsSaved = null;
+function saveDrafts() {
+  clearTimeout(draftsTimer); draftsTimer = null;
+  if (!state.ready) return; // nothing was restored yet: do not write over it
+  const text = JSON.stringify(savedDraftTexts(state.composerDrafts));
+  if (text === draftsSaved) return;
+  draftsSaved = text;
+  try { if (text === '{}') localStorage.removeItem(DRAFTS_KEY); else localStorage.setItem(DRAFTS_KEY, text); } catch { /* full or unavailable: drafts stay in memory */ }
+}
+function saveDraftsSoon() { if (!draftsTimer) draftsTimer = setTimeout(saveDrafts, 400); }
+function restoreDrafts(sessions) {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(DRAFTS_KEY)); } catch { /* unreadable: start without drafts */ }
+  return draftsFromSaved(saved, ['new', ...sessions.map(session => session.id)]);
+}
+globalThis.addEventListener?.('pagehide', saveDrafts);
 // Beginning a read counts as an edit for failure recovery, but keeps the generation
 // so parallel reads (and reads across navigation) can still complete together.
 export const captureComposerDraft = key => draftReadToken(changeComposerDraft(key, draft =>
@@ -515,7 +565,7 @@ export function clearSubagentRecords(id, onlyIds) {
   const ids = all.flatMap(batch => batch.tasks).filter(task => isSubagentFinished(task) && (!requested || requested.has(subagentHistoryId(task)))).map(subagentHistoryId);
   if (!ids.length) return;
   askConfirm({ title: 'Clear subagent records?', action: 'Clear records',
-    message: `Remove ${ids.length} finished ${ids.length === 1 ? 'task' : 'tasks'} from this session’s task history. Running tasks, main conversation, usage and files are kept. Original tool records remain in the conversation.`,
+    message: `Remove ${ids.length} finished ${ids.length === 1 ? 'task' : 'tasks'} from this conversation’s task history. Running tasks, main conversation, usage and files are kept. Original tool records remain in the conversation.`,
     run: async () => {
       try {
         // No optimistic removal: a failed durable save must not pretend history was cleared.
@@ -625,10 +675,20 @@ export function refreshCliReadiness(environmentId, engine = 'antigravity') {
 
 // Hovering a conversation in the sidebar starts its Pi, so it is usually running by the time it opens.
 const warmed = new Map();
+// Resting the pointer on a conversation starts its agent ahead of the click. Passing over rows on the way to
+// another one starts nothing: every start is a process of its own (about 180 MB), and one pass down the
+// sidebar used to start a dozen of them.
+const HOVER_INTENT_MS = 250;
+let warmTimer = null;
+export function cancelWarm() { clearTimeout(warmTimer); warmTimer = null; }
 export function warmSession(id) {
+  cancelWarm();
   if (state.activeId === id || Date.now() - (warmed.get(id) ?? 0) < 60000) return;
-  warmed.set(id, Date.now());
-  api('warmSession', id).catch(() => {});
+  warmTimer = setTimeout(() => {
+    warmTimer = null;
+    warmed.set(id, Date.now());
+    api('warmSession', id).catch(() => {});
+  }, HOVER_INTENT_MS);
 }
 
 export async function openSession(id, { record = true } = {}) {
@@ -694,7 +754,7 @@ export async function startSession(text, attachments = []) {
   if (blocked) throw new Error(blocked);
   const pendingId = `pending:${++nextPendingId}`;
   const environmentLabel = state.environments.find(env => env.id === draft.environmentId)?.label ?? 'the selected machine';
-  const pendingSession = { id: pendingId, title: 'New session', status: 'connecting', phase: claude || (cli && draft.environmentId !== 'local') ? 'preparing' : 'starting',
+  const pendingSession = { id: pendingId, title: 'New conversation', status: 'connecting', phase: claude || (cli && draft.environmentId !== 'local') ? 'preparing' : 'starting',
     environmentId: draft.environmentId, environmentLabel, engine: draft.engine, cwd: draft.cwd ?? '', streaming: true };
   const clearPending = s => { const { [pendingId]: _, ...remaining } = s.pendingSessions; return remaining; };
   set({ view: 'session', activeId: pendingId, pendingSessions: { ...state.pendingSessions, [pendingId]: pendingSession },
@@ -830,6 +890,26 @@ export async function deleteSession(id) {
       return { sessions };
     });
     throw error;
+  } finally { deleting.delete(id); }
+}
+
+// Archive: the row goes at once, like Delete. Stopping its agent (on a host, over SSH) takes a moment and
+// must not leave the row sitting there; if it fails the conversation comes back and says why.
+export async function archiveSession(id) {
+  if (deleting.has(id)) return;
+  const index = state.sessions.findIndex(s => s.id === id), removed = state.sessions[index];
+  if (!removed) return;
+  deleting.add(id);
+  set(s => ({ sessions: s.sessions.filter(x => x.id !== id) }));
+  if (state.activeId === id) newSession();
+  try { await api('archive', id); }
+  catch (error) {
+    set(s => {
+      const sessions = s.sessions.filter(x => x.id !== id);
+      sessions.splice(Math.max(0, index), 0, removed);
+      return { sessions };
+    });
+    notify(`Could not archive “${removed.title}”: ${error.message}`, 'error');
   } finally { deleting.delete(id); }
 }
 

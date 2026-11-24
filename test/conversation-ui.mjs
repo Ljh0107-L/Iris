@@ -87,6 +87,25 @@ try {
   await streamed.waitFor();
   assert.equal((await streamed.innerText()).replace(/\s+/g, ' ').trim(), words.join('').trim(), 'every delta is shown, in order');
 
+  // ---- text that arrives later leaves what is already written alone: the same nodes, and a selection in them stays
+  await page.evaluate(() => {
+    const first = document.querySelector('.markdown.streaming > p');
+    window.firstBlock = first;
+    const range = document.createRange(); range.selectNodeContents(first);
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+  });
+  const more = ['\n\n```js\nconst a', ' = 1;\n```\n\n', 'Second ', 'paragraph '];
+  words.push(...more);
+  for (const delta of more) {
+    await page.evaluate(({ id, delta }) => window.fixtureEvent({ channel: 'event', payload: { id, event: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta } } } }), { id: session.id, delta });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  }
+  await streamed.locator('p', { hasText: 'Second paragraph' }).waitFor();
+  assert.deepEqual(await page.evaluate(() => {
+    const blocks = [...document.querySelector('.markdown.streaming').children];
+    return { kept: blocks[0] === window.firstBlock, blocks: blocks.map(el => el.tagName === 'DIV' ? el.className : el.tagName), selected: getSelection().toString().slice(0, 8), code: document.querySelector('.markdown.streaming code.hljs').innerText.trim() };
+  }), { kept: true, blocks: ['P', 'code-block', 'P'], selected: 'w0 w1 w2', code: 'const a = 1;' });
+
   // ---- a message sent with Option+Enter while the agent works is queued, not an interruption
   const input = page.locator('.dock textarea[aria-label="Message"]');
   await input.fill('Also update the README afterwards');
@@ -109,8 +128,9 @@ try {
     send({ type: 'agent_settled' });
     window.fixtureEvent({ channel: 'status', payload: { id, status: 'connected', streaming: false } });
   }, { id: session.id, text: words.join('') });
-  await page.locator('.markdown', { hasText: 'w399 tail' }).waitFor();
+  await page.locator('.markdown', { hasText: 'Second paragraph tail' }).waitFor();
   assert.equal(await page.locator('.markdown.streaming').count(), 0);
+  assert.equal(await page.evaluate(() => window.firstBlock.isConnected), true, 'nothing is rebuilt when the reply finishes either');
   assert.equal(await page.locator('.user-row.queued').count(), 0, 'the queue is cleared when the run settles');
 
   // ---- Find in conversation reaches rows that are not rendered and results inside folded steps

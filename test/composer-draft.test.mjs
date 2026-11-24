@@ -141,3 +141,18 @@ test('late reads and failures cannot resurrect a deleted or recreated key', () =
   assert.equal(append(recreated, token), recreated);
   assert.equal(restoreComposerDraft(recreated, receipt), recreated);
 });
+
+test('unsent text is kept across a restart, for conversations that still exist', async () => {
+  const { savedDraftTexts, draftsFromSaved } = await import('../app/renderer/src/composer-draft.js');
+  const drafts = { new: createComposerDraft('half a question'), a: createComposerDraft('  '), b: { ...createComposerDraft('with a picture'), attachments: [{ name: 'shot.png', data: 'AAAA' }] }, c: createComposerDraft('x'.repeat(200001)), d: null };
+  const saved = savedDraftTexts(drafts);
+  // Only text is written: no attachments, nothing empty, nothing unreasonably large.
+  assert.deepEqual(saved, { new: 'half a question', b: 'with a picture' });
+  const restored = draftsFromSaved(JSON.parse(JSON.stringify({ ...saved, gone: 'its conversation was deleted', odd: 5 })), ['new', 'b', 'odd', 'never-typed-in']);
+  assert.deepEqual(Object.keys(restored), ['new', 'b']);
+  assert.equal(restored.b.text, 'with a picture');
+  assert.deepEqual(restored.b.attachments, []);
+  assert.deepEqual(draftsFromSaved(null, ['new']), {});
+  assert.deepEqual(draftsFromSaved('not an object', ['new']), {});
+  assert.deepEqual(savedDraftTexts(undefined), {});
+});

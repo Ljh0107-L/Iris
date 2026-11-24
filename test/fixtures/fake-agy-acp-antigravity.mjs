@@ -123,8 +123,17 @@ lines.on('line', line => {
         save({ ...cache(), signedIn: false });
         authRequired(r.id); break;
       }
-      // A turn with the token counts the CLI gives (cached tokens are part of the input it reports).
-      if (text === 'counted') { chunk('Counted.'); reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 24, cachedReadTokens: 600, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 1024 } }); break; }
+      // A turn that keeps a task list and starts an agent, as the real CLI reports them: `update_steps` called
+      // again for every change, `invoke_subagent` with the role and the brief.
+      if (text === 'steps') {
+        const tool = (id, title, rawInput) => { update('tool_call', { toolCallId: id, kind: 'other', title, status: 'in_progress', rawInput }); update('tool_call_update', { toolCallId: id, kind: 'other', title, status: 'completed', rawInput }); };
+        tool('s-1', 'Run update_steps', { steps: [{ status: 'in_progress', title: 'Start sub-agent' }, { status: 'pending', title: 'Report' }] });
+        tool('a-1', 'Run invoke_subagent', { Model: 'flash_lite', Prompt: 'Reply with the word hi', Role: 'Greeter', TypeName: 'self' });
+        tool('s-2', 'Run update_steps', { steps: [{ status: 'done', title: 'Start sub-agent' }, { status: 'done', title: 'Report' }] });
+        chunk('It said hi.'); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
+      // A turn with the token counts the CLI gives (cached tokens are counted apart from the input).
+      if (text === 'counted') { chunk('Counted.'); reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 24, cachedReadTokens: 600, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 1624 } }); break; }
       if (text === 'simple' || bypass) { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }
       turn = { id: r.id, permission: `permission-${++nextPermission}`, text };
       chunk('foreign session should be ignored', 'wrong-session');

@@ -22,10 +22,12 @@ export function GitReview({ session }) {
     setSnapshot(next);
     setSelected(current => next.files?.some(f => keyOf(f) === current) ? current : keyOf(next.files?.[0]));
   }, []);
-  const refresh = useCallback(async () => {
+  // `quiet` is the pane keeping itself current: no spinner, and Commit stays usable. Only a refresh the
+  // person asked for (opening the pane, the Refresh button) shows that it is working.
+  const refresh = useCallback(async quiet => {
     if (mutation.current) return;
-    const version = ++seq.current;
-    setLoading(true);
+    const version = ++seq.current, shown = quiet !== true;
+    if (shown) setLoading(true);
     try {
       const next = await api('gitReview', session.id, { action: 'status' });
       if (alive.current && seq.current === version) { adopt(next); setError(null); }
@@ -34,11 +36,16 @@ export function GitReview({ session }) {
   }, [session.id, adopt]);
   useEffect(() => {
     alive.current = true; refresh();
-    const timer = setInterval(refresh, 5000);
-    window.addEventListener('focus', refresh);
-    return () => { alive.current = false; ++seq.current; clearInterval(timer); window.removeEventListener('focus', refresh); };
-  }, [refresh]);
-  useEffect(() => { const timer = setTimeout(refresh, 250); return () => clearTimeout(timer); }, [toolsDone, refresh]);
+    const quietly = () => refresh(true);
+    // Nothing is read while the window is hidden; coming back to it reads at once. A host is asked less often
+    // than this Mac: every read there is a command over SSH.
+    const timer = setInterval(() => { if (!document.hidden) quietly(); }, session.environmentId === 'local' ? 5000 : 15000);
+    const shown = () => { if (!document.hidden) quietly(); };
+    window.addEventListener('focus', quietly);
+    document.addEventListener('visibilitychange', shown);
+    return () => { alive.current = false; ++seq.current; clearInterval(timer); window.removeEventListener('focus', quietly); document.removeEventListener('visibilitychange', shown); };
+  }, [refresh, session.environmentId]);
+  useEffect(() => { const timer = setTimeout(() => refresh(true), 250); return () => clearTimeout(timer); }, [toolsDone, refresh]);
   useEffect(() => {
     const target = snapshot?.files?.find(f => keyOf(f) === selected);
     if (!target) { setFile(null); setDiffError(null); setDiffLoading(false); return; }
@@ -87,12 +94,12 @@ export function GitReview({ session }) {
       <span className="git-branch" title={snapshot?.root}><Icon name="branch" size={14} />{snapshot?.branch}</span>
       <button className="tool-button" onClick={() => setShowMetadata(x => !x)} aria-label="Show diff metadata" title="Diff metadata" aria-pressed={showMetadata}><Icon name="fileText" size={16} /></button>
       <button className="tool-button" onClick={() => setWrap(x => !x)} aria-label="Wrap diff lines" aria-pressed={wrap}><Icon name="code" size={16} /></button>
-      <button className="tool-button" onClick={refresh} disabled={busy || loading} aria-label="Refresh Git review">{loading ? <Spinner size={14} /> : <Icon name="refresh" size={16} />}</button>
+      <button className="tool-button" onClick={() => refresh()} disabled={busy || loading} aria-label="Refresh Git review">{loading ? <Spinner size={14} /> : <Icon name="refresh" size={16} />}</button>
       <button className="tool-button" onClick={() => setStore({ gitReviewOpen: false })} aria-label="Close Git review"><Icon name="x" size={16} /></button>
     </div>
     {error && <div className="git-review-error" role="alert">{error}<button className="button small" onClick={refresh} disabled={busy}>Refresh</button></div>}
     {!snapshot && !error && <div className="fp-empty"><Spinner /> Reading repository…</div>}
-    {snapshot?.available === false && <div className="fp-empty">This session folder is not in a Git repository.</div>}
+    {snapshot?.available === false && <div className="fp-empty">This conversation’s folder is not in a Git repository.</div>}
     {snapshot?.available && <>
       {snapshot.files.length > 0 ? <div className="git-review-body">
         <nav className="git-file-list" aria-label="Changed files">

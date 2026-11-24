@@ -66,7 +66,7 @@ export async function checkBackgroundJobs({ page, send, check, shot, remote = fa
   check('background tasks appear before the potentially long subagent list', await page.evaluate(() => {
     const taskCard = document.querySelector('.right-panel .jobs').closest('section');
     const subagents = document.querySelector('.right-panel .subagent-list');
-    return !!(taskCard.compareDocumentPosition(subagents) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return !subagents || !!(taskCard.compareDocumentPosition(subagents) & Node.DOCUMENT_POSITION_FOLLOWING); // (no card until an agent is started)
   }));
   check('task rows and their actions stay inside the card at the real panel width', await card().evaluate(element => {
     const box = element.getBoundingClientRect();

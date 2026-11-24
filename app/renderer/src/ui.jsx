@@ -8,7 +8,8 @@ import { mathExtension, withMath } from './markdown-math.js';
 import { Icon } from './Icons.jsx';
 import { api, downloadFile, notify, openFile } from './store.js';
 import { resolveMarkdownReference } from './file-paths.js';
-import { loadMarkdownImages, prepareFileMarkdown, scrollMarkdownAnchor } from './markdown-files.js';
+import { loadMarkdownImages, prepareFileFragment, prepareFileMarkdown, scrollMarkdownAnchor } from './markdown-files.js';
+import { markdownBlocks, unchangedBlocks } from './markdown-blocks.js';
 
 // ---------------------------------------------------------------- popover menu
 export function Popover({ anchor, open, onClose, children, placement = 'top-start', width, className = '' }) {
@@ -184,17 +185,51 @@ marked.setOptions({ gfm: true, breaks: false, renderer });
 marked.use(mathExtension);
 DOMPurify.addHook('afterSanitizeAttributes', node => { if (node.tagName === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noreferrer'); } });
 
+const sanitizeMarkdown = html => DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] });
+
+// A reply that is still being written: render the blocks that changed and leave the rest of it alone
+// (markdown-blocks.js).
+function updateMarkdownBlocks(root, shown, text, { documentPath, readFile }) {
+  const next = markdownBlocks(marked, text, shown.parsed), kept = unchangedBlocks(shown.parsed, next);
+  shown.parsed = next;
+  for (const block of shown.drawn.splice(kept)) { block.dispose?.(); for (const node of block.nodes) node.remove(); }
+  const ids = new Set(shown.drawn.flatMap(block => block.ids));
+  for (const { tokens } of next.blocks.slice(kept)) {
+    const clean = withMath(() => marked.Parser.parse(tokens, marked.defaults), sanitizeMarkdown);
+    const before = new Set(ids);
+    let fragment;
+    if (documentPath !== undefined) fragment = prepareFileFragment(clean, documentPath, ids);
+    else { const template = document.createElement('template'); template.innerHTML = clean; fragment = template.content; }
+    const nodes = [...fragment.childNodes];
+    root.append(fragment);
+    // Images load once they are on the page; only this block's are looked at.
+    const within = { querySelectorAll: selector => nodes.flatMap(node => node.nodeType === 1 ? [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)] : []) };
+    shown.drawn.push({ nodes, ids: [...ids].filter(id => !before.has(id)), dispose: readFile ? loadMarkdownImages(within, readFile) : null });
+  }
+}
+
 export function Markdown({ text, streaming, sessionId, documentPath, refreshKey }) {
   const root = useRef(null);
   const [menu, setMenu] = useState(null);
+  // Decided when the reply appears and kept for as long as it is on screen, so that nothing is rebuilt at
+  // the moment it finishes either.
+  const incremental = useRef(!!streaming).current;
+  const shown = useRef(null);
   const html = useMemo(() => {
-    const clean = withMath(() => marked.parse(text ?? ''), html => DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] }));
+    if (incremental) return null;
+    const clean = withMath(() => marked.parse(text ?? ''), sanitizeMarkdown);
     return documentPath !== undefined ? prepareFileMarkdown(clean, documentPath) : clean;
-  }, [text, documentPath]);
+  }, [incremental, text, documentPath]);
   useEffect(() => {
-    if (!sessionId || documentPath === undefined || !root.current) return;
+    if (incremental || !sessionId || documentPath === undefined || !root.current) return;
     return loadMarkdownImages(root.current, path => api('readFile', sessionId, path));
-  }, [html, sessionId, documentPath, refreshKey]);
+  }, [incremental, html, sessionId, documentPath, refreshKey]);
+  useLayoutEffect(() => {
+    if (!incremental || !root.current) return;
+    shown.current ??= { parsed: { context: null, blocks: [] }, drawn: [] }; // what the reply said, and the nodes of each block
+    updateMarkdownBlocks(root.current, shown.current, text, { documentPath, readFile: sessionId && documentPath !== undefined ? path => api('readFile', sessionId, path) : null });
+  }, [incremental, text, sessionId, documentPath]);
+  useLayoutEffect(() => () => { for (const block of shown.current?.drawn ?? []) block.dispose?.(); shown.current = null; }, []);
   const openTarget = path => {
     if (sessionId) openFile(sessionId, path);
     else window.dispatchEvent(new CustomEvent('iris:open-file', { detail: path }));
@@ -243,7 +278,9 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
     setMenu({ ...target, anchor: pointAnchor(e.clientX, e.clientY) });
   };
   return <>
-    <div ref={root} className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} onContextMenu={onContextMenu} dangerouslySetInnerHTML={{ __html: html }} />
+    {incremental
+      ? <div ref={root} className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} onContextMenu={onContextMenu} />
+      : <div ref={root} className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} onContextMenu={onContextMenu} dangerouslySetInnerHTML={{ __html: html }} />}
     <FileContextMenu menu={menu} sessionId={sessionId} onClose={() => setMenu(null)} />
   </>;
 }

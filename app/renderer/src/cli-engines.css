@@ -39,17 +39,17 @@
 .sub-account > .cli-install { padding-top: 8px; }
 .cli-install { flex: 1 0 100%; display: grid; gap: 7px; }
 .cli-install > div { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
-.cli-install progress { width: 100%; height: 8px; accent-color: var(--accent); border-radius: 999px; overflow: hidden; }
-.cli-install progress::-webkit-progress-bar { background: var(--surface-2); }
-.cli-install progress::-webkit-progress-value { border-radius: 999px; background: var(--spectrum); transition: width .12s ease; }
-.cli-install progress:indeterminate { background: var(--spectrum) left / 35% 100% no-repeat var(--surface-2); animation: cli-install-progress 1.25s ease-in-out infinite alternate; }
-.cli-install progress:indeterminate::-webkit-progress-bar { background: transparent; }
-@keyframes cli-install-progress { to { background-position: right; } }
+.cli-install-bar { height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
+/* The whole spectrum, uncovered from the left as the download advances. Before its size is known, a window
+   moves over the same spectrum: the colours stay in place either way. */
+.cli-install-bar > span { display: block; height: 100%; background: var(--spectrum); clip-path: inset(0 calc(100% - var(--progress, 0) * 100%) 0 0); transition: clip-path .12s ease; }
+.cli-install-bar.indeterminate > span { transition: none; animation: cli-install-progress 1.25s ease-in-out infinite alternate; }
+@keyframes cli-install-progress { from { clip-path: inset(0 65% 0 0 round 999px); } to { clip-path: inset(0 0 0 65% round 999px); } }
 @media (prefers-reduced-motion: reduce) { .cli-install progress { animation: none; } }
 .cli-settings-error { margin: 0; padding: 8px 0; color: var(--red); overflow-wrap: anywhere; }
 .cli-terminal-card { margin: 10px 0 4px; border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; }
 .cli-terminal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; }
-.cli-settings-terminal { height: 290px; padding: 8px 6px; background: #0d0d0f; }
+.cli-settings-terminal { height: 290px; padding: 8px 6px; }
 .cli-composer-error { margin: 4px 12px; color: var(--red); font-size: 12px; }
 .cli-account-name { height: 30px; width: 180px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--field); color: var(--text); font-size: var(--fs-base); }
 .cli-account-name:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { engineCli, engineLabel, isCliEngine } from './engines.js';
+import { engineCli, engineLabel, isCliEngine, readinessKey } from './engines.js';
 import { EngineLogo, EngineMark, Icon, IrisMark } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar, NewSessionTrayHead } from './Composer.jsx';
@@ -15,7 +15,7 @@ import { Palette } from './Palette.jsx';
 import { Modal, Popover, Spinner, Trigger } from './ui.jsx';
 import { antigravityTurnSpeed, emptyTranscript, findBlocks, formatTokens } from './transcript.js';
 import { sortedBackgroundJobs } from './background-jobs.js';
-import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setFilePaneOpen, setSidebarAuto, sidebarShown, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, runCommand, sendPrompt, setFilePaneOpen, setSidebarAuto, sidebarShown, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
 // The session's goal (/goal): objective, state, and pause / resume / clear.
 function GoalBanner({ session }) {
@@ -88,8 +88,12 @@ function useWindowWidth() {
 
 function NewSessionView() {
   const draft = useStore(s => s.draft);
-  // No model to run anything with (a new user): show the ways to connect one, not just a small link.
   const isClaude = draft.engine === 'claude-code', cli = isCliEngine(draft.engine);
+  // The chosen agent has nothing to run on yet (a new user, mostly): one line under the heading says how to
+  // start, with the two places to go. Nothing is shown while that is still being found out.
+  const readiness = useStore(s => s.cliReadiness[readinessKey(draft.engine, draft.environmentId)]);
+  const loadingModels = useStore(s => s.catalogLoading);
+  const needsStart = cli ? ['missing', 'signedOut'].includes(readiness) : !draft.model && !loadingModels;
   // Warm the selected engine's runtime without waiting for the first message.
   useEffect(() => {
     if (!draft.model && !isClaude && !cli) return;
@@ -102,6 +106,7 @@ function NewSessionView() {
         <div className="code-empty" aria-label="Ready to code">
           <IrisMark />
           <h1 className="welcome-heading">What can we build today?</h1>
+          {needsStart && <p className="welcome-start">To start, <button type="button" className="welcome-link" onClick={() => openSettings(true, 'subscriptions', { environmentId: draft.environmentId })}>sign in with a ChatGPT or Google plan</button> or <button type="button" className="welcome-link" onClick={() => openSettings(true, 'providers')}>add an API key</button>.</p>}
         </div>
         <div className="dock new-session-dock">
           <div className="composer-shell">
@@ -120,7 +125,7 @@ function ConnectionBanner({ session }) {
     return <div className="conn-banner"><Spinner size={13} /> <span className="conn-text">Reconnecting to <b>{session.environmentLabel}</b>… {agent} keeps working {session.environmentId === 'local' ? 'on this Mac' : 'on the server'}.</span></div>;
   }
   if (session.status === 'disconnected' || session.status === 'error') {
-    return <div className="conn-banner error"><Icon name="unplug" size={15} /> <span className="conn-text">{session.statusMessage || 'Disconnected from this session.'}</span>
+    return <div className="conn-banner error"><Icon name="unplug" size={15} /> <span className="conn-text">{session.statusMessage || 'Disconnected from this conversation.'}</span>
       <button className="button small" onClick={() => api('reconnect', session.id).catch(e => notify(e.message, 'error'))}>Reconnect</button></div>;
   }
   return null;
@@ -197,13 +202,14 @@ function SessionView({ session }) {
   const [findQuery, setFindQuery] = useState('');
   useEffect(() => {
     if (!findRequest) return;
-    setFindQuery(findRequest.query); setFindOpen(true);
+    if (findRequest.query != null) setFindQuery(findRequest.query); // ⌘F opens Find with what was in it
+    setFindOpen(true);
     setStore({ findRequest: null });
   }, [findRequest]);
   useEffect(() => {
     const onKey = e => {
       if (e.ctrlKey && e.key === '`') { e.preventDefault(); setStore(st => ({ terminalOpen: !st.terminalOpen })); }
-      else if (e.metaKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); setFindOpen(true); }
+      else if (e.metaKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); runCommand('find'); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -330,7 +336,7 @@ function Header({ session, view }) {
           <button className={`tool-button git-review-toggle ${gitReviewOpen ? 'on' : ''}`} onClick={() => setStore({ gitReviewOpen: !gitReviewOpen, filePaneOpen: false, filePaneMax: false })} aria-label="Review Git changes" aria-pressed={gitReviewOpen} title="Review repository changes"><Icon name="fileDiff" size={16} /></button>
           <button className={`tool-button ${terminalOpen ? 'on' : ''}`} onClick={() => setStore({ terminalOpen: !terminalOpen })} aria-label="Terminal" aria-pressed={terminalOpen} title="Terminal (⌃`)"><Icon name="terminalPanel" size={16} /></button>
           <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" aria-pressed={filePaneOpen} title="Files"><Icon name="folder" size={16} /></button>
-          <button className={`tool-button ${rightPanel && !filePaneOpen && !gitReviewOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen || gitReviewOpen) { setStore({ filePaneOpen: false, gitReviewOpen: false, rightPanel: true }); } else toggleRightPanel(); }} aria-label="Session details" aria-pressed={rightPanel && !filePaneOpen && !gitReviewOpen} title="Session details"><Icon name="panel" size={16} /></button>
+          <button className={`tool-button ${rightPanel && !filePaneOpen && !gitReviewOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen || gitReviewOpen) { setStore({ filePaneOpen: false, gitReviewOpen: false, rightPanel: true }); } else toggleRightPanel(); }} aria-label="Conversation details" aria-pressed={rightPanel && !filePaneOpen && !gitReviewOpen} title="Conversation details"><Icon name="panel" size={16} /></button>
         </div>
       </> : null}
     </header>
@@ -347,7 +353,9 @@ export function App() {
   const notices = useStore(s => s.notices);
   const sidebar = useStore(sidebarShown);
   const pendingSession = useStore(s => s.pendingSessions[s.activeId]);
-  const pendingTranscript = useStore(s => s.transcripts[s.activeId]);
+  // Only a conversation that is still being created is drawn from here. Reading every conversation's
+  // transcript would redraw the whole window, sidebar included, on each frame of a reply.
+  const pendingTranscript = useStore(s => s.pendingSessions[s.activeId] ? s.transcripts[s.activeId] : null);
   useEffect(() => { bootstrap().catch(e => notify(e.message, 'error')); }, []);
   // A narrow window keeps the conversation readable: with a panel open on the right (details, files, Git
   // review) the sidebar steps aside below 1180px, and without one below 860px.
@@ -364,16 +372,19 @@ export function App() {
   }, []);
   useEffect(() => {
     const onKey = e => {
-      if (e.metaKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(!getState().paletteOpen); }
-      else if (e.metaKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newSession(); }
-      else if (e.metaKey && e.key === '\\') { e.preventDefault(); toggleSidebar(); }
-      else if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(!getState().settingsOpen); }
+      if (e.metaKey && e.key.toLowerCase() === 'k') { e.preventDefault(); runCommand('search'); }
+      else if (e.metaKey && e.key.toLowerCase() === 'n') { e.preventDefault(); runCommand('new'); }
+      else if (e.metaKey && e.key === '\\') { e.preventDefault(); runCommand('sidebar'); }
+      else if (e.metaKey && e.key === ',') { e.preventDefault(); runCommand('settings'); }
       else if (e.key === 'Escape' && getState().settingsOpen && !document.querySelector('.modal')) openSettings(false);
       else if (e.key === 'Escape' && getState().sidebarAuto && getState().sidebarPeek) toggleSidebar();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+  // The window carries the open conversation's name: Mission Control and the Window menu show it.
+  const windowTitle = view === 'session' ? (pendingSession ?? sessions.find(s => s.id === activeId))?.title : null;
+  useEffect(() => { document.title = windowTitle || 'Iris'; }, [windowTitle]);
   if (!ready) return <div className="app loading" />;
   const pending = isPendingSession(activeId);
   const session = pendingSession ?? sessions.find(s => s.id === activeId);

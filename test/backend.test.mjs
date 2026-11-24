@@ -398,7 +398,7 @@ test('an unapplied model blocks both prompt and compaction RPCs until it can be 
   await assert.rejects(manager.prompt(record.id, 'Private text'), /Selected model unavailable/);
   await assert.rejects(manager.compact(record.id), /Selected model unavailable/);
   assert.deepEqual(sent, []);
-  assert.equal(manager.record(record.id).title, 'New session');
+  assert.equal(manager.record(record.id).title, 'New conversation');
   available = true;
   await manager.prompt(record.id, 'Private text');
   await manager.compact(record.id);

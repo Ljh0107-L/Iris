@@ -1,7 +1,7 @@
 // Antigravity's /usage screen, as the CLI printed it in a terminal (colours and cursor moves included).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseUsageScreen, screenText } from '../app/main/antigravity-usage.mjs';
+import { headingPlan, parseUsageScreen, screenText } from '../app/main/antigravity-usage.mjs';
 
 const SCREEN = [
   '\x1b[2J\x1b[H> /usage\r\n',
@@ -28,4 +28,9 @@ test('a redrawn screen is read from its last drawing, and a terminal without the
   assert.equal(parseUsageScreen(twice, 0).limits[0].usedPercent, 38.5);
   assert.equal(parseUsageScreen('\x1b[2J> hello\r\n? for shortcuts'), null);
   assert.equal(screenText('\x1b[31mred\x1b[0m\rnext'), 'red\nnext');
+});
+
+test('the plan is the bracket the heading draws after the account', () => {
+  assert.equal(headingPlan(screenText('\x1b[1m▀▀▀  dev@example.test\x1b[0m\x1b[3;40H (Google AI Ultra)\r\n> Auto mode (shift+tab to cycle)')), 'Google AI Ultra');
+  assert.equal(headingPlan('Welcome. You are currently not signed in. (shift+tab to cycle)'), null);
 });

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, safeStorage, screen, shell } from 'electron';
+import { MIN_SIZE, openingBounds, readWindowState, rememberWindow } from './window-state.mjs';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,11 @@ function nodeBinary() {
 
 if (process.env.IRIS_USER_DATA) app.setPath('userData', process.env.IRIS_USER_DATA);
 app.setName('Iris');
+// One Iris per profile. A second one would write the same conversation list and settings over this one's and
+// start a second relay for the same conversations; starting Iris again brings the running one forward.
+const primary = app.requestSingleInstanceLock();
+if (!primary) app.quit();
+else app.on('second-instance', () => showWindow());
 
 let store, manager, window, usage;
 const environments = () => listEnvironments({ sshConfig: process.env.IRIS_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} });
@@ -161,7 +167,7 @@ function recoverUpdatedSessions(plan, prior = []) {
 
 const api = {
   async bootstrap() {
-    return { settings: publicSettings(), environments: environments(), sessions: manager.list(), sessionUpdate, piVersion, platform: process.platform, home: app.getPath('home') };
+    return { settings: publicSettings(), environments: environments(), sessions: manager.list(), sessionUpdate, piVersion, platform: process.platform, home: app.getPath('home'), fullscreen: !!window && !window.isDestroyed() && window.isFullScreen() };
   },
   environments: () => environments(),
   // SSH connections the user works with (Settings → Connections).
@@ -277,6 +283,8 @@ const api = {
   cliSignIn: (environmentId, engine, account) => manager.cliSignIn(environmentId, { engine: cliEngineOf(engine), account }),
   cliSignInCancel: (environmentId, engine, account) => manager.cliSignInCancel(environmentId, { engine: cliEngineOf(engine), account }),
   cliCopySignIn: (environmentId, engine, account) => manager.cliCopySignIn(environmentId, { engine: cliEngineOf(engine), account }),
+  cliAccountLast: (environmentId, engine, account) => manager.cliAccountLast(environmentId, cliEngineOf(engine), account),
+  cliUsageLast: (environmentId, engine) => cliEngineOf(engine) === 'antigravity' ? store.settings.cliUsage?.[environmentId] ?? null : null,
   // Antigravity's quota on this Mac, read from the CLI's own /usage screen (see antigravity-usage.mjs). It
   // takes some seconds, so a reading is kept for five minutes unless a fresh one is asked for.
   async cliUsage(environmentId, engine, force = false) {
@@ -293,7 +301,9 @@ const api = {
       const env = { ...process.env, ...manager.local.extraEnv, TERM: 'xterm-256color' };
       delete env.ELECTRON_RUN_AS_NODE;
       return readAntigravityUsage({ bin, cwd, env, spawnPty });
-    })().then(result => { entry.pending = false; entry.at = Date.now(); if (!result) cliUsage.delete(environmentId); return result; },
+    })().then(result => { entry.pending = false; entry.at = Date.now(); if (!result) cliUsage.delete(environmentId);
+      else { (store.settings.cliUsage ??= {})[environmentId] = result; try { store.saveSettings(); } catch { /* read again next time */ } } // shown at once after a restart
+      return result; },
       () => { cliUsage.delete(environmentId); return null; });
     cliUsage.set(environmentId, entry);
     return entry.promise;
@@ -382,7 +392,10 @@ const api = {
   appearance(theme) {
     if (!['light', 'dark', 'system'].includes(theme)) throw new Error('Unknown appearance');
     nativeTheme.themeSource = theme; // 'system' follows macOS, and the renderer's media query with it
-    window?.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#121214' : '#fdfdfd');
+    if (window && !window.isDestroyed()) window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#121214' : '#fdfdfd');
+    // Kept for the next start: the window is created in this colour before the page can say which it wants,
+    // so a dark window on a light system does not open with a white flash.
+    if (store.settings.appearance !== theme) { store.settings.appearance = theme; try { store.saveSettings(); } catch { /* asked again at the next start */ } }
   },
   compact: id => manager.compact(id),
   openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
@@ -411,8 +424,12 @@ ipcMain.handle('iris:invoke', async (_event, method, ...args) => {
 });
 
 function createWindow() {
+  const statePath = join(app.getPath('userData'), 'window.json'), saved = readWindowState(statePath);
+  const displays = screen.getAllDisplays(), main = screen.getPrimaryDisplay();
   window = new BrowserWindow({
-    width: 1440, height: 900, minWidth: 880, minHeight: 640,
+    ...openingBounds(saved, [main, ...displays.filter(display => display.id !== main.id)].map(display => display.workArea)),
+    minWidth: MIN_SIZE.width, minHeight: MIN_SIZE.height,
+    ...(saved?.fullscreen === true ? { fullscreen: true } : {}), // (an explicit false would take full screen away altogether)
     title: 'Iris',
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#121214' : '#fdfdfd',
     titleBarStyle: 'hiddenInset',
@@ -420,29 +437,58 @@ function createWindow() {
     icon: join(root, 'build/icon.png'),
     webPreferences: { preload: join(root, 'app/main/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, plugins: true },
   });
+  rememberWindow(window, statePath);
   window.on('focus', () => attention.focused());
+  // Full screen has no traffic lights: the page gives their room back to the title bar.
+  window.on('enter-full-screen', () => send('fullscreen', true));
+  window.on('leave-full-screen', () => send('fullscreen', false));
   window.webContents.setWindowOpenHandler(({ url }) => { api.openExternal(url); return { action: 'deny' }; });
   window.webContents.on('will-navigate', (event, url) => { if (url !== window.webContents.getURL()) { event.preventDefault(); api.openExternal(url); } });
   if (process.env.IRIS_DEV_URL) window.loadURL(process.env.IRIS_DEV_URL);
   else window.loadFile(join(root, 'dist/renderer/index.html'));
 }
 
+// The window, in front. On a Mac closing it leaves the app running, so it may have to be opened again.
+function showWindow() {
+  if (!manager) return null; // still starting: the window is about to open anyway
+  if (!window || window.isDestroyed()) createWindow();
+  else { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
+  return window;
+}
+// Something for the interface to do: open Settings, a conversation, a menu command. A window that had to be
+// opened for it gets it once its page has loaded.
+function ask(channel, payload) {
+  const target = showWindow();
+  if (!target) return;
+  if (target.webContents.isLoading()) target.webContents.once('did-finish-load', () => send(channel, payload));
+  else send(channel, payload);
+}
+
 // Asked once, while the app starts: what PATH the user's login shell has (shell-env.mjs). Agents on this
 // Mac wait for the answer, so the first conversation already finds the user's own tools.
-const shellEnv = process.env.IRIS_INSECURE_TEST_STORAGE === '1' || process.env.IRIS_NO_SHELL_ENV ? Promise.resolve({}) : resolveShellEnv();
+const shellEnv = !primary || process.env.IRIS_INSECURE_TEST_STORAGE === '1' || process.env.IRIS_NO_SHELL_ENV ? Promise.resolve({}) : resolveShellEnv();
 app.whenReady().then(async () => {
+  if (!primary) return;
   updater = new Updater({ app, net, cacheDir: join(app.getPath('userData'), 'updates'), send });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: app.name, submenu: [
       { role: 'about' },
       { label: 'Check for Updates…', click: () => void checkForUpdatesFromMenu() },
       { type: 'separator' },
-      { label: 'Session Update Report…', click: () => api.showSessionUpdateReport().catch(error => send('notice', { level: 'error', message: error.message })) },
-      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('open-settings', {}) },
+      { label: 'Update Report…', click: () => api.showSessionUpdateReport().catch(error => send('notice', { level: 'error', message: error.message })) },
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => ask('menu', { command: 'settings' }) },
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
     ] },
+    // The page handles these keys itself while it has the keyboard; the menu shows them, answers a click, and
+    // opens the window for them when it was closed.
+    { label: 'File', submenu: [
+      { label: 'New Conversation', accelerator: 'CmdOrCtrl+N', click: () => ask('menu', { command: 'new' }) },
+      { label: 'Search…', accelerator: 'CmdOrCtrl+K', click: () => ask('menu', { command: 'search' }) },
+      { label: 'Find in Conversation…', accelerator: 'CmdOrCtrl+F', click: () => ask('menu', { command: 'find' }) },
+      { type: 'separator' }, { role: 'close' },
+    ] },
     { role: 'editMenu' },
-    { label: 'View', submenu: [{ role: 'reload', visible: !app.isPackaged }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
+    { label: 'View', submenu: [{ label: 'Show or Hide Sidebar', accelerator: 'CmdOrCtrl+\\', click: () => ask('menu', { command: 'sidebar' }) }, { type: 'separator' }, { role: 'reload', visible: !app.isPackaged }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
     { role: 'windowMenu' },
   ]));
   if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(join(root, 'build/icon.png')));
@@ -488,10 +534,18 @@ app.whenReady().then(async () => {
     sessionRecovery = Promise.resolve({ version: app.getVersion(), restarted: [], failures: [{ environment: 'Iris', message: error.message }] });
     setSessionUpdate('complete', app.getVersion(), 0, 1);
   }
+  // The appearance chosen in the app, before the window exists: it opens in that colour.
+  if (['light', 'dark'].includes(store.settings.appearance)) nativeTheme.themeSource = store.settings.appearance;
   createWindow();
   updater.start();
+  // Subscriptions: ask the CLIs on this Mac who is signed in and how much is used, a few seconds after start-up,
+  // so the page shows it without a wait. Not in tests: they do not run the user's CLIs unasked.
+  if (process.env.IRIS_INSECURE_TEST_STORAGE !== '1') setTimeout(() => {
+    manager.warmCliAccounts().catch(() => {});
+    api.cliUsage('local', 'antigravity').catch(() => {});
+  }, 4000).unref?.();
   if (process.env.IRIS_SMOKE_TEST) smokeTest();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else showWindow(); });
 });
 
 // A reply that finished, or a question waiting, while you were in another app: a notification, and a count
@@ -508,7 +562,7 @@ const attention = createAttention({
     if (!Notification.isSupported()) return;
     const note = new Notification({ title, body });
     notes.add(note);
-    note.on('click', () => { notes.delete(note); if (window && !window.isDestroyed()) { window.show(); window.focus(); send('open-session', { id }); } });
+    note.on('click', () => { notes.delete(note); ask('open-session', { id }); });
     note.on('close', () => notes.delete(note));
     note.show();
   },
@@ -529,7 +583,7 @@ function ultraChanged({ id, ultra, ended, title, local }) {
   keepAwake();
   if (ended && ['complete', 'stalled', 'needs_attention'].includes(ended) && Notification.isSupported()) {
     const note = new Notification({ title: ended === 'complete' ? 'Ultra finished' : ended === 'needs_attention' ? 'Ultra needs attention: review not passed' : 'Ultra stopped: no progress', body: title || 'Conversation' });
-    note.on('click', () => { if (window && !window.isDestroyed()) { window.show(); window.focus(); send('open-session', { id }); } });
+    note.on('click', () => ask('open-session', { id }));
     note.show();
   }
 }
