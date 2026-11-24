@@ -78,6 +78,23 @@ test('Antigravity discovery prefers the official installer location without runn
   assert.equal(findCli({ home, path }), join(install, 'agy'));
 });
 
+test('an automated run finds only the CLIs a test put there, never the ones installed on this machine', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pda-isolated-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const tools = join(dir, 'tools'); mkdirSync(tools);
+  const search = { home: join(dir, 'no-home'), path: '', system: false }; // what the app passes under an isolated test profile
+  // Whatever this machine has in ~/.local/bin, on PATH or in Homebrew's folders is not looked at.
+  for (const name of ['agy', 'codex']) assert.equal(findCli({ name, path: process.env.PATH, ...search }), null);
+  writeFileSync(join(tools, 'codex'), 'fixture', { mode: 0o700 });
+  assert.equal(findCli({ name: 'codex', path: process.env.PATH, ...search, path: tools }), join(tools, 'codex'));
+  // The same through the manager: both CLIs are reported missing, and nothing of theirs is started.
+  const manager = new SessionManager({ store: { sessions: [], settings: { defaults: {}, providers: [], environments: {} }, saveSettings() {}, saveSessions() {}, touchRecent() {} },
+    environments: () => [{ id: 'local', kind: 'local', label: 'Local' }], piVersion: '0', local: { node: process.execPath, agentDir: join(dir, 'agent'), runDir: join(dir, 'run'), extraEnv: { PATH: process.env.PATH } }, cliSearch: search });
+  t.after(() => manager.shutdown());
+  assert.deepEqual(await manager.cliInfo('local', 'antigravity'), { installed: false });
+  assert.deepEqual(await manager.cliInfo('local', 'codex'), { installed: false });
+});
+
 test('Antigravity readiness is read-only and does not throw away a healthy standby', { timeout: 12000 }, async t => {
   const f = await fixture(t);
   const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');

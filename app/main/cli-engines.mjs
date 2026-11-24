@@ -16,10 +16,13 @@ const agentFile = name => fileURLToPath(new URL(`../../agent/${name}`, import.me
 // an API key from Settings). Each keeps its credentials; the desktop only starts it and talks to it.
 export const CODEX_ENGINE = 'codex';
 export const CLI_ENGINES = {
-  antigravity: { id: 'antigravity', label: 'Antigravity', bin: 'agy', adapter: 'iris-antigravity.mjs', login: () => ['acp', '--login'],
+  // Its sign-in goes into the data directory Iris's conversations use (`home`). On a Mac that makes no
+  // difference (the sign-in is in the keychain); on a host without one the CLI keeps it in that directory,
+  // and a sign-in made in the CLI's default directory is one Iris's conversations never see.
+  antigravity: { id: 'antigravity', label: 'Antigravity', bin: 'agy', adapter: 'iris-antigravity.mjs', login: (env, home) => ['acp', '--login', ...(home ? ['--app-data-dir', home] : [])],
     install: 'Install it from Settings → Subscriptions, then try again.' },
   // accounts: more than one sign-in per machine, each in its own CODEX_HOME. (Antigravity keeps one
-  // sign-in per machine whatever data directory it is given, so it has no such choice.)
+  // sign-in per machine, so it has no such choice.)
   codex: { id: 'codex', label: 'Codex', bin: 'codex', adapter: 'iris-codex.mjs', accounts: true, login: env => env.kind === 'local' ? ['login'] : ['login', '--device-auth'],
     install: 'Install it with npm install -g @openai/codex (or brew install codex), then try again.' },
 };
@@ -30,7 +33,7 @@ export const cliAdapterPath = engine => agentFile(cliEngine(engine).adapter);
 export const remoteCliAdapter = (facts, engine) => (facts.adapter ?? `${facts.root}/ext/iris-antigravity.mjs`).replace(/iris-antigravity\.mjs$/, cliEngine(engine).adapter);
 
 export const ANTIGRAVITY_ENGINE = 'antigravity';
-export const ANTIGRAVITY_REMOTE_LOGIN = 'Run agy acp --login in the SSH host’s terminal, then reconnect.';
+export const ANTIGRAVITY_REMOTE_LOGIN = 'Sign in to Antigravity on this host in Settings → Subscriptions, then reconnect.';
 
 export function antigravityInstallMessage(env, engine) {
   const target = env.kind === 'local' ? '' : ` on ${env.label ?? env.host}`;
@@ -93,8 +96,10 @@ export function cliSignIn({ bin, local, engine, home = null, onUrl }) {
   return { promise, cancel: () => { try { child.stdin.end(); } catch { /* already gone */ } } };
 }
 
-export function findCli({ home = homedir(), path = process.env.PATH ?? '', name = 'agy' } = {}) {
-  const dirs = [join(home, '.local', 'bin'), ...path.split(delimiter), '/opt/homebrew/bin', '/usr/local/bin'];
+// system: false looks only in `home` and `path`, not in the places Homebrew and installers use on this Mac
+// (automated runs must not find the CLIs, and so the accounts, of whoever runs them).
+export function findCli({ home = homedir(), path = process.env.PATH ?? '', name = 'agy', system = true } = {}) {
+  const dirs = [join(home, '.local', 'bin'), ...path.split(delimiter), ...(system ? ['/opt/homebrew/bin', '/usr/local/bin'] : [])];
   for (const dir of new Set(dirs.filter(isAbsolute))) {
     const bin = join(dir, name);
     try {

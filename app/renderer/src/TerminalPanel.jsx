@@ -97,6 +97,12 @@ export function closeTerminal(sessionId) {
 // output in the terminal only, not in the session transcript or notifications.
 // onLink(url): the first web page the command prints (a sign-in prints the page to open). A terminal wraps a long
 // address over several lines, where it cannot be clicked, so the page is offered as buttons beside the terminal.
+// A command's output and end, without a terminal on screen: for a sign-in the page presents as steps.
+export function watchTerminal(id, { onData, onExit }) {
+  byTermId.set(id, { term: { write() {} }, onData, onExit });
+  return () => { byTermId.delete(id); };
+}
+
 export function CliTerminal({ environmentId, action, engine = 'antigravity', account = null, onExit, onLink }) {
   const host = useRef(null);
   const [error, setError] = useState(null);

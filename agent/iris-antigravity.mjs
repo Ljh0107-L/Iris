@@ -241,17 +241,23 @@ class AcpPeer {
 
 const initParams = version => ({ protocolVersion: 1, clientCapabilities: {},
   clientInfo: { name: 'iris', title: 'Iris', version: version ?? '0.0.0' } });
+// The CLI takes a plain name for its data directory, which it keeps under ~/.gemini beside its own.
+const dataDirName = home => text(home) && /^[\w.-]+$/.test(home) && !home.startsWith('.') ? home : undefined;
 const personalAuth = init => Array.isArray(init?.authMethods) && init.authMethods.some(m => m?.id === AUTH_METHOD && (m.type == null || m.type === 'agent'));
 
 // Settings can probe or authenticate without opening a chat. session/list is read-only;
 // its result (including the user's conversation metadata) never leaves this process.
-// menus: { dir, home } asks, once signed in, what a new conversation can choose from. ACP only says that
-// in the reply to session/new, so one is opened in `dir` (an empty folder of Iris's) under Iris's own
-// Antigravity data directory `home`, never the user's, and closed again; no message is sent.
-async function account({ bin, cwd, login, version, menus = null }) {
+// home: Iris's own Antigravity data directory, the one its conversations use. The check and the sign-in
+// must use it too: where there is no keychain (an SSH host), the CLI keeps a sign-in in its data directory,
+// so one made or looked for in another directory is not the one a conversation gets.
+// menus: { dir } asks, once signed in, what a new conversation can choose from. ACP only says that in the
+// reply to session/new, so one is opened in `dir` (an empty folder of Iris's) and closed again; no message
+// is sent.
+async function account({ bin, cwd, login, version, home = null, menus = null }) {
   if (!isAbsolute(bin ?? '')) throw new Error('Missing Antigravity CLI.');
-  const probe = menus && isAbsolute(menus.dir ?? '') && text(menus.home) && /^[\w.-]+$/.test(menus.home) && !menus.home.startsWith('.') ? menus : null;
-  const peer = new AcpPeer({ bin, cwd, ...(probe ? { appDataDir: probe.home } : {}) }, process.env, (p, r) => {
+  const appDataDir = dataDirName(home);
+  const probe = menus && isAbsolute(menus.dir ?? '') && appDataDir ? menus : null;
+  const peer = new AcpPeer({ bin, cwd, ...(appDataDir ? { appDataDir } : {}) }, process.env, (p, r) => {
     if (rpcId(r.id)) p.send({ id: r.id, error: { code: -32601, message: 'Method not supported' } });
   }, () => {});
   let canSignIn = false;
@@ -351,10 +357,10 @@ export class AntigravityAdapter {
   constructor({ boot, write, env = process.env }) {
     const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, standby, home } = boot?.antigravity ?? {};
     // home: Iris's own Antigravity data directory, so its conversations stay out of the user's own
-    // Antigravity (the Google sign-in is in the keychain, and stays shared). The CLI wants a plain name,
-    // which it keeps under ~/.gemini beside its own `antigravity-cli`.
+    // Antigravity. On a Mac the Google sign-in is in the keychain and shared with it; on a machine without
+    // one it is kept in this directory, which is why Iris signs in with the same directory (account()).
     this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true,
-      appDataDir: text(home) && /^[\w.-]+$/.test(home) && !home.startsWith('.') ? home : undefined };
+      appDataDir: dataDirName(home) };
     this.standby = standby === true && sessionFile == null;
     this.write = write;
     this.env = env;
@@ -568,7 +574,7 @@ export class AntigravityAdapter {
     await this.#ensureReady();
     if (this.sessionId) return this.#state();
     if (!this.authRequired || !this.canSignIn) throw new Error(this.config.remote
-      ? 'Run agy acp --login on the SSH host, then reconnect.' : 'Sign in using the official Antigravity CLI, then reconnect.');
+      ? 'Sign in to Antigravity on this host in Settings → Subscriptions, then reconnect.' : 'Sign in using the official Antigravity CLI, then reconnect.');
     try { await this.peer.request('authenticate', { methodId: AUTH_METHOD }, LOGIN_MS); }
     catch (error) { if (error.authRequired) { this.#authNeeded(); return this.#state(); } throw error; }
     await this.#open();
@@ -848,7 +854,7 @@ try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSy
 if (isMain && ['--account-check', '--account-login'].includes(process.argv[2])) {
   try {
     const result = await account({ bin: process.argv[3], cwd: process.cwd(), login: process.argv[2] === '--account-login', version: process.argv[4],
-      menus: process.env.IRIS_CLI_MENUS_DIR ? { dir: process.env.IRIS_CLI_MENUS_DIR, home: process.argv[5] } : null });
+      home: process.argv[5], menus: process.env.IRIS_CLI_MENUS_DIR ? { dir: process.env.IRIS_CLI_MENUS_DIR } : null });
     output(process.stdout, { cliAccountStatus: result });
   } catch (error) { output(process.stdout, { cliAccountError: error.message }); }
 } else if (isMain) {

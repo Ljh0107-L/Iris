@@ -1,6 +1,6 @@
 // Offline adapter and relay contracts. All SSH and agy invocations reach private fixtures.
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -334,7 +334,7 @@ test('an SSH session never starts browser login and can reopen with the host CLI
   const original = f.start(undefined, { remote: true });
   const state = await original.request('get_state');
   assert.deepEqual(authOptions(state.cli), { authRequired: true, canSignIn: false, options: [] });
-  assert.match((await original.rpc('cli_login')).error, /on the SSH host/);
+  assert.match((await original.rpc('cli_login')).error, /on this host in Settings → Subscriptions/);
   assert.equal(f.calls('authenticate').length, 0);
   assert.equal(f.calls('session/prompt').length, 0);
   await original.stop();
@@ -527,6 +527,7 @@ test('SSH deploys the adapter, prompts for host-side login, and reattaches a run
   const originalEnv = { PATH: process.env.PATH, IRIS_NO_SSH_MUX: process.env.IRIS_NO_SSH_MUX };
   process.env.PATH = `${tools}:${process.env.PATH}`;
   process.env.IRIS_NO_SSH_MUX = '1';
+  writeFileSync(join(home, '.iris-agy-fixture'), f.cwd); // the fake CLI's sign-in and scenario, wherever on the "host" it is started
   const env = { id: 'ssh:agy-fixture', kind: 'ssh', host: 'agy-test-host', label: 'Mock SSH', enabled: true, added: true };
   const store = { sessions: [], settings: { defaults: { antigravityBypassPermissions: false }, providers: [], environments: { [env.id]: { root, added: true } } },
     saveSettings() {}, saveSessions() {}, touchRecent() {} };
@@ -552,9 +553,21 @@ test('SSH deploys the adapter, prompts for host-side login, and reattaches a run
   assert.ok(record.piSessionFile.startsWith(join(root, 'agent/sessions/antigravity')));
   assert.deepEqual(readFileSync(join(root, 'cli/iris-antigravity.mjs')), readFileSync(adapter));
   assert.equal(existsSync(join(root, 'pi')), false);
-  await assert.rejects(manager.cliLogin(record.id), /agy acp --login/);
+  await assert.rejects(manager.cliLogin(record.id), /Settings → Subscriptions/);
   await assert.rejects(manager.prompt(record.id, 'before sign-in'), /Sign in with Google/);
-  writeFileSync(join(f.cwd, '.iris-fake-agy-cache.json'), JSON.stringify({ signedIn: true }));
+  // The host has no keychain: the CLI keeps a sign-in in the data directory it was made with. Signing in the
+  // way a person would by hand, in the CLI's own directory, is therefore not a sign-in for Iris's conversations
+  // (which is how a host could say "Logged in" and Iris still "Not signed in").
+  const signInOnHost = (bin, args, code) => execFileSync(bin, args, { input: `${code}\n`, encoding: 'utf8', cwd: home, env: { ...process.env, HOME: home } });
+  assert.match(signInOnHost(join(home, '.local/bin/agy'), ['acp', '--login'], '4/fixture-code'), /Logged in as fixture@example\.test/);
+  assert.equal((await manager.cliAccountStatus(env.id, { engine: 'antigravity' })).signedIn, false);
+  // The sign-in Iris starts names the directory its conversations use, and is found by the check and by them.
+  const login = await manager.cliTerminal(env.id, 'login', 'antigravity');
+  assert.deepEqual([login.bin, login.args], [join(home, '.local/bin/agy'), ['acp', '--login', '--app-data-dir', 'iris']]);
+  assert.throws(() => signInOnHost(login.bin, login.args, 'not-a-code'), error => /Malformed auth code/.test(error.stdout));
+  assert.equal((await manager.cliAccountStatus(env.id, { engine: 'antigravity' })).signedIn, false);
+  assert.match(signInOnHost(login.bin, login.args, '4/fixture-code'), /Logged in as fixture@example\.test/);
+  assert.equal((await manager.cliAccountStatus(env.id, { engine: 'antigravity' })).signedIn, true);
   await manager.reconnect(record.id);
   assert.equal(manager.list()[0].cli.authRequired, false);
   assert.equal(manager.list()[0].piSessionFile, record.piSessionFile);

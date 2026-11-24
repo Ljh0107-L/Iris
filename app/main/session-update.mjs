@@ -102,6 +102,5 @@ export async function reviewSessionUpdate(result, showMessageBox) {
     message: `Iris ${result.version} installed · ${result.restarted.length} conversations restarted`,
     detail: lines.join('\n\n') || 'No running conversations needed to be restarted.',
   });
-  if (response === 0 && !hasIssues) return 'acknowledge';
   if (response === 1 && canRetry) return 'retry';
 }

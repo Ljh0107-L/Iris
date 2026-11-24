@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Spinner, Trigger, envIcon } from './ui.jsx';
-import { CliTerminal } from './TerminalPanel.jsx';
+import { CliTerminal, watchTerminal } from './TerminalPanel.jsx';
+import { readSignInOutput } from './sign-in-output.js';
 import { api, askConfirm, cliDraftMenus, cliOptionsKey, draftCliAccount, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
 import { CLI_ENGINES, engineLabel, hasAccounts, readinessKey } from './engines.js';
 import './cli-engines.css';
@@ -163,6 +164,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   const antigravity = engine === 'antigravity';
   const local = environmentId === 'local';
   const accountId = profile?.id ?? null; // an extra Codex account; null is the CLI's own sign-in
+  const hostLabel = useStore(s => s.environments.find(e => e.id === environmentId)?.label) ?? 'the host';
   const progress = useStore(s => s.antigravityInstalls[`${environmentId}:${engine}`] ?? (antigravity ? s.antigravityInstalls[environmentId] : null));
   const signInUrl = useStore(s => s.cliSignIns[`${engine}:${environmentId}:${accountId ?? 'default'}`]);
   // What the last check found is shown at once when the page opens again; the new check then updates it
@@ -182,6 +184,8 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   const [copied, setCopied] = useState(false);
   const [copying, setCopying] = useState(false);
   const [terminalLink, setTerminalLink] = useState(null); // the page a sign-in in the terminal says to open
+  const [hostSignIn, setHostSignIn] = useState(false); // Antigravity on a host: the link-and-code sign-in is open
+  const [hostIdentity, setHostIdentity] = useState(null); // who the CLI said it signed in, until a check says so itself
   // Antigravity's quota and account come from the CLI's own /usage screen, read in the background: it takes
   // some seconds, so the last reading is shown meanwhile.
   const [usage, setUsage] = useState(() => lastUsage.get(statusKey) ?? null);
@@ -217,8 +221,10 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   // The card's callbacks are new functions on every render: read through a ref, they do not restart the check below.
   const handlers = useRef({});
   handlers.current = { onAbandon, onSignedIn };
-  // On this Mac the CLI signs in through the browser and Iris waits for it; on a host, in a terminal there.
+  // On this Mac the CLI signs in through the browser and Iris waits for it. On a host, Antigravity's sign-in is
+  // a link and a code, shown as two steps here (HostCodeSignIn); Codex's is its device sign-in in a terminal.
   const signIn = useCallback(async () => {
+    if (!local && engine === 'antigravity') { setError(null); setHostSignIn(true); return; }
     if (!local) { setTerminal('login'); return; }
     setSigningIn(true); setError(null);
     try {
@@ -282,7 +288,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     : checking ? 'Checking' : 'Could not check';
   const busy = state === 'Checking' || state === 'Installing' || state === 'Signing in';
   // Signed in, the row is the account: who, and on which plan.
-  const who = signedIn ? (account.identity || usage?.identity || profile?.name || 'Signed in') : profile?.name;
+  const who = signedIn ? (account.identity || usage?.identity || hostIdentity || profile?.name || 'Signed in') : profile?.name;
   const plan = signedIn ? planName(account.plan) : null;
   const limits = signedIn ? (account.limits?.length ? account.limits : usage?.limits ?? []) : [];
   const brand = antigravity ? 'Google' : 'ChatGPT';
@@ -298,7 +304,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
               : !antigravity && <button type="button" className="button small" disabled={checking} onClick={signOut}>Sign out</button>)
             : <>
               {!local && !antigravity && <button type="button" className="button small primary" disabled={checking || copying || terminal === 'login'} title="Copies this Mac’s Codex sign-in to the host over SSH" onClick={copySignIn}>{copying ? 'Copying…' : 'Use this Mac’s sign-in'}</button>}
-              <button type="button" className={`button small ${!local && !antigravity ? '' : 'primary'}`} disabled={terminal === 'login' || checking || copying} onClick={signIn}>{!local && !antigravity ? 'Sign in on the host' : `Sign in with ${brand}`}</button>
+              <button type="button" className={`button small ${!local && !antigravity ? '' : 'primary'}`} disabled={terminal === 'login' || hostSignIn || checking || copying} onClick={signIn}>{!local && !antigravity ? 'Sign in on the host' : `Sign in with ${brand}`}</button>
               {profile && <button type="button" className="button small ghost" onClick={onRemove}>Remove</button>}
             </>}
         </> : account?.installed === false ? (antigravity ? <button type="button" className="button small primary" onClick={install}>Install</button>
@@ -316,6 +322,8 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
         {!antigravity && <button type="button" className="button small ghost" onClick={() => api('cliSignInCancel', environmentId, engine, accountId)}>Cancel</button>}
       </div>
     </div>}
+    {hostSignIn && !signedIn && <HostCodeSignIn environmentId={environmentId} engine={engine} account={accountId} host={hostLabel}
+      onSignedIn={identity => { setHostIdentity(identity); setHostSignIn(false); void check(); }} onClose={() => setHostSignIn(false)} />}
     {installing && <InstallProgress progress={progress} />}
     {limits.length > 0 && <div className="sub-limits">{limits.map((limit, index) => <LimitBar key={index} limit={limit} />)}</div>}
     {signedIn && !limits.length && readingUsage && <div className="sub-reading" role="status"><Spinner size={11} />Reading quota from the CLI…</div>}
@@ -334,6 +342,76 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
       <CliTerminal key={terminal} environmentId={environmentId} action={terminal} engine={engine} account={accountId} onExit={terminalExited} onLink={setTerminalLink} />
     </div>}
   </div>;
+}
+
+// Signing Antigravity in on an SSH host. The CLI does it in a terminal there: it prints a Google link and
+// waits for the code that page shows. Here that is two steps on the page (the link opens in the browser, the
+// code goes in a field) and the terminal is not shown: a 700-character link wrapped over six lines, and a
+// prompt that takes a paste only while it has the keyboard, is where people got lost.
+function HostCodeSignIn({ environmentId, engine, account, host, onSignedIn, onClose }) {
+  const [attempt, setAttempt] = useState(0);
+  const [seen, setSeen] = useState(() => readSignInOutput(''));
+  const [phase, setPhase] = useState('starting'); // starting | code | finishing | failed
+  const [code, setCode] = useState('');
+  const [problem, setProblem] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const term = useRef(null);
+  const done = useRef({});
+  done.current = { onSignedIn };
+  useEffect(() => {
+    let disposed = false, id = null, output = '', opened = false, unwatch = null;
+    setSeen(readSignInOutput('')); setPhase('starting'); setCode(''); setProblem(null);
+    // Wide, so that nothing the CLI prints is broken into lines.
+    api('termOpenCli', environmentId, 'login', 1000, 30, engine, account).then(termId => {
+      if (disposed) { api('termClose', termId).catch(() => {}); return; }
+      id = termId; term.current = termId;
+      unwatch = watchTerminal(termId, {
+        onData: data => {
+          output = (output + data).slice(-20000);
+          const now = readSignInOutput(output);
+          setSeen(now);
+          if (now.wantsCode && !opened) { opened = true; setPhase('code'); api('openExternal', now.link).catch(() => {}); }
+        },
+        onExit: () => {
+          const end = readSignInOutput(output);
+          term.current = null;
+          if (end.signedInAs) { done.current.onSignedIn?.(end.signedInAs); return; }
+          setProblem(end.link ? 'That code was not accepted. Sign in again and paste the new code.' : (end.lastLine || 'The sign-in could not be started on this host.'));
+          setPhase('failed');
+        },
+      });
+      return api('termReady', termId);
+    }).catch(err => { if (!disposed) { setProblem(cleanError(err)); setPhase('failed'); } });
+    return () => { disposed = true; unwatch?.(); if (id) api('termClose', id).catch(() => {}); term.current = null; };
+  }, [environmentId, engine, account, attempt]);
+  const finish = event => {
+    event.preventDefault();
+    const value = code.trim();
+    if (!value || !term.current) return;
+    setPhase('finishing');
+    api('termWrite', term.current, `${value}\r`).catch(err => { setProblem(cleanError(err)); setPhase('failed'); });
+  };
+  if (phase === 'failed') return <div className="sub-flow failed" role="alert">
+    <span className="sub-flow-text">{problem}</span>
+    <div className="sub-actions">
+      <button type="button" className="button small primary" onClick={() => setAttempt(n => n + 1)}>Try again</button>
+      <button type="button" className="button small ghost" onClick={onClose}>Cancel</button>
+    </div>
+  </div>;
+  if (phase !== 'code') return <div className="sub-flow" role="status">
+    <span className="sub-flow-text"><Spinner size={11} /> {phase === 'finishing' ? 'Finishing the sign-in…' : `Starting the sign-in on ${host}…`}</span>
+    <div className="sub-actions"><button type="button" className="button small ghost" onClick={onClose}>Cancel</button></div>
+  </div>;
+  return <form className="sub-flow code" onSubmit={finish}>
+    <span className="sub-flow-text">Sign in with Google in your browser, then paste the code it shows.</span>
+    <div className="sub-code-row">
+      <input className="sub-code" autoFocus value={code} onChange={event => setCode(event.target.value)} placeholder="Authorization code" aria-label="Authorization code" autoComplete="off" autoCapitalize="off" spellCheck={false} />
+      <button type="submit" className="button small primary" disabled={!code.trim()}>Finish</button>
+      <button type="button" className="button small" onClick={() => api('openExternal', seen.link)}>Open again</button>
+      <button type="button" className="button small" onClick={async () => { try { await navigator.clipboard.writeText(seen.link); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* the page is open already */ } }}>{copied ? 'Copied' : 'Copy link'}</button>
+      <button type="button" className="button small ghost" onClick={onClose}>Cancel</button>
+    </div>
+  </form>;
 }
 
 // One subscription on the chosen machine, as a list of accounts. Codex can have several: "Add account" signs

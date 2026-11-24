@@ -119,7 +119,8 @@ export const Sidebar = memo(function Sidebar({ peek = false }) {
       <div className="sidebar-sessions">
         {grouped ? groups.map(group => <Group key={group.key} group={group} activeId={activeId} view={view} />) : sessions.map(session => <SessionRow key={session.id} session={session} active={view === 'session' && activeId === session.id} />)}
       </div>
-      {/* Updates, in their own row above Settings: checking (when asked), downloading, ready, restarting, done. */}
+      {/* Updates, in their own row above Settings: checking (when asked), downloading, ready, restarting. Once an
+          update is in, the row is gone: there is nothing to confirm. */}
       <div className="sidebar-update">
         {update?.state === 'checking' && update.manual && <span className="update-button downloading" role="status"><Spinner size={12} /> Checking for updates…</span>}
         {update?.state === 'downloading' && <div className="update-button downloading" role="progressbar" aria-valuenow={Math.round((update.progress ?? 0) * 100)} title={`Downloading Iris ${update.version}`}>
@@ -128,9 +129,6 @@ export const Sidebar = memo(function Sidebar({ peek = false }) {
         </div>}
         {update?.state === 'ready' && sessionUpdate?.state !== 'restarting' && <button className="update-button" onClick={() => api('installUpdate').catch(updateError)} title={`Iris ${update.version} is ready. Running conversations are restarted afterwards.`}><Icon name="download" size={13} /> Restart to update</button>}
         {(update?.state === 'installing' || sessionUpdate?.state === 'restarting') && <span className="update-button downloading" role="status" title="Restarting running conversations"><Spinner size={12} /> Restarting…</span>}
-        {sessionUpdate?.state === 'complete' && !sessionUpdate.acknowledged && !['ready', 'downloading', 'installing'].includes(update?.state) && <button className="update-button" onClick={() => api('showSessionUpdateReport').catch(updateError)} title={`${sessionUpdate.version} · ${sessionUpdate.restarted} restarted · ${sessionUpdate.failures} issues`}>
-          {sessionUpdate.failures ? `Updated to ${sessionUpdate.version}, with issues` : `Updated to ${sessionUpdate.version}`}
-        </button>}
       </div>
       <div className="sidebar-foot">
         <button className="nav-item settings-button" onClick={() => openSettings(true)} aria-label="Settings" title="Settings (⌘,)"><span className="nav-icon"><Icon name="settings" size={20} stroke={1.6} /></span><span>Settings</span></button>

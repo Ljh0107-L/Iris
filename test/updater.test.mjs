@@ -263,13 +263,13 @@ test('update reopens saved local history and restarts only live SSH sessions; re
   assert.deepEqual(f.trace.filter(([op]) => op === 'stop' || op === 'start'), [['stop', 'remote-live'], ['start', 'remote-live']]);
 });
 
-test('only acknowledging a successful report dismisses its badge; failed restarts can still be retried', async () => {
+test('the update report asks for nothing when all went well; failed restarts can be retried from it', async () => {
   const success = { version: '0.2.30', restarted: [{ environment: 'GPU', title: 'Project' }], failures: [] };
   assert.equal(await reviewSessionUpdate(success, async options => {
     assert.deepEqual(options.buttons, ['OK']);
     assert.match(options.detail, /GPU — Project/);
     return { response: 0 };
-  }), 'acknowledge');
+  }), undefined, 'there is nothing to acknowledge');
   assert.equal(await reviewSessionUpdate(success, async () => ({ response: -1 })), undefined);
 
   const failure = { ...success, failures: [{ environment: 'Down', message: 'SSH timeout' }], retryPlan: { only: ['session-to-retry'] } };

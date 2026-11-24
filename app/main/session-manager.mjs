@@ -143,7 +143,7 @@ export class SessionManager extends EventEmitter {
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
 
-  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote, claudeAdapterPath, claudeLocal = ensureLocalClaude, claudeRemote = prepareRemoteClaude, claudeEnv = {}, locateCli = findCli, locateRemoteCli = findRemoteCli, runRemote = runSsh }) {
+  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote, claudeAdapterPath, claudeLocal = ensureLocalClaude, claudeRemote = prepareRemoteClaude, claudeEnv = {}, locateCli = findCli, locateRemoteCli = findRemoteCli, runRemote = runSsh, cliSearch = null }) {
     super();
     this.runRemote = runRemote; // a command on an SSH host (replaced in tests)
     this.focused = null; // the session on screen: never stopped by the sweep
@@ -165,6 +165,7 @@ export class SessionManager extends EventEmitter {
     this.claudeInstalls = new Map(); // environment id -> Promise<{ bin, configDir }>
     this.claudeEnv = claudeEnv;      // extra non-secret variables for Claude Code (tests)
     this.locateCli = locateCli;
+    this.cliSearch = cliSearch; // where CLIs on this Mac are looked for instead of the usual places (automated runs)
     this.locateRemoteCli = locateRemoteCli;
   }
 
@@ -685,8 +686,9 @@ export class SessionManager extends EventEmitter {
     // Codex is installed with npm, in the user's own login shell, where they can watch it.
     if (action === 'install' && engine === CODEX_ENGINE) return { env, bin: 'sh', args: ['-c', 'exec "${SHELL:-sh}" -lic "npm install -g @openai/codex"'] };
     const bin = await this.#cliBinary(env, engine);
-    const args = action === 'login' ? cliEngine(engine).login(env) : [];
-    // Codex signs in to Iris's own home (one per account); Antigravity's Google sign-in is the CLI's own.
+    const args = action === 'login' ? cliEngine(engine).login(env, engine === ANTIGRAVITY_ENGINE ? AGY_DATA_DIR : null) : [];
+    // Codex signs in to Iris's own home (one per account); Antigravity signs in to the data directory its
+    // conversations here use.
     const home = engine === CODEX_ENGINE ? this.#cliHome(env, env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null, engine, account) : null;
     // A CLI installed with npm is a script that starts with `env node`. An app opened from Finder has
     // launchd's PATH, with no node on it, so the command gets the login shell's PATH and the CLI's own
@@ -795,7 +797,8 @@ export class SessionManager extends EventEmitter {
   // Where a CLI keeps what this app does with it, apart from the user's own use of that CLI, so none of it
   // shows up in their own Codex or Antigravity. Codex: a CODEX_HOME of its own per account (signed in once
   // here). Antigravity: a data directory of its own (the CLI takes a name relative to ~/.gemini, beside its
-  // own `antigravity-cli`); its Google sign-in is in the keychain and stays shared.
+  // own `antigravity-cli`). On a Mac its Google sign-in is in the keychain and shared with the user's own
+  // Antigravity; on a host without a keychain it lives in this directory, so Iris signs in there.
   #cliHome(env, facts, engine, account) {
     if (engine === ANTIGRAVITY_ENGINE) return AGY_DATA_DIR;
     const id = this.#cliAccount(engine, account) ?? 'default';
@@ -894,9 +897,9 @@ export class SessionManager extends EventEmitter {
   async #findCli(env, engine = ANTIGRAVITY_ENGINE) {
     const name = cliEngine(engine).bin;
     if (env.kind === 'local') {
-      if (engine === ANTIGRAVITY_ENGINE) return this.locateCli();
+      if (engine === ANTIGRAVITY_ENGINE) return this.locateCli(this.cliSearch ?? undefined);
       await this.local.envReady; // the login shell's PATH: an npm-installed CLI is only on that one
-      return findCli({ name, path: this.local.extraEnv?.PATH ?? process.env.PATH ?? '' });
+      return findCli({ name, path: this.local.extraEnv?.PATH ?? process.env.PATH ?? '', ...this.cliSearch });
     }
     const key = engine === ANTIGRAVITY_ENGINE ? env.id : `${engine}:${env.id}`;
     const cached = this.cliBins.get(key);
@@ -1226,7 +1229,7 @@ export class SessionManager extends EventEmitter {
   // Connect (or reconnect) a session. SSH sessions live in the host's relay, so a dropped connection is
   // retried with backoff and resumes from the last event seen; Pi keeps working in the meantime.
   ensureStarted(id, recordOverride, cliBin) {
-    if (this.updateRestartFailed.has(id)) return Promise.reject(new Error('This conversation was not restarted. See Update issues to retry.'));
+    if (this.updateRestartFailed.has(id)) return Promise.reject(new Error('This conversation was not restarted after the update. Retry it from Iris → Update Report….'));
     const stopping = this.stopping.get(id);
     if (stopping) return stopping.then(() => this.ensureStarted(id, recordOverride, cliBin));
     let runtime = this.runtimes.get(id);

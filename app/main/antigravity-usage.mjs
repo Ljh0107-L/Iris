@@ -55,8 +55,9 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function readAntigravityUsage({ bin, cwd, env, spawnPty, timeoutMs = 30000 }) {
   const term = spawnPty(bin, [], { name: 'xterm-256color', cols: 140, rows: 50, cwd, env });
   let out = '', exited = false, changed = null, last = Date.now();
+  readers.add(term);
   term.onData(data => { out = (out + data).slice(-400000); last = Date.now(); changed?.(); });
-  term.onExit(() => { exited = true; changed?.(); });
+  term.onExit(() => { exited = true; readers.delete(term); changed?.(); });
   // Resolves true as soon as test() holds for what has been printed, false once `ms` have gone by.
   const until = (test, ms) => new Promise(resolve => {
     const end = setTimeout(() => { changed = null; resolve(test()); }, ms);
@@ -67,12 +68,15 @@ export async function readAntigravityUsage({ bin, cwd, env, spawnPty, timeoutMs 
   try {
     // In a folder it has not seen, the CLI first asks whether to trust it: this one is Iris's own, and empty.
     let trusted = false;
+    let signedOut = false;
     const ready = () => {
       const screen = screenText(out);
       if (!trusted && /Do you trust the contents of this project\?/.test(screen)) { trusted = true; setTimeout(() => type('\r'), 150); }
-      return /for shortcuts/.test(screen);
+      // Not signed in: the CLI is asking for a sign-in, which is not this reader's to start. Leave at once.
+      if (/log in with Google|Sign in with Google|not logged in/i.test(screen)) signedOut = true;
+      return signedOut || /for shortcuts/.test(screen);
     };
-    if (!await until(ready, Math.min(20000, timeoutMs))) return null;
+    if (!await until(ready, Math.min(20000, timeoutMs)) || signedOut) return null;
     let mark = out.length;
     const shown = () => /Models & Quota[\s\S]*\]\s*\d+(?:\.\d+)?\s*%/.test(screenText(out.slice(mark)));
     type('/usage\r');
@@ -90,7 +94,20 @@ export async function readAntigravityUsage({ bin, cwd, env, spawnPty, timeoutMs 
     const plan = headingPlan(screenText(out));
     return usage ? { ...usage, ...(plan ? { plan } : {}) } : null;
   } finally {
-    type('\x1b'); setTimeout(() => { type('\x03'); type('\x03'); }, 100);
-    setTimeout(() => { try { term.kill(); } catch { /* exited */ } }, 500);
+    // Ask it to leave, then make it: the CLI does not exit when its terminal goes away, and one left behind
+    // keeps running (and keeps asking for a sign-in if there is none) long after the app has quit.
+    type('\x1b'); setTimeout(() => { type('\x03'); type('\x03'); }, 100).unref?.();
+    setTimeout(() => { try { term.kill(); } catch { /* exited */ } }, 500).unref?.();
+    setTimeout(() => { if (!exited) stop(term); }, 1500).unref?.();
   }
 }
+
+// The CLIs started here that are still running. The app stops them when it quits (stopUsageReaders): a
+// timer cannot be relied on then.
+const readers = new Set();
+function stop(term) {
+  readers.delete(term);
+  try { process.kill(term.pid, 'SIGKILL'); } catch { /* gone */ }
+  try { term.kill(); } catch { /* gone */ }
+}
+export function stopUsageReaders() { for (const term of [...readers]) stop(term); }

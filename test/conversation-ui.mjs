@@ -54,9 +54,11 @@ try {
     if (method === 'removeCliAccount') { codexAccounts.splice(codexAccounts.findIndex(a => a.id === args[1]), 1); return codexAccounts; }
     if (method === 'cliOptions') return [];
     if (method === 'cliInfo') return { installed: args[0] !== 'local' || cli.localInstalled };
+    if (method === 'cliAccountStatus' && args[0] === 'ssh:lab' && args[2] === 'antigravity' && cli.hostSignedIn) return { installed: true, signedIn: true, canSignIn: false };
     if (method === 'cliAccountStatus') return args[0] === 'local' && args[2] === 'codex' && cli.signedIn[args[3] ?? 'default']
       ? { installed: true, signedIn: true, canSignIn: true, identity: cli.signedIn[args[3] ?? 'default'], plan: 'pro', limits: [{ usedPercent: 42, windowMinutes: 300, resetsAt: Date.now() + 3600000 }, { usedPercent: 18, windowMinutes: 10080 }] }
       : { installed: true, signedIn: false, canSignIn: true };
+    if (method === 'termOpenCli') return 7;
     if (method === 'cliSignIn') return (cli.signIn = Promise.withResolvers()).promise; // the browser's part: the test finishes or abandons it
     if (method === 'cliReadiness') return 'missing';
     if (method === 'prompt') return { disposition: args[3]?.interrupt ? 'started' : 'queued' };
@@ -167,6 +169,37 @@ try {
   await agy.locator('.sub-state', { hasText: 'Not signed in' }).first().waitFor();
   assert.ok(ipcCalls.some(c => c.method === 'cliAccountStatus' && c.args[0] === 'ssh:lab' && c.args[2] === 'codex'), 'each CLI is checked by name');
   assert.equal(await agy.locator('button', { hasText: 'Add account' }).count(), 0, 'nothing to add an account to while signed out');
+  // Antigravity on a host signs in with a link and a code: two steps on the page, and no terminal.
+  const hostAgy = agy.locator('.sub-card', { has: page.locator('.sub-card-title', { hasText: 'Antigravity' }) });
+  const signInLink = 'https://accounts.google.com/o/oauth2/auth?client_id=fixture&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback';
+  const terminal = data => page.evaluate(data => window.fixtureEvent({ channel: 'term-data', payload: { id: 7, data } }), data);
+  await hostAgy.locator('button', { hasText: 'Sign in with Google' }).click();
+  await hostAgy.locator('.sub-flow', { hasText: 'Starting the sign-in on Lab host…' }).waitFor();
+  assert.deepEqual(ipcCalls.findLast(c => c.method === 'termOpenCli').args.filter((_, i) => i !== 2 && i !== 3), ['ssh:lab', 'login', 'antigravity', null]);
+  await terminal(`Open this link in a browser to log in with Google:\r\n\r\n  ${signInLink}\r\n\r\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:\r\n`);
+  const codeField = hostAgy.locator('.sub-flow.code input[aria-label="Authorization code"]');
+  await codeField.waitFor();
+  assert.equal(await hostAgy.locator('.cli-terminal-card, .cli-settings-terminal').count(), 0);
+  assert.deepEqual(ipcCalls.filter(c => c.method === 'openExternal').map(c => c.args[0]), [signInLink], 'the page opens by itself, once');
+  assert.equal(await hostAgy.locator('.sub-flow.code button', { hasText: 'Finish' }).isDisabled(), true, 'nothing to finish before a code is there');
+  await codeField.fill(' 4/0Afixture-code ');
+  await codeField.press('Enter');
+  await hostAgy.locator('.sub-flow', { hasText: 'Finishing the sign-in…' }).waitFor();
+  assert.deepEqual(ipcCalls.findLast(c => c.method === 'termWrite').args, [7, '4/0Afixture-code\r'], 'the code goes to the CLI as typed, without the spaces around it');
+  // Google refuses it: said in words, with a way to start over (the CLI takes one code per link).
+  await terminal('\r\ncouldn\'t log in: token exchange failed: oauth2: "invalid_grant" "Malformed auth code."\r\n');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'term-exit', payload: { id: 7, exitCode: 1 } }));
+  await hostAgy.locator('.sub-flow.failed', { hasText: 'That code was not accepted. Sign in again and paste the new code.' }).waitFor();
+  await hostAgy.locator('.sub-flow.failed button', { hasText: 'Try again' }).click();
+  await terminal(`Open this link in a browser to log in with Google:\r\n\r\n  ${signInLink}&attempt=2\r\n\r\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:\r\n`);
+  await codeField.waitFor();
+  await codeField.fill('4/0Asecond-code');
+  await hostAgy.locator('.sub-flow.code button', { hasText: 'Finish' }).click();
+  cli.hostSignedIn = true;
+  await terminal('Logged in as lab@example.test.\r\n');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'term-exit', payload: { id: 7, exitCode: 0 } }));
+  await hostAgy.locator('.sub-who', { hasText: 'lab@example.test' }).waitFor();
+  assert.equal(await hostAgy.locator('.sub-flow').count(), 0);
   // On this Mac, signed in: the row is the account (who, plan, how much of each limit is used).
   cli.localInstalled = true; cli.signedIn.default = 'dev@example.test';
   await agy.locator('.cli-machine').click();
@@ -204,6 +237,20 @@ try {
   assert.ok(ipcCalls.some(c => c.method === 'removeCliAccount' && c.args[1] === 'acc2'));
   if (process.env.IRIS_UI_SHOT) await page.screenshot({ path: process.env.IRIS_UI_SHOT });
   await page.keyboard.press('Escape');
+
+  // ---- after an update there is nothing to click: the row is gone once conversations have been restarted
+  const updateRow = page.locator('.sidebar-update');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'session-update', payload: { state: 'restarting', version: '9.9.9', restarted: 0, failures: 0 } }));
+  await updateRow.locator('[role=status]', { hasText: 'Restarting…' }).waitFor();
+  await page.evaluate(() => window.fixtureEvent({ channel: 'session-update', payload: { state: 'complete', version: '9.9.9', restarted: 2, failures: 0 } }));
+  await page.waitForFunction(() => !document.querySelector('.sidebar-update')?.children.length);
+  assert.equal(await page.locator('.toast').count(), 0, 'an update that went well says nothing');
+  // Only a restart that failed is mentioned, once, as a notice that goes away by itself.
+  await page.evaluate(() => window.fixtureEvent({ channel: 'session-update', payload: { state: 'complete', version: '9.9.9', restarted: 1, failures: 1 } }));
+  await page.locator('.toast.error', { hasText: 'Iris 9.9.9 is installed, with one issue.' }).waitFor();
+  assert.equal(await updateRow.locator('button').count(), 0);
+  await page.locator('.toast-action', { hasText: 'Details' }).click();
+  assert.ok(ipcCalls.some(c => c.method === 'sessionUpdateTold') && ipcCalls.some(c => c.method === 'showSessionUpdateReport'));
 
   assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS built renderer: streamed reply applied once per frame, queued message with Option+Enter, Find in conversation across unrendered rows and folded steps');

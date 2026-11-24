@@ -12,7 +12,7 @@ import { execFile } from 'node:child_process';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
 import { Terminals, spawnPty } from './terminals.mjs';
-import { readAntigravityUsage } from './antigravity-usage.mjs';
+import { readAntigravityUsage, stopUsageReaders } from './antigravity-usage.mjs';
 import { Updater } from './updater.mjs';
 import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, reviewSessionUpdate, saveSessionUpdate } from './session-update.mjs';
 import { Store } from './store.mjs';
@@ -119,6 +119,12 @@ function publicSettings() {
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
+// A page in the user's browser. Automated runs (isolated test profiles) record what they would open instead:
+// a test must never put pages, least of all sign-in pages, in the browser of whoever runs it.
+const openInBrowser = url => {
+  if (process.env.IRIS_INSECURE_TEST_STORAGE === '1') { (globalThis.__irisOpened ??= []).push(url); return Promise.resolve(); }
+  return shell.openExternal(url);
+};
 const terminals = new Terminals({ send });
 let updater = null, installingUpdate = false, updateQuit = false;
 const cliUsage = new Map(); // machine -> the last reading of a CLI's quota, and when
@@ -294,8 +300,14 @@ const api = {
     const entry = { at: Date.now(), pending: true, promise: null };
     entry.promise = (async () => {
       await manager.local.envReady;
-      const bin = await manager.locateCli();
+      const bin = await manager.locateCli(manager.cliSearch ?? undefined);
       if (!bin) return null;
+      // Only for an account that is signed in: started without one, the CLI asks for a sign-in (and opens the
+      // browser for it), which reading a quota must never set off.
+      const known = manager.cliAccountLast(environmentId, 'antigravity');
+      const signedIn = known?.signedIn === true && known.ageMs != null && known.ageMs < 10 * 60000 ? true
+        : (await manager.cliAccountStatus(environmentId, { engine: 'antigravity' }).catch(() => null))?.signedIn === true;
+      if (!signedIn) return null;
       const cwd = join(app.getPath('userData'), 'cli-menus');
       mkdirSync(cwd, { recursive: true });
       const env = { ...process.env, ...manager.local.extraEnv, TERM: 'xterm-256color' };
@@ -339,15 +351,13 @@ const api = {
     if (!result) return;
     const action = await reviewSessionUpdate(result, options => dialog.showMessageBox(window, options));
     if (recovery !== sessionRecovery || quitting) return;
-    if (action === 'acknowledge' && !sessionUpdate.acknowledged) {
-      // Hide just the badge. Session Update Report… can still open this report.
-      sessionUpdate = { ...sessionUpdate, acknowledged: true };
-      send('session-update', sessionUpdate);
-    } else if (action === 'retry') {
+    if (action === 'retry') {
       saveSessionUpdate(app.getPath('userData'), result.retryPlan);
       recoverUpdatedSessions(result.retryPlan, result.restarted);
     }
   },
+  // The interface has said that some conversations were not restarted: it is said once per start.
+  sessionUpdateTold() { if (sessionUpdate?.state === 'complete' && !sessionUpdate.told) sessionUpdate = { ...sessionUpdate, told: true }; },
   appVersion: () => app.getVersion(),
   usageSummary: () => usage.summary(),
   // Terminal panel
@@ -398,7 +408,7 @@ const api = {
     if (store.settings.appearance !== theme) { store.settings.appearance = theme; try { store.saveSettings(); } catch { /* asked again at the next start */ } }
   },
   compact: id => manager.compact(id),
-  openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
+  openExternal: url => /^https?:\/\//.test(url) ? openInBrowser(url) : false,
   openPath: path => shell.openPath(path),
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
@@ -412,7 +422,7 @@ const api = {
 
 // Build the renderer and show progress while recovery runs, but don't race it with
 // an IPC that could attach to an old process or otherwise modify the session.
-const updateReadOnly = new Set(['bootstrap', 'appVersion', 'updateStatus', 'showSessionUpdateReport', 'appearance', 'catalog', 'listSessions', 'environments', 'searchMessages']);
+const updateReadOnly = new Set(['bootstrap', 'appVersion', 'updateStatus', 'showSessionUpdateReport', 'sessionUpdateTold', 'appearance', 'catalog', 'listSessions', 'environments', 'searchMessages']);
 ipcMain.handle('iris:invoke', async (_event, method, ...args) => {
   const fn = api[method];
   if (!fn) throw new Error(`Unknown method ${method}`);
@@ -502,6 +512,11 @@ app.whenReady().then(async () => {
     store, environments, piVersion,
     bridgePath,
     relayPath: join(root, 'agent/iris-relay.mjs'),
+    // An automated run (an isolated test profile) never finds the Codex or Antigravity installed on this Mac,
+    // and so never touches the accounts signed in to them: only a CLI the test itself put in IRIS_TEST_CLI_DIR.
+    // IRIS_TEST_REAL_CLI=1 is for a run that is meant to look at the real ones.
+    ...(process.env.IRIS_INSECURE_TEST_STORAGE === '1' && process.env.IRIS_TEST_REAL_CLI !== '1'
+      ? { cliSearch: { home: join(app.getPath('userData'), 'no-home'), path: process.env.IRIS_TEST_CLI_DIR ?? '', system: false } } : {}),
     piPackageDir: join(root, 'node_modules/@earendil-works/pi-coding-agent'),
     cacheDir: join(app.getPath('userData'), 'downloads'),
     local: {
@@ -519,7 +534,7 @@ app.whenReady().then(async () => {
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
   // A CLI's sign-in page, in the user's browser. Only an https page the CLI itself named is opened.
-  manager.on('cli-sign-in', ({ url }) => { if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url).catch(() => {}); });
+  manager.on('cli-sign-in', ({ url }) => { if (typeof url === 'string' && /^https:\/\//.test(url)) openInBrowser(url).catch(() => {}); });
   for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code', 'antigravity-install', 'cli-sign-in', 'cli-accounts']) manager.on(channel, payload => send(channel, payload));
   manager.on('event', ({ id, event }) => attention.event(id, event));
   manager.on('question', ({ id, question }) => attention.question(id, question));
@@ -602,8 +617,11 @@ app.on('before-quit', event => {
   event.preventDefault();
   quitting = true;
   terminals.closeAll();
+  stopUsageReaders();
   manager.shutdown().finally(() => app.quit());
 });
+// However the app goes (quit, an update, a crash handler calling exit), no CLI it started to read a quota stays.
+process.on('exit', stopUsageReaders);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' || process.env.IRIS_QUIT_ON_CLOSE) app.quit(); });
 
 // Packaged-build check used by the release workflow: the UI loads, the native pty module loads, and

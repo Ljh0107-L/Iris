@@ -212,6 +212,7 @@ window.iris.subscribe(({ channel, payload }) => {
       break;
     case 'session-update':
       set({ sessionUpdate: payload });
+      tellUpdateIssues(payload);
       break;
     case 'goal':
       set(s => ({ goals: { ...s.goals, [payload.id]: payload.goal } }));
@@ -284,6 +285,15 @@ window.iris.subscribe(({ channel, payload }) => {
   }
 });
 
+// After an update there is nothing to confirm: conversations that were running are restarted, and the app
+// carries on. Only what went wrong (a conversation that could not be restarted) is mentioned, once, with a
+// way to the details.
+function tellUpdateIssues(update) {
+  if (update?.state !== 'complete' || !update.failures || update.told) return;
+  api('sessionUpdateTold').catch(() => {});
+  notify(`Iris ${update.version} is installed, with ${update.failures === 1 ? 'one issue' : `${update.failures} issues`}.`, 'error', { label: 'Details', run: () => api('showSessionUpdateReport').catch(error => notify(error.message, 'error')) });
+}
+
 // Full screen has no traffic lights; the title bar takes back the room it leaves for them (workspace.css).
 function showFullscreen(on) { if (on) document.documentElement.dataset.fullscreen = 'true'; else delete document.documentElement.dataset.fullscreen; }
 
@@ -330,6 +340,7 @@ export async function bootstrap() {
     },
   });
   for (const run of waitingForReady.splice(0)) run();
+  tellUpdateIssues(state.sessionUpdate);
   loadCatalog();
   // First run (no engine chosen yet, no API keys): start on a CLI that is already signed in on this Mac, so
   // someone with a ChatGPT plan or a Google account can begin without setting anything up.

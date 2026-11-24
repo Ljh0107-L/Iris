@@ -10,13 +10,22 @@ const bypass = process.argv.includes('--dangerously-skip-permissions');
 // (the real one keeps it under ~/.gemini and refuses an absolute path).
 const argv = process.argv.slice(2), dataAt = argv.indexOf('--app-data-dir');
 if (dataAt >= 0) assert.ok(/^[\w.-]+$/.test(argv[dataAt + 1] ?? '') && !isAbsolute(argv[dataAt + 1]), 'a plain app data directory name');
-assert.deepEqual(dataAt >= 0 ? [...argv.slice(0, dataAt), ...argv.slice(dataAt + 2)] : argv, ['acp', ...(bypass ? ['--dangerously-skip-permissions'] : [])]);
-const fixture = process.env.IRIS_AGY_FIXTURE_DIR ?? process.cwd();
+const dataDir = dataAt >= 0 ? argv[dataAt + 1] : 'antigravity-cli', plainArgs = dataAt >= 0 ? [...argv.slice(0, dataAt), ...argv.slice(dataAt + 2)] : argv;
+const terminalLogin = plainArgs.includes('--login');
+if (!terminalLogin) assert.deepEqual(plainArgs, ['acp', ...(bypass ? ['--dangerously-skip-permissions'] : [])]);
+// The fixture is the folder the CLI is started in. A CLI started elsewhere (a sign-in or an account check on
+// a "host" runs in its home) finds it through a note in that home, since the adapter passes on no test variables.
+const noted = join(process.env.HOME ?? '', '.iris-agy-fixture');
+const fixture = process.env.IRIS_AGY_FIXTURE_DIR ?? (existsSync(join(process.cwd(), '.iris-agy-scenario.json')) || !existsSync(noted) ? process.cwd() : readFileSync(noted, 'utf8').trim());
 const scenarioFile = join(fixture, '.iris-agy-scenario.json');
 const cacheFile = join(fixture, '.iris-fake-agy-cache.json');
 const logFile = join(fixture, '.iris-fake-agy.jsonl');
 const scenario = () => JSON.parse(readFileSync(scenarioFile, 'utf8'));
 const cache = () => existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, 'utf8')) : {};
+// Where the sign-in is kept, as in the real CLI: `signedIn` is the keychain of a Mac, one sign-in whatever
+// the data directory; `signedInDirs` is a machine without a keychain (an SSH host), where the sign-in is a
+// file in the data directory it was made with and no other directory has it.
+const signedIn = () => cache().signedIn === true || cache().signedInDirs?.[dataDir] === true;
 const save = value => writeFileSync(cacheFile, JSON.stringify(value));
 const log = value => appendFileSync(logFile, JSON.stringify(value) + '\n');
 const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
@@ -28,6 +37,19 @@ const chunk = (text, sessionId = SESSION) => update('agent_message_chunk', { con
 const toolCallId = 'fake-call';
 
 log({ boot: { pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2), env: Object.keys(process.env).sort() } });
+
+// `agy acp --login`: the sign-in a person does in a terminal. The real one prints a Google link, waits for the
+// authorization code the page shows, and keeps the sign-in in the data directory it was started with.
+if (terminalLogin) {
+  assert.deepEqual(plainArgs, ['acp', '--login']);
+  process.stdout.write('Open this link in a browser to log in with Google:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=fixture&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=fixture\n\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:\n');
+  const code = await new Promise(resolve => { const input = createInterface({ input: process.stdin }); input.once('line', line => { resolve(line.trim()); input.close(); }); input.once('close', () => resolve('')); });
+  if (!code) { process.stdout.write('login cancelled: no authorization code was entered\n'); process.exit(1); }
+  if (!code.startsWith('4/')) { process.stdout.write('\ncouldn\'t log in: token exchange failed: oauth2: "invalid_grant" "Malformed auth code."\n'); process.exit(1); }
+  save({ ...cache(), signedInDirs: { ...cache().signedInDirs, [dataDir]: true } });
+  process.stdout.write('Logged in as fixture@example.test.\n');
+  process.exit(0);
+}
 process.stderr.write('fixture-private-stderr-oauth-url\n');
 
 let model = 'mock-gemini-fast', effort = 'low';
@@ -66,14 +88,14 @@ lines.on('line', line => {
       break;
     case 'session/list':
       assert.deepEqual(r.params, {});
-      if (cache().signedIn) reply(r.id, { sessions: [{ sessionId: SESSION, title: 'fixture-private-session-name' }] });
+      if (signedIn()) reply(r.id, { sessions: [{ sessionId: SESSION, title: 'fixture-private-session-name' }] });
       else authRequired(r.id);
       break;
     case 'session/new': {
       assert.equal(r.params.cwd, scenario().workspace ?? process.cwd());
       assert.deepEqual(r.params.mcpServers, []);
       if (scenario().newFailure) { error(r.id, -32000, 'fixture-private-non-auth-server-error'); break; }
-      if (!cache().signedIn) { authRequired(r.id); break; }
+      if (!signedIn()) { authRequired(r.id); break; }
       assert.equal(cache().session, undefined, 'client tried to replace an existing CLI session');
       save({ ...cache(), session: SESSION });
       if (scenario().telemetry) {
@@ -85,7 +107,7 @@ lines.on('line', line => {
     }
     case 'session/load': case 'session/resume': {
       assert.deepEqual(r.params, { cwd: scenario().workspace ?? process.cwd(), mcpServers: [], sessionId: SESSION });
-      if (!cache().signedIn || scenario().expireResume) { authRequired(r.id); break; }
+      if (!signedIn() || scenario().expireResume) { authRequired(r.id); break; }
       if (scenario().missingSession || cache().session !== SESSION) { error(r.id, -32002, 'fixture-private-stale-session-data'); break; }
       if (r.method === 'session/load') {
         update('user_message_chunk', { content: { type: 'text', text: 'replayed user' } });

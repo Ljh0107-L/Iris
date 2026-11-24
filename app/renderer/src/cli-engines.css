@@ -22,6 +22,13 @@
 .sub-plan { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--accent-soft); font-size: var(--fs-xs); color: var(--text-2); white-space: nowrap; }
 .sub-flow { display: flex; align-items: center; gap: 12px; margin: 8px 0 2px; padding: 9px 10px 9px 12px; border-radius: var(--r-md); background: var(--signal-soft); font-size: var(--fs-sm); color: var(--text); }
 .sub-flow-text { flex: 1; min-width: 0; }
+.sub-flow-text .spinner { vertical-align: -1px; margin-right: 6px; }
+/* A sign-in that needs a code typed in: the instruction, and under it the field with its buttons. */
+.sub-flow.code { flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 12px; }
+.sub-code-row { display: flex; align-items: center; gap: 6px; }
+.sub-code { flex: 1; min-width: 120px; height: 28px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: var(--r-sm, 6px); background: var(--surface); color: var(--text); font: 12px/1 var(--mono, ui-monospace, monospace); }
+.sub-code:focus { outline: none; border-color: var(--signal); box-shadow: 0 0 0 3px var(--signal-soft); }
+.sub-flow.failed { background: color-mix(in srgb, var(--red) 9%, transparent); }
 .sub-actions .tool-button { width: 28px; height: 28px; border-radius: var(--r-sm); color: var(--muted); }
 .sub-actions { margin-left: auto; flex: none; display: flex; align-items: center; gap: 8px; }
 .sub-actions .button { white-space: nowrap; }

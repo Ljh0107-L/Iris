@@ -2,6 +2,23 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.4
+
+**Fixed**
+
+- **Signing Antigravity in on an SSH host works.** The sign-in was made in the CLI's default data directory while Iris's conversations use their own, so a host said "Logged in" and Iris still said "Not signed in". The sign-in, the check and the conversations now use the same directory. A host you signed in before needs one more sign-in from Iris.
+- **Reading Antigravity's quota never starts a sign-in.** It is read only for an account that is signed in, and a CLI found waiting for a sign-in is left at once.
+- **A CLI started to read the quota no longer stays behind** when the app quits while it is being read.
+
+**New and changed**
+
+- **Antigravity on a host signs in without a terminal.** Sign in with Google opens the sign-in page in your browser; the code that page shows goes into a field on the Subscriptions card. A code that is refused says so and offers to try again.
+- **Nothing to confirm after an update.** The "Updated to …" button is gone: running conversations are restarted and the app carries on. If a conversation could not be restarted, a notice says so once, with the details behind it; **Iris → Update Report…** still shows what was restarted.
+
+**Known limits:** Antigravity's sign-in cannot be copied from this Mac to a host the way Codex's can: the CLI keeps it in the keychain here and offers no way to hand it over. Antigravity's quota is still read on this Mac only.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.3
 
 **Fixed**
