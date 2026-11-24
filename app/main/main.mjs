@@ -1,0 +1,528 @@
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, safeStorage, shell } from 'electron';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { listEnvironments } from './environments.mjs';
+import { listRemoteDir, runSsh } from './remote-setup.mjs';
+import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from './file-preview.mjs';
+import { downloadLocal, downloadRemote } from './file-download.mjs';
+import { gitReview, remoteGitReviewScript, decodeGitReview } from './git-review.mjs';
+import { execFile } from 'node:child_process';
+import { shellQuote } from '../../core/transports.mjs';
+import { SessionManager } from './session-manager.mjs';
+import { Terminals } from './terminals.mjs';
+import { Updater } from './updater.mjs';
+import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, reviewSessionUpdate, saveSessionUpdate } from './session-update.mjs';
+import { Store } from './store.mjs';
+import { resolveShellEnv } from './shell-env.mjs';
+import { createAttention } from './attention.mjs';
+import { isCliEngineId } from './cli-engines.mjs';
+// The renderer names the account-backed CLI an action is for; anything else means Antigravity.
+const cliEngineOf = engine => isCliEngineId(engine) ? engine : 'antigravity';
+import { UsageLedger } from './usage.mjs';
+import { stageExtensions } from './extensions.mjs';
+import { listCustomModels, resolveProviderBaseUrl } from './custom-providers.mjs';
+import { BUILTIN_PROVIDERS } from './builtin-providers.mjs';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
+const piVersion = JSON.parse(readFileSync(join(piPackage, 'package.json'), 'utf8')).version;
+
+// Pi and the relay run on this app's Electron binary acting as Node. On macOS they use the helper app's
+// copy: Pi sets its process title, which makes libuv check the process in with LaunchServices, and the
+// main executable would then appear in the Dock as a generic "exec" icon. The helper is a UI element
+// (LSUIElement), so it never shows in the Dock.
+function nodeBinary() {
+  if (process.platform !== 'darwin') return process.execPath;
+  const name = basename(process.execPath); // "Iris", or "Electron" in development
+  const helper = join(dirname(process.execPath), '../Frameworks', `${name} Helper.app/Contents/MacOS/${name} Helper`);
+  return existsSync(helper) ? helper : process.execPath;
+}
+
+if (process.env.IRIS_USER_DATA) app.setPath('userData', process.env.IRIS_USER_DATA);
+app.setName('Iris');
+
+let store, manager, window, usage;
+const environments = () => listEnvironments({ sshConfig: process.env.IRIS_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} });
+
+// Resolve and inspect paths on the session's own machine, including remote ~/ paths.
+async function targetFilePreview(environmentId, cwd, operation, rel = '', engine) {
+  if (!cwd) return operation === 'search' ? { path: '', files: [] } : { path: '', entries: [] };
+  const env = manager.env(environmentId);
+  if (env.kind === 'local') return filePreview(operation, cwd, rel);
+  // Sessions already prepare Node on the host; reuse that runtime instead of parsing
+  // ls output or relying on platform-specific shell utilities for binary-safe reads.
+  const { node } = await manager.prepare(environmentId, { engine });
+  const output = await runSsh(env, remoteFilePreviewScript(node, operation, cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
+  return decodeRemoteFilePreview(output);
+}
+
+async function sessionFilePreview(id, operation, rel = '') {
+  const record = manager.record(id);
+  return targetFilePreview(record.environmentId, record.cwd, operation, rel, record.engine);
+}
+
+// Save a file from the session's machine to this Mac, through a save dialog that starts in Downloads.
+async function downloadSessionFile(id, rel) {
+  const record = manager.record(id);
+  const env = manager.env(record.environmentId);
+  const name = String(rel).split('/').filter(Boolean).pop() || 'download';
+  let target;
+  if (process.env.IRIS_TEST_SAVE_DIR) target = join(process.env.IRIS_TEST_SAVE_DIR, name);
+  else {
+    const choice = await dialog.showSaveDialog(window, { defaultPath: join(app.getPath('downloads'), name) });
+    if (choice.canceled || !choice.filePath) return null;
+    target = choice.filePath;
+  }
+  if (env.kind === 'local') return downloadLocal(record.cwd, rel, target);
+  const { node } = await manager.prepare(record.environmentId, { engine: record.engine });
+  return downloadRemote(env, node, record.cwd, rel, target);
+}
+
+// Pi's compaction trigger is contextTokens > contextWindow - reserveTokens. Equalising
+// the reserve with each model's max output makes it exactly "compact when the remaining
+// context is smaller than the largest possible reply", instead of the 16K default that
+// lets a 1M-context model overflow before compaction.
+function syncCompactionReserves() {
+  const agentDir = join(app.getPath('userData'), 'agent');
+  const path = join(agentDir, 'settings.json');
+  let settings = {};
+  try { settings = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first run */ }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
+  const overrides = { ...(settings.compaction?.modelOverrides ?? {}) };
+  for (const provider of store.settings.providers) {
+    for (const model of provider.models ?? []) {
+      const maxTokens = Number(model.maxTokens);
+      if (!provider.id || !model.id || !Number.isFinite(maxTokens) || maxTokens <= 0) continue;
+      const key = `${provider.id}/${model.id}`;
+      overrides[key] = { ...(overrides[key] ?? {}), reserveTokens: Math.floor(maxTokens) };
+    }
+  }
+  settings.compaction = { ...(settings.compaction ?? {}), modelOverrides: overrides };
+  try {
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(path, JSON.stringify(settings, null, 2) + '\n');
+    chmodSync(path, 0o600);
+  } catch { /* settings are best effort; Pi keeps its defaults if this cannot be written */ }
+}
+
+function publicSettings() {
+  const providers = store.settings.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) }));
+  return { ...store.settings, providers, builtinProviders: BUILTIN_PROVIDERS };
+}
+
+const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
+const terminals = new Terminals({ send });
+let updater = null, installingUpdate = false, updateQuit = false;
+let sessionRecovery = null, sessionUpdate = null;
+let quitting = false;
+const setSessionUpdate = (state, version, restarted = 0, failures = 0) => {
+  sessionUpdate = { state, version, restarted, failures };
+  send('session-update', sessionUpdate);
+};
+
+function recoverUpdatedSessions(plan, prior = []) {
+  setSessionUpdate('restarting', plan.version, prior.length);
+  const dir = app.getPath('userData');
+  manager.updateRestartFailed.clear();
+  sessionRecovery = restartUpdatedSessions(manager, plan, { checkpoint: next => saveSessionUpdate(dir, next), cancelled: () => quitting })
+    .then(result => {
+      if (!quitting) {
+        try { clearSessionUpdate(dir); }
+        catch (error) { result.failures.push({ environment: 'Iris', message: `Could not clear the restart plan: ${error.message}` }); }
+      }
+      return { ...result, restarted: [...prior, ...result.restarted] };
+    }).catch(error => ({ version: plan.version, restarted: prior, failures: [{ environment: 'Iris', message: error.message }] }))
+    .then(result => {
+      manager.updateRestartFailed = result.failedIds ?? new Set();
+      setSessionUpdate('complete', plan.version, result.restarted.length, result.failures.length);
+      return result;
+    });
+}
+
+const api = {
+  async bootstrap() {
+    return { settings: publicSettings(), environments: environments(), sessions: manager.list(), sessionUpdate, piVersion, platform: process.platform, home: app.getPath('home') };
+  },
+  environments: () => environments(),
+  // SSH connections the user works with (Settings → Connections).
+  addConnections(ids, engine = store.settings.defaults.engine) {
+    for (const id of ids) store.settings.environments[id] = { ...store.settings.environments[id], added: true, enabled: true };
+    store.saveSettings();
+    if (!['antigravity', 'codex'].includes(engine)) for (const id of ids) manager.prepare(id).catch(() => {});
+    return environments();
+  },
+  addManualConnection({ label, host, port, identityFile }, engine) {
+    const clean = String(host ?? '').trim();
+    if (!/^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+$/.test(clean)) throw new Error('Enter a host like user@example.com');
+    const id = 'manual-' + (label || clean).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36).slice(-4);
+    store.settings.customHosts = [...(store.settings.customHosts ?? []), { id, label: (label || clean).trim(), host: clean, port: port ? Number(port) : undefined, identityFile: identityFile?.trim() || undefined }];
+    return api.addConnections([`ssh:${id}`], engine);
+  },
+  removeConnection(id) {
+    const { root, ...rest } = store.settings.environments[id] ?? {};
+    store.settings.environments[id] = { ...rest, root, added: false };
+    store.settings.customHosts = (store.settings.customHosts ?? []).filter(h => `ssh:${h.id}` !== id);
+    store.saveSettings();
+    return environments();
+  },
+  setConnectionEnabled(id, enabled) {
+    store.settings.environments[id] = { ...store.settings.environments[id], enabled: !!enabled };
+    store.saveSettings();
+    return environments();
+  },
+  prepareEnvironment: (id, force, engine) => manager.prepare(id, { force, engine }).then(facts => ({ ok: true, facts }), error => ({ ok: false, error: error.message })),
+  async listDir(environmentId, path) {
+    const env = manager.env(environmentId);
+    if (env.kind === 'ssh') return listRemoteDir(env, path);
+    const { readdirSync } = await import('node:fs');
+    const dir = path || app.getPath('home');
+    return { path: dir, entries: readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name).sort((a, b) => a.localeCompare(b)) };
+  },
+  async pickLocalFolder() {
+    if (process.env.IRIS_TEST_PICK_FOLDER) return process.env.IRIS_TEST_PICK_FOLDER;
+    const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] });
+    return result.canceled ? null : result.filePaths[0];
+  },
+  catalog: () => manager.catalog(),
+  searchMessages: query => manager.searchMessages(query),
+  // Models the provider's endpoint offers for this credential.
+  async listProviderModels(draft, key) {
+    const apiKey = key || store.getKey(draft.id);
+    if (!apiKey) throw new Error('Enter the API key first.');
+    if (draft.kind === 'builtin') return manager.builtinModels(draft.id, apiKey);
+    return listCustomModels(draft, apiKey);
+  },
+  async saveProvider(provider, key) {
+    // Normalize SDK-specific paths, but only rewrite custom Google URLs when model discovery
+    // confirms the alternative. A generation-only gateway may not serve /models at all.
+    const baseUrl = provider.kind === 'custom' ? await resolveProviderBaseUrl(provider, key || store.getKey(provider.id)) : provider.baseUrl;
+    const providers = store.settings.providers;
+    const index = providers.findIndex(p => p.id === provider.id);
+    const clean = { id: provider.id, name: provider.name, kind: provider.kind, api: provider.api, baseUrl, models: provider.models, headers: provider.headers, enabledModels: provider.enabledModels?.length ? provider.enabledModels : undefined };
+    if (index >= 0) providers[index] = clean; else providers.push(clean);
+    if (key) store.setKey(provider.id, key);
+    store.saveSettings();
+    syncCompactionReserves();
+    manager.invalidateCatalog();
+    manager.providersChanged();
+    // Provider reachability may differ: redo host setup now, in the background, not at the next message.
+    manager.prepared.clear();
+    for (const env of environments().filter(e => e.kind === 'ssh' && e.added && e.enabled)) manager.prepare(env.id).catch(() => {});
+    return publicSettings();
+  },
+  deleteProvider(id) {
+    store.settings.providers = store.settings.providers.filter(p => p.id !== id);
+    store.setKey(id, null);
+    store.saveSettings();
+    syncCompactionReserves();
+    manager.invalidateCatalog();
+    manager.providersChanged();
+    return publicSettings();
+  },
+  updateDefaults(patch) {
+    Object.assign(store.settings.defaults, patch); store.saveSettings();
+    if (Object.hasOwn(patch ?? {}, 'subagents')) manager.configChanged(); // running Pis apply it before their next prompt
+    return publicSettings();
+  },
+  listSessions: () => manager.list(),
+  resumeRemote: async () => manager.resumeRemote({ skip: (await sessionRecovery)?.skipResume }),
+  prewarm: draft => manager.prewarm(draft),
+  warmSessions: () => [...manager.spares.values()].filter(sp => manager.runtimes.get(sp.id)?.status === 'connected').length,
+  createSession: options => manager.create(options),
+  openSession: id => manager.ensureStarted(id).then(() => true),
+  warmSession: id => manager.warm(id),
+  focusSession: id => { manager.focus(id); return true; },
+  warmFolder: id => manager.warmFolder(id),
+  prompt: (id, text, attachments, options) => manager.prompt(id, text, attachments ?? [], options ?? {}),
+  editMessage: (id, ordinal, originalText, text, attachments) => manager.editMessage(id, ordinal, originalText, text, attachments ?? []),
+  fork: id => manager.fork(id),
+  deleteSession: id => manager.delete(id),
+  commands: id => manager.commands(id),
+  goal: id => manager.goal(id),
+  ultra: id => manager.ultra(id),
+  setUltra: (id, on) => manager.setUltra(id, on),
+  // Claude Code engine: effort, Ultracode, and the pinned binary on a machine (installed on first use).
+  setEffort: (id, level) => manager.setEffort(id, level),
+  setUltracode: (id, on) => manager.setUltracode(id, on),
+  claudeCodeInfo: () => manager.claudeCodeInfo(),
+  cliInfo: (environmentId, engine) => manager.cliInfo(environmentId, cliEngineOf(engine)),
+  cliReadiness: (environmentId, engine, account) => manager.cliReadiness(environmentId, cliEngineOf(engine), account),
+  cliAccountStatus: (environmentId, action, engine, account) => manager.cliAccountStatus(environmentId, { login: action === true || action === 'login', logout: action === 'logout', engine: cliEngineOf(engine), account }),
+  cliAccounts: engine => ({ accounts: manager.cliAccounts(cliEngineOf(engine)), selected: store.settings.cliAccountDefault?.[cliEngineOf(engine)] ?? 'default' }),
+  addCliAccount: (engine, name) => manager.addCliAccount(cliEngineOf(engine), name),
+  removeCliAccount: (engine, id) => manager.removeCliAccount(cliEngineOf(engine), id),
+  antigravityInstall: (environmentId, engine) => manager.antigravityInstall(environmentId, cliEngineOf(engine)),
+  cliSetConfig: (id, configId, value) => manager.cliSetConfig(id, configId, value),
+  cliOptions: (environmentId, engine) => manager.cliOptions(environmentId, cliEngineOf(engine)),
+  prepareClaudeCode: environmentId => manager.prepareClaude(environmentId).then(layout => ({ ok: true, version: manager.claudeCodeInfo().version, bin: layout.bin }), error => ({ ok: false, error: error.message })),
+  agents: id => manager.agents(id),
+  jobs: id => manager.jobs(id),
+  stopAgent: (id, agentId) => manager.stopAgent(id, agentId),
+  stopBackgroundJob: (id, jobId, startedAt) => manager.stopBackgroundJob(id, jobId, startedAt),
+  messageAgent: (id, agentId, text) => manager.messageAgent(id, agentId, text),
+  // Updates
+  updateStatus: () => updater?.status ?? { state: 'idle' },
+  // test builds only: show an update state without a real release
+  testUpdateStatus: status => { if (process.env.IRIS_INSECURE_TEST_STORAGE === '1') send('update', status); },
+  checkForUpdates: () => updater?.check({ manual: true }),
+  async installUpdate() {
+    // One click installs. Running conversations are restarted afterwards and reported in the sidebar.
+    if (installingUpdate || quitting || updater?.status.state !== 'ready') return false;
+    installingUpdate = true;
+    try {
+      return await updater.install({
+        prepare: async version => saveSessionUpdate(app.getPath('userData'), await planSessionUpdate(manager, version)),
+        onQuit: () => { updateQuit = true; },
+      });
+    } finally { installingUpdate = false; }
+  },
+  async showSessionUpdateReport() {
+    if (sessionUpdate?.state !== 'complete') {
+      await dialog.showMessageBox(window, { message: sessionUpdate?.state === 'restarting' ? 'Conversations are still restarting.' : 'There is no update report for this launch.' });
+      return;
+    }
+    const recovery = sessionRecovery, result = await recovery;
+    if (!result) return;
+    const action = await reviewSessionUpdate(result, options => dialog.showMessageBox(window, options));
+    if (recovery !== sessionRecovery || quitting) return;
+    if (action === 'acknowledge' && !sessionUpdate.acknowledged) {
+      // Hide just the badge. Session Update Report… can still open this report.
+      sessionUpdate = { ...sessionUpdate, acknowledged: true };
+      send('session-update', sessionUpdate);
+    } else if (action === 'retry') {
+      saveSessionUpdate(app.getPath('userData'), result.retryPlan);
+      recoverUpdatedSessions(result.retryPlan, result.restarted);
+    }
+  },
+  appVersion: () => app.getVersion(),
+  usageSummary: () => usage.summary(),
+  // Terminal panel
+  termOpen(id, cols, rows) { const record = manager.record(id); return terminals.open({ env: manager.env(record.environmentId), cwd: record.cwd, cols, rows }); },
+  async termOpenCli(environmentId, action, cols, rows, engine, account) {
+    const { env, ...command } = await manager.cliTerminal(environmentId, action, cliEngineOf(engine), account);
+    return terminals.open({ env, command, cwd: app.getPath('home'), cols, rows });
+  },
+  termReady: termId => terminals.ready(termId),
+  termWrite: (termId, data) => terminals.write(termId, data),
+  termResize: (termId, cols, rows) => terminals.resize(termId, cols, rows),
+  termClose: termId => terminals.close(termId),
+  async pickFiles() {
+    if (process.env.IRIS_TEST_PICK_FILES) return process.env.IRIS_TEST_PICK_FILES.split(':');
+    const result = await dialog.showOpenDialog(window, { properties: ['openFile', 'multiSelections'] });
+    return result.canceled ? [] : result.filePaths;
+  },
+  answer: (id, requestId, payload) => manager.answer(id, requestId, payload),
+  abort: id => manager.abort(id),
+  setModel: (id, provider, modelId) => manager.setModel(id, provider, modelId),
+  setThinking: (id, level) => manager.setThinking(id, level),
+  setSpeed: (id, speed) => manager.setSpeed(id, speed),
+  messages: id => manager.messages(id),
+  historyPage: (id, options) => manager.historyPage(id, options ?? {}),
+  clearSubagentHistory: (id, ids) => manager.clearSubagentHistory(id, ids),
+  stats: id => manager.stats(id),
+  rename: (id, title) => manager.rename(id, title),
+  archive: id => manager.archive(id),
+  reconnect: id => manager.reconnect(id),
+  async gitBranch(id) {
+    const record = manager.record(id);
+    const env = manager.env(record.environmentId);
+    if (env.kind === 'ssh') return runSsh(env, `git -C ${shellQuote(record.cwd)} rev-parse --abbrev-ref HEAD 2>/dev/null || true`, { timeout: 15000 }).then(s => s.trim()).catch(() => '');
+    return new Promise(resolve => execFile('git', ['-C', record.cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], (error, stdout) => resolve(error ? '' : stdout.trim())));
+  },
+  async gitReview(id, request = {}) {
+    const record = manager.record(id), env = manager.env(record.environmentId);
+    if (env.kind === 'local') return gitReview(record.cwd, request);
+    const { node } = await manager.prepare(record.environmentId, { engine: record.engine });
+    return decodeGitReview(await runSsh(env, remoteGitReviewScript(node, record.cwd, request), { timeout: 120000 }));
+  },
+  appearance(theme) {
+    if (!['light', 'dark', 'system'].includes(theme)) throw new Error('Unknown appearance');
+    nativeTheme.themeSource = theme; // 'system' follows macOS, and the renderer's media query with it
+    window?.setBackgroundColor(nativeTheme.shouldUseDarkColors ? '#121214' : '#fdfdfd');
+  },
+  compact: id => manager.compact(id),
+  openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
+  openPath: path => shell.openPath(path),
+  // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
+  listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
+  searchFiles: (target, query = '') => typeof target === 'string'
+    ? sessionFilePreview(target, 'search', query)
+    : targetFilePreview(target?.environmentId ?? 'local', target?.cwd ?? '', 'search', query, target?.engine),
+  readFile: (id, rel) => sessionFilePreview(id, 'read', rel),
+  downloadFile: (id, rel) => downloadSessionFile(id, rel),
+  showInFolder: path => shell.showItemInFolder(path),
+};
+
+// Build the renderer and show progress while recovery runs, but don't race it with
+// an IPC that could attach to an old process or otherwise modify the session.
+const updateReadOnly = new Set(['bootstrap', 'appVersion', 'updateStatus', 'showSessionUpdateReport', 'appearance', 'catalog', 'listSessions', 'environments', 'searchMessages']);
+ipcMain.handle('iris:invoke', async (_event, method, ...args) => {
+  const fn = api[method];
+  if (!fn) throw new Error(`Unknown method ${method}`);
+  if (!updateReadOnly.has(method)) {
+    if (sessionUpdate?.state === 'restarting') await sessionRecovery;
+    if (quitting || updater?.status.state === 'installing') throw new Error('Iris is restarting');
+  }
+  return fn(...args);
+});
+
+function createWindow() {
+  window = new BrowserWindow({
+    width: 1440, height: 900, minWidth: 880, minHeight: 640,
+    title: 'Iris',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#121214' : '#fdfdfd',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 17, y: 15 }, // centered in the 44px title bar
+    icon: join(root, 'build/icon.png'),
+    webPreferences: { preload: join(root, 'app/main/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, plugins: true },
+  });
+  window.on('focus', () => attention.focused());
+  window.webContents.setWindowOpenHandler(({ url }) => { api.openExternal(url); return { action: 'deny' }; });
+  window.webContents.on('will-navigate', (event, url) => { if (url !== window.webContents.getURL()) { event.preventDefault(); api.openExternal(url); } });
+  if (process.env.IRIS_DEV_URL) window.loadURL(process.env.IRIS_DEV_URL);
+  else window.loadFile(join(root, 'dist/renderer/index.html'));
+}
+
+// Asked once, while the app starts: what PATH the user's login shell has (shell-env.mjs). Agents on this
+// Mac wait for the answer, so the first conversation already finds the user's own tools.
+const shellEnv = process.env.IRIS_INSECURE_TEST_STORAGE === '1' || process.env.IRIS_NO_SHELL_ENV ? Promise.resolve({}) : resolveShellEnv();
+app.whenReady().then(async () => {
+  updater = new Updater({ app, net, cacheDir: join(app.getPath('userData'), 'updates'), send });
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: app.name, submenu: [
+      { role: 'about' },
+      { label: 'Check for Updates…', click: () => updater.check({ manual: true }).then(st => { if (st.state === 'current') dialog.showMessageBox(window, { message: `Iris ${app.getVersion()} is up to date.` }); else if (st.state === 'error') dialog.showMessageBox(window, { type: 'warning', message: 'Couldn’t check for updates', detail: st.message }); }) },
+      { type: 'separator' },
+      { label: 'Session Update Report…', click: () => api.showSessionUpdateReport().catch(error => send('notice', { level: 'error', message: error.message })) },
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('open-settings', {}) },
+      { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
+    ] },
+    { role: 'editMenu' },
+    { label: 'View', submenu: [{ role: 'reload', visible: !app.isPackaged }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
+    { role: 'windowMenu' },
+  ]));
+  if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(join(root, 'build/icon.png')));
+  store = new Store(app.getPath('userData'), safeStorage, { insecureTestStorage: process.env.IRIS_INSECURE_TEST_STORAGE === '1' });
+  syncCompactionReserves();
+  // Pi loads the bridge in milliseconds from outside this ES module package (extensions.mjs).
+  let bridgePath = join(root, 'agent/iris-bridge.js');
+  try { bridgePath = stageExtensions(join(root, 'agent'), join(app.getPath('userData'), 'ext')); }
+  catch (error) { console.error('Iris: could not stage the bridge, loading it in place:', error.message); }
+  manager = new SessionManager({
+    store, environments, piVersion,
+    bridgePath,
+    relayPath: join(root, 'agent/iris-relay.mjs'),
+    piPackageDir: join(root, 'node_modules/@earendil-works/pi-coding-agent'),
+    cacheDir: join(app.getPath('userData'), 'downloads'),
+    local: {
+      node: nodeBinary(), piCli: join(piPackage, 'dist/bundle/cli.js'),
+      agentDir: join(app.getPath('userData'), 'agent'),
+      retryPath: join(dirname(bridgePath), 'iris-retry.mjs'),
+      runDir: join(app.getPath('userData'), 'run'),
+      uploadDir: join(app.getPath('userData'), 'uploads'),
+      claudeRoot: app.getPath('userData'), // <userData>/claude-code/<version>/claude, never a `claude` on PATH
+      extraEnv: { ELECTRON_RUN_AS_NODE: '1' },
+      envReady: shellEnv.then(found => { Object.assign(manager.local.extraEnv, found); }, () => {}),
+    },
+  });
+  usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
+  manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
+  manager.on('environments-changed', () => send('environments', environments()));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code', 'antigravity-install']) manager.on(channel, payload => send(channel, payload));
+  manager.on('event', ({ id, event }) => attention.event(id, event));
+  manager.on('question', ({ id, question }) => attention.question(id, question));
+  manager.on('ultra', ({ id, ultra }) => attention.ultra(id, ultra?.task?.status === 'active'));
+  manager.on('ultra', ultraChanged);
+  manager.on('status', ultraPiStatus);
+  manager.on('sessions', () => send('sessions', manager.list()));
+  try {
+    const plan = loadSessionUpdate(app.getPath('userData'), app.getVersion());
+    if (plan) recoverUpdatedSessions(plan);
+  } catch (error) {
+    sessionRecovery = Promise.resolve({ version: app.getVersion(), restarted: [], failures: [{ environment: 'Iris', message: error.message }] });
+    setSessionUpdate('complete', app.getVersion(), 0, 1);
+  }
+  createWindow();
+  updater.start();
+  if (process.env.IRIS_SMOKE_TEST) smokeTest();
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+});
+
+// A reply that finished, or a question waiting, while you were in another app: a notification, and a count
+// on the Dock icon until you come back (attention.mjs).
+const notes = new Set(); // shown notifications, kept so a click still reaches its handler
+const attention = createAttention({
+  isFocused: () => !!window && !window.isDestroyed() && window.isFocused(),
+  titleOf: id => manager?.store.sessions.find(s => s.id === id)?.title,
+  isWorking: id => !!manager?.runtimes.get(id)?.streaming,
+  setBadge: count => { if (process.platform === 'darwin') app.dock?.setBadge(count ? String(count) : ''); else app.setBadgeCount?.(count); },
+  notify: ({ id, title, body }) => {
+    // Automated runs (isolated test profiles) record what they would show instead of showing it.
+    if (process.env.IRIS_INSECURE_TEST_STORAGE === '1') { (globalThis.__irisNotifications ??= []).push({ id, title, body }); return; }
+    if (!Notification.isSupported()) return;
+    const note = new Notification({ title, body });
+    notes.add(note);
+    note.on('click', () => { notes.delete(note); if (window && !window.isDestroyed()) { window.show(); window.focus(); send('open-session', { id }); } });
+    note.on('close', () => notes.delete(note));
+    note.show();
+  },
+});
+
+// Ultra on this Mac: keep it awake while a task runs here (the screen may still turn off), say when a
+// task ends, and ask before quitting stops one. Tasks on SSH hosts run there whatever this Mac does.
+const ultraLocal = new Map(); // session id -> running here
+let awake = null;
+function keepAwake() {
+  if (ultraLocal.size && awake == null) awake = powerSaveBlocker.start('prevent-app-suspension');
+  if (!ultraLocal.size && awake != null) { powerSaveBlocker.stop(awake); awake = null; }
+}
+// A Pi that stopped (archived, deleted, crashed) sends no more status: it no longer keeps the Mac awake.
+function ultraPiStatus({ id, status }) { if (!['connected', 'connecting', 'reconnecting'].includes(status) && ultraLocal.delete(id)) keepAwake(); }
+function ultraChanged({ id, ultra, ended, title, local }) {
+  if (local && ultra?.task?.status === 'active') ultraLocal.set(id, true); else ultraLocal.delete(id);
+  keepAwake();
+  if (ended && ['complete', 'stalled', 'needs_attention'].includes(ended) && Notification.isSupported()) {
+    const note = new Notification({ title: ended === 'complete' ? 'Ultra finished' : ended === 'needs_attention' ? 'Ultra needs attention: review not passed' : 'Ultra stopped: no progress', body: title || 'Conversation' });
+    note.on('click', () => { if (window && !window.isDestroyed()) { window.show(); window.focus(); send('open-session', { id }); } });
+    note.show();
+  }
+}
+
+app.on('before-quit', event => {
+  if (quitting || !manager) return;
+  if (updater?.status.state === 'installing' && !updateQuit) { event.preventDefault(); return; }
+  // Anything still working on this Mac stops with the app: say so first. (Automated runs quit unattended.)
+  const working = updateQuit || process.env.IRIS_QUIT_ON_CLOSE ? 0 : Math.max(ultraLocal.size, manager.localWorkCount());
+  if (working && window && !window.isDestroyed()) {
+    const choice = dialog.showMessageBoxSync(window, { type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,
+      message: `${working === 1 ? 'A conversation is' : `${working} conversations are`} still working on this Mac`,
+      detail: 'Quitting stops replies, goals and background jobs here. History is kept, and an Ultra task carries on when you open its conversation again. Conversations on SSH hosts keep running.' });
+    if (choice !== 0) { event.preventDefault(); return; }
+  }
+  event.preventDefault();
+  quitting = true;
+  terminals.closeAll();
+  manager.shutdown().finally(() => app.quit());
+});
+app.on('window-all-closed', () => { if (process.platform !== 'darwin' || process.env.IRIS_QUIT_ON_CLOSE) app.quit(); });
+
+// Packaged-build check used by the release workflow: the UI loads, the native pty module loads, and
+// Pi starts with this app's Electron binary acting as Node (no Node install on the Mac).
+async function smokeTest() {
+  const fail = error => { console.error('IRIS SMOKE FAILED:', error?.stack ?? error); app.exit(1); };
+  try {
+    await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', (_e, code, desc) => reject(new Error(`renderer: ${desc}`))); setTimeout(() => reject(new Error('renderer load timeout')), 30000); });
+    let mounted = false;
+    for (let i = 0; i < 60 && !mounted; i++) {
+      mounted = await window.webContents.executeJavaScript('!!document.querySelector(".sidebar, .composer")');
+      if (!mounted) await new Promise(r => setTimeout(r, 250));
+    }
+    if (!mounted) throw new Error('renderer did not mount: ' + (await window.webContents.executeJavaScript('document.body.innerHTML.slice(0, 400)')));
+    const t = terminals.open({ env: { kind: 'local' }, cwd: app.getPath('home'), cols: 80, rows: 24 });
+    terminals.close(t);
+    const piState = await manager.piSelfTest();
+    console.log('IRIS SMOKE OK', JSON.stringify({ version: app.getVersion(), pi: piState }));
+    app.exit(0);
+  } catch (error) { fail(error); }
+}

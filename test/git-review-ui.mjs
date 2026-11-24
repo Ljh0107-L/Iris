@@ -1,0 +1,486 @@
+// Real built renderer + real Git repositories, with only Electron IPC replaced by a local binding.
+// No model calls, user profiles, SSH hosts or user repositories are touched.
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve, extname } from 'node:path';
+import { chromium } from 'playwright-core';
+import { gitReview } from '../app/main/git-review.mjs';
+import { filePreview } from '../app/main/file-preview.mjs';
+
+const profile = await mkdtemp(join(tmpdir(), 'pi-review-ui-'));
+const cwd = join(profile, 'repo'); await mkdir(cwd);
+const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+git('init', '-b', 'main'); git('config', 'user.name', 'UI fixture'); git('config', 'user.email', 'ui@example.invalid');
+await writeFile(join(cwd, 'example.js'), 'export const answer = 41;\n'); git('add', '.'); git('commit', '-m', 'initial');
+await writeFile(join(cwd, 'example.js'), 'export const answer = 42;\n');
+await chmod(join(cwd, 'example.js'), 0o755);
+await writeFile(join(cwd, 'notes.txt'), 'Review the new behavior.\n');
+const session = { id: 'review-ui', title: 'Review parser changes', environmentId: 'local', environmentLabel: 'This computer', project: 'review-fixture', cwd, status: 'connected', model: { provider: 'mock', id: 'mock' } };
+const settings = { defaults: { environmentId: 'local', model: session.model }, providers: [], builtinProviders: { mock: 'Mock provider' }, environments: {}, recentFolders: {}, recentEnvironments: [] };
+const environments = [{ id: 'local', kind: 'local', label: 'This computer' }, { id: 'ssh:audit', kind: 'ssh', label: 'Audit SSH', added: true, enabled: true }];
+const ipcCalls = [];
+const sessions = [
+  { ...session, id: 'empty-code', title: 'Build the alignment grid demo', project: 'acme-web', cwd: join(profile, 'acme-web') }, session,
+  { ...session, id: 'recent-1', title: 'Understand the streaming lifecycle' },
+  { ...session, id: 'recent-2', title: '排查远程连接偶发中断' },
+  { ...session, id: 'notes-1', title: 'Plan the next iteration', project: 'No folder', noFolder: true, cwd: profile },
+];
+const dist = resolve('dist/renderer');
+const server = createServer(async (req, res) => {
+  try {
+    const path = resolve(dist, '.' + decodeURIComponent(new URL(req.url, 'http://localhost').pathname));
+    if (!path.startsWith(dist + '/') && path !== dist) { res.writeHead(403); res.end(); return; }
+    const target = path === dist || path.endsWith('/') ? join(path, 'index.html') : path;
+    const type = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml' }[extname(target)] ?? 'application/octet-stream';
+    const data = await readFile(target);
+    res.writeHead(200, { 'Content-Type': type }); res.end(data);
+  } catch { res.writeHead(404); res.end(); }
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const executablePath = process.env.IRIS_CHROMIUM || ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium', chromium.executablePath()].find(existsSync);
+let browser; const errors = [];
+const theme = process.env.IRIS_UI_THEME === 'dark' ? 'dark' : 'light';
+const nativeAppearances = [];
+try {
+  browser = await chromium.launch({ executablePath, headless: true });
+  const page = await browser.newPage({ viewport: { width: 880, height: 708 }, deviceScaleFactor: Number(process.env.IRIS_UI_SCALE || 1), reducedMotion: 'reduce' });
+  page.on('pageerror', error => errors.push(error.message));
+  await page.exposeFunction('fixtureInvoke', async (method, ...args) => {
+    ipcCalls.push({ method, args });
+    if (method === 'appearance') { nativeAppearances.push(args[0]); return null; }
+    // Settings → Models shows the subscription CLIs: not installed on this fixture's machine.
+    if (method === 'cliInfo') return { installed: false };
+    if (method === 'cliReadiness') return 'missing';
+    if (method === 'cliAccounts') return { accounts: [{ id: 'default', name: 'Default' }], selected: 'default' };
+    if (method === 'cliOptions') return [];
+    if (method === 'bootstrap') return { settings, environments, sessions, home: profile };
+    if (method === 'catalog') return [
+      { provider: 'mock', id: 'mock', name: 'Offline fixture', api: 'openai-responses', engines: ['pi'], input: ['text'], reasoning: true, speeds: ['standard', 'fast'] },
+      { provider: 'mock', id: 'alternate', name: 'Alternate fixture', api: 'anthropic-messages', engines: ['pi', 'claude-code'], reasoning: true, speeds: ['standard', 'fast'] },
+    ];
+    if (method === 'listDir') return { path: args[1] || '/home/audit', entries: [] };
+    if (['setModel', 'setUltra', 'setEffort', 'setUltracode'].includes(method)) {
+      const target = sessions.find(s => s.id === args[0]);
+      if (method === 'setModel') target.model = { provider: args[1], id: args[2] };
+      else if (method === 'setUltra') target.ultra = args[1];
+      else if (method === 'setEffort') target.effort = args[1];
+      else if (method === 'setUltracode') target.ultracode = args[1];
+      await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
+      return method === 'setUltracode' ? { ultracode: !!args[1] } : method === 'setEffort' ? { effort: args[1] } : null;
+    }
+    if (method === 'historyPage' && args[0] === 'cc-ui') {
+      return {
+        next: null,
+        messages: [
+          { __entryId: 'e1', timestamp: 1000, role: 'user', content: [{ type: 'text', text: 'Audit the repository with Claude Code.' }] },
+          {
+            __entryId: 'e2', timestamp: 2000, role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'cc-todo-1', name: 'TodoWrite', arguments: { todos: [{ content: 'Inspect parser module', status: 'completed' }, { content: 'Verify edge cases', status: 'in_progress', activeForm: 'Verifying edge cases' }] } },
+              { type: 'toolCall', id: 'cc-task-1', name: 'Task', arguments: { subagent_type: 'Explore', description: 'Inspect parser module', prompt: 'Read example.js and summarize.' } },
+            ],
+            stopReason: 'toolUse',
+          },
+          { __entryId: 'e3', timestamp: 2500, role: 'toolResult', toolCallId: 'cc-todo-1', toolName: 'TodoWrite', content: [{ type: 'text', text: 'Todos updated' }], details: { engine: 'claude-code' }, isError: false },
+          {
+            __entryId: 'e4', timestamp: 3000, role: 'toolResult', toolCallId: 'cc-task-1', toolName: 'Task',
+            content: [{ type: 'text', text: 'Inspected `example.js` — exports `answer = 42`.' }],
+            details: {
+              engine: 'claude-code', kind: 'claude-code-agent', stepCount: 2,
+              steps: [
+                { type: 'tool', id: 's1', name: 'read', arguments: { path: join(cwd, 'example.js') } },
+                { type: 'tool', id: 's2', name: 'grep', arguments: { pattern: 'answer', path: cwd } },
+              ],
+              agentRuns: [{ key: 'claude-agent:cc-task-1', turns: 2, usage: { input: 400, output: 80, totalTokens: 480 } }],
+            },
+            isError: false,
+          },
+          {
+            __entryId: 'e5', timestamp: 4000, role: 'assistant',
+            content: [{ type: 'text', text: 'Audit complete: `example.js` is clean.\n\n1. Escaped inline code `<pre>` and `<span>` inside lists wraps normally.\n   - Check [unordered trace](trace-unordered.json) or folder [trace dir](trace-dir).' }],
+            usage: { input: 500, output: 40, cacheRead: 100, cacheWrite: 0, totalTokens: 640 }, stopReason: 'stop',
+          },
+        ],
+      };
+    }
+    if (method === 'historyPage' && args[0] === 'empty-code') return { messages: [], next: null };
+    if (method === 'historyPage') return { next: null, messages: [{ role: 'user', content: [{ type: 'text', text: 'Review the repository changes and explain what needs attention.' }] }, { role: 'assistant', content: [{ type: 'text', text: 'The changes are ready for review. The implementation is small, and there is one behavior worth checking before committing.\n\n### What changed\n\nThe default answer in `example.js` now returns **42**. The new `notes.txt` documents the expected behavior.\n\n- Confirm that existing callers expect the updated value.\n- Add a regression case for the previous boundary condition.\n- Keep the documentation with the implementation in the same commit.\n\nOpen **Review** to inspect the actual diff. You can select a line to add feedback to your next message.' }], stopReason: 'stop' }] };
+    if (method === 'listFiles') {
+      if (args[1] === 'trace-dir') return { path: join(cwd, 'trace-dir'), entries: [{ name: 'rank0.json', dir: false }] };
+      return { path: cwd, entries: [{ name: 'trace-dir', dir: true }, { name: 'example.js', dir: false }, { name: 'trace-unordered.json', dir: false }] };
+    }
+    if (method === 'readFile') {
+      if (args[1] === 'trace-dir') throw new Error(`${join(cwd, 'trace-dir')} is not a regular file`);
+      if (args[1] === 'trace-unordered.json') {
+        const content = `{"traceEvents":[${'{"ph":"X","pid":1,"name":"kernel"},'.repeat(40000)}`.slice(0, 1 << 20);
+        return { path: join(cwd, 'trace-unordered.json'), size: 6 * 1048576, kind: 'text', truncated: true, content };
+      }
+      return filePreview('read', cwd, args[1]);
+    }
+    if (method === 'downloadFile') return { path: join(profile, String(args[1]).split('/').pop()), size: 6 * 1048576 };
+    if (method === 'gitReview') return gitReview(cwd, args[1]);
+    if (method === 'gitBranch') return 'main';
+    if (method === 'searchFiles') return filePreview('search', cwd, args[1]);
+    if (method === 'commands') {
+      if (args[0] === 'cc-ui') return [{ name: 'code-review', argumentHint: '[target]', description: 'Review the current diff for correctness bugs', source: 'claude-code' }, { name: 'context', description: 'Inspect current context usage', source: 'claude-code' }];
+      return [{ name: 'goal', description: 'Work autonomously toward a clear objective' }, { name: 'compact', description: 'Compact conversation context' }];
+    }
+    if (method === 'agents') return [];
+    if (method === 'jobs') {
+      if (args[0] === 'cc-ui') return { version: 1, at: Date.now(), jobs: [{ id: 'bmon00001', description: 'Watch CI run', command: 'tail -f ci.log', cwd, status: 'running', stopping: false, startedAt: 1000, elapsedMs: 500, tail: 'ci step 1\n' }] };
+      return { version: 0, jobs: [] };
+    }
+    if (method === 'stopBackgroundJob') {
+      await page.evaluate(({ id, cwd }) => window.fixtureEvent({ channel: 'jobs', payload: { id, version: 2, at: Date.now(), jobs: [{ id: 'bmon00001', description: 'Watch CI run', command: 'tail -f ci.log', cwd, status: 'stopped', stopping: false, startedAt: 1000, endedAt: 2000, elapsedMs: 1000, tail: 'ci step 1\n' }] } }), { id: args[0], cwd });
+      return null;
+    }
+    if (method === 'updateStatus') return { state: 'idle' };
+    if (method === 'prompt') {
+      const verb = args[1]?.match(/^\/iris-ultra (resume|pause|dismiss)$/)?.[1];
+      if (!verb) throw new Error('UI test must not send model prompts');
+      await page.evaluate(({ id, verb }) => window.fixtureEvent({ channel: 'ultra', payload: { id, ultra: { enabled: true, task: verb === 'dismiss' ? null : { objective: 'Finish the parser', status: verb === 'resume' ? 'active' : 'paused', startedAt: Date.now() } } } }), { id: args[0], verb });
+      return null;
+    }
+    return null;
+  });
+  await page.addInitScript(() => {
+    // Old experimental flat-list state must not hide projects in the new layout.
+    localStorage.setItem('iris.sidebar.grouped', 'false');
+    const listeners = new Set();
+    window.fixtureEvent = event => { for (const listener of listeners) listener(event); };
+    window.iris = { invoke: (...args) => window.fixtureInvoke(...args), subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); }, pathForFile: () => '' };
+  });
+  await page.emulateMedia({ colorScheme: 'dark' }); // no saved choice yet: the app follows the system
+  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  const screenshots = `${process.env.IRIS_UI_SHOTS || '/tmp/iris-review-ui/code-workspace'}/${theme}`; await mkdir(screenshots, { recursive: true });
+  await page.locator('.new-session .code-empty').waitFor();
+  await page.getByRole('button', { name: 'Switch to light theme' }).click();
+  if (theme === 'dark') await page.getByRole('button', { name: 'Switch to dark theme' }).click();
+  await page.reload();
+  await page.locator('.new-session .code-empty').waitFor();
+  assert.equal(await page.locator('html').getAttribute('data-theme'), theme, 'appearance survives reload');
+  await page.waitForFunction(theme => getComputedStyle(document.documentElement).colorScheme === theme, theme);
+  assert.equal(nativeAppearances.at(-1), theme, 'native appearance follows the renderer');
+  const composerBounds = await page.locator('.composer').boundingBox();
+  const sendBounds = await page.getByRole('button', { name: 'Send', exact: true }).boundingBox();
+  assert.ok(composerBounds.x + composerBounds.width - sendBounds.x - sendBounds.width < 25, 'send stays at the right edge of the welcome composer');
+  assert.deepEqual(await page.locator('.group-name').allTextContents(), ['acme-web', 'review-fixture', 'No folder'], 'projects are visible by default and separate working folders');
+  assert.equal(await page.getByRole('button', { name: 'Group conversations by project', exact: true }).getAttribute('aria-pressed'), 'true');
+  assert.ok(composerBounds.width < 620, 'narrow composer keeps side gutters');
+  await page.screenshot({ path: join(screenshots, 'workspace-welcome.png') });
+  await writeFile(join(screenshots, 'welcome-metrics.json'), JSON.stringify(await page.evaluate(() => {
+    const selectors = ['.sidebar', '.sidebar-nav', '.nav-item.new', '.code-empty .iris-mark', '.main-head', '.composer-shell', '.composer-row', '.composer textarea', '.composer-toolbar'];
+    return Object.fromEntries(selectors.map(selector => {
+      const element = document.querySelector(selector), rect = element.getBoundingClientRect(), css = getComputedStyle(element);
+      return [selector, { x: rect.x, y: rect.y, width: rect.width, height: rect.height, font: css.font, letterSpacing: css.letterSpacing, color: css.color, background: css.background, border: css.border, borderRadius: css.borderRadius, boxShadow: css.boxShadow }];
+    }));
+  }), null, 2));
+  assert.doesNotMatch(await page.locator('.composer-toolbar').innerText(), /Default|Standard/);
+  await page.getByRole('button', { name: 'Effort', exact: true }).click();
+  await page.getByRole('button', { name: 'High', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.thinkingLevel), 'high');
+  assert.match(await page.locator('.effort-trigger').innerText(), /High/);
+  await page.getByRole('button', { name: 'Speed', exact: true }).click();
+  await page.getByRole('button', { name: 'Fast', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.speed), 'fast');
+  assert.match(await page.locator('.speed-trigger').innerText(), /Fast/);
+  await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Ultra mode', exact: true }).getAttribute('aria-pressed'), 'true');
+  await page.screenshot({ path: join(screenshots, 'response-options.png') });
+  await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Ultra mode', exact: true }).getAttribute('aria-pressed'), 'false');
+  await page.getByRole('button', { name: 'Effort', exact: true }).click();
+  await page.getByRole('button', { name: 'Medium', exact: true }).click();
+  await page.getByRole('button', { name: 'Speed', exact: true }).click();
+  await page.getByRole('button', { name: 'Standard', exact: true }).click();
+  assert.doesNotMatch(await page.locator('.composer-toolbar').innerText(), /Standard/);
+  await page.getByRole('button', { name: 'Show recent conversations', exact: true }).click();
+  assert.equal(await page.locator('.group-head').count(), 0);
+  await page.reload();
+  await page.locator('.new-session .code-empty').waitFor();
+  assert.equal(await page.locator('.group-head').count(), 0, 'explicit recent-list preference survives reload');
+  await page.getByRole('button', { name: 'Group conversations by project', exact: true }).click();
+  await page.reload();
+  await page.locator('.new-session .code-empty').waitFor();
+  assert.equal(await page.locator('.group-head').count(), 3, 'project preference survives reload');
+  const project = page.locator('.session-group', { has: page.locator('.group-name', { hasText: 'acme-web' }) });
+  await project.locator('.group-head').click();
+  assert.equal(await project.locator('.session-row').count(), 0, 'projects collapse independently');
+  assert.equal(await page.locator('.session-group', { has: page.locator('.group-name', { hasText: 'review-fixture' }) }).locator('.session-row').count(), 3);
+  await project.locator('.group-head').click();
+  assert.equal(await project.locator('.session-row').count(), 1);
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  assert.equal(await page.locator('.palette-tabs .on').innerText(), 'Projects');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.sidebar-nav button').count(), 3, 'sidebar nav is New, Search and Projects');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  assert.equal(await page.locator('.settings-sidebar .nav-item', { hasText: 'Agents' }).count(), 0, 'Settings → Agents page is removed');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('heading', { name: 'Connections', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Models', exact: true }).click();
+  await page.getByRole('heading', { name: 'Models', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Back to app', exact: true }).click();
+  await page.getByRole('button', { name: 'Build the alignment grid demo', exact: true }).click();
+  assert.equal(await page.locator('.right-panel').count(), 0, 'right panel stays closed by default for a calm two-column workspace');
+  await page.locator('.code-empty').waitFor();
+  await page.locator('.workspace-chip', { hasText: 'main' }).waitFor();
+  assert.equal(await page.locator('.workspace-chip').count(), 1, 'local sessions show branch without repeating folder and computer labels');
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('build the alignment grid demo — geometric shapes');
+  await page.screenshot({ path: join(screenshots, 'code-empty-session.png') });
+  await page.locator('.workspace-chip', { hasText: 'main' }).click();
+  await page.getByRole('complementary', { name: 'Git review' }).waitFor();
+  await page.getByRole('button', { name: 'Close Git review' }).click();
+  await page.getByRole('button', { name: 'New', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Review the current changes');
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('');
+  await page.getByLabel('Attach files', { exact: true }).setInputFiles(join(cwd, 'notes.txt'));
+  await page.getByRole('button', { name: 'Remove notes.txt' }).waitFor();
+  await page.getByRole('button', { name: 'Remove notes.txt' }).click();
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Search' }).waitFor();
+  await page.screenshot({ path: join(screenshots, 'workspace-search.png') });
+  await page.keyboard.press('Escape');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole('button', { name: 'Review parser changes', exact: true }).click();
+  await page.getByText('What changed', { exact: true }).waitFor();
+  const aligned = await page.evaluate(() => {
+    const box = selector => { const { x, width } = document.querySelector(selector).getBoundingClientRect(); return { x, width }; };
+    return { composer: box('.composer'), transcript: box('.transcript-inner'), shell: box('.composer-shell') };
+  });
+  assert.ok(aligned.composer.width <= 768, 'wide windows keep a bounded composer');
+  assert.ok(Math.abs(aligned.composer.x - (aligned.transcript.x - 18)) < 1 && Math.abs(aligned.composer.width - (aligned.transcript.width + 36)) < 1, `composer sits 18px outside the reading column on each side: ${JSON.stringify(aligned)}`);
+  assert.ok(Math.abs(aligned.shell.x - aligned.composer.x) < 1, 'composer shell aligns with the input');
+  // Verify `/` slash menu descriptions, `@` file mentions, and persistent Stop button while typing.
+  const msgInput = page.getByRole('textbox', { name: 'Message', exact: true });
+  await msgInput.fill('/');
+  await page.locator('.slash-menu .slash-desc', { hasText: 'Work autonomously' }).waitFor();
+  await msgInput.fill('Check @exa');
+  await page.locator('.mention-menu .mention-item', { hasText: 'example.js' }).waitFor();
+  await msgInput.press('Enter');
+  assert.equal(await msgInput.inputValue(), 'Check @example.js ');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'status', payload: { id: 'review-ui', status: 'connected', streaming: true } }));
+  await page.locator('.send-button.stop').waitFor();
+  assert.equal(await page.locator('.send-button.ready').count(), 1, 'Send stays available to interrupt while Stop remains visible');
+  assert.equal(await page.locator('.send-button.stop').count(), 1, 'Stop remains visible while typing during streaming');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'status', payload: { id: 'review-ui', status: 'connected', streaming: false } }));
+  await msgInput.fill('');
+  await page.screenshot({ path: join(screenshots, 'workspace-conversation.png') });
+  await page.getByRole('button', { name: 'Review Git changes' }).click();
+  const pane = page.getByRole('complementary', { name: 'Git review' });
+  await pane.locator('.git-file', { hasText: 'example.js' }).click();
+  await pane.getByRole('button', { name: 'Comment on new line 1', exact: true }).waitFor();
+  assert.match(await pane.locator('.git-diff-lines').innerText(), /answer = 41/);
+  assert.match(await pane.locator('.git-diff-lines').innerText(), /answer = 42/);
+  assert.equal(await pane.locator('.git-commit').count(), 0, 'no empty commit form before staging');
+  assert.doesNotMatch(await pane.locator('.git-diff-lines').innerText(), /diff --git|index [0-9a-f]+/);
+  assert.match(await pane.locator('.git-diff-lines').innerText(), /new mode 100755/, 'meaningful permission changes remain visible when raw metadata is collapsed');
+  await pane.getByRole('button', { name: 'Show diff metadata' }).click();
+  assert.match(await pane.locator('.git-diff-lines').innerText(), /diff --git/);
+  await pane.getByRole('button', { name: 'Show diff metadata' }).click();
+  await page.screenshot({ path: join(screenshots, 'git-review.png') });
+  await pane.getByRole('button', { name: 'Comment on new line 1', exact: true }).click();
+  await pane.getByLabel('Review feedback').fill('Please explain this constant.');
+  await pane.getByRole('button', { name: 'Add to message' }).click();
+  await page.waitForFunction(() => window.__irisState().composerDrafts['review-ui']?.text.includes('Please explain this constant.'));
+  const draft = await page.evaluate(() => window.__irisState().composerDrafts['review-ui'].text);
+  assert.match(draft, /unstaged change.*example.js.*new line 1/);
+  await pane.getByRole('button', { name: 'Stage file', exact: true }).click();
+  await pane.getByRole('button', { name: 'Unstage file', exact: true }).waitFor();
+  await pane.getByRole('button', { name: 'Unstage file', exact: true }).click();
+  await pane.getByRole('button', { name: 'Stage file', exact: true }).waitFor();
+  await pane.getByRole('button', { name: 'Stage file', exact: true }).click();
+  await pane.getByRole('button', { name: 'Unstage file', exact: true }).waitFor();
+  await pane.getByLabel('Commit message').fill('Update answer after review');
+  await pane.getByRole('button', { name: 'Commit staged (1)', exact: true }).click();
+  await pane.locator('.git-commit').waitFor({ state: 'detached' });
+  assert.equal(git('show', 'HEAD:example.js'), 'export const answer = 42;');
+  assert.equal(git('log', '-1', '--format=%s'), 'Update answer after review');
+  await pane.locator('.git-file', { hasText: 'notes.txt' }).click();
+  await pane.getByRole('button', { name: 'Discard file', exact: true }).click();
+  await page.screenshot({ path: join(screenshots, 'workspace-discard-dialog.png') });
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  assert.equal(existsSync(join(cwd, 'notes.txt')), true);
+  await pane.getByRole('button', { name: 'Discard file', exact: true }).click();
+  await page.getByRole('button', { name: 'Discard', exact: true }).click();
+  await pane.getByText('Working tree clean', { exact: true }).waitFor();
+  assert.equal(await pane.getByText('Select a changed file to review', { exact: true }).count(), 0, 'clean repositories have one clear empty state');
+  assert.equal(existsSync(join(cwd, 'notes.txt')), false);
+  // The task that failed its independent review must expose the gap and a resume button.
+  await page.evaluate(() => window.fixtureEvent({ channel: 'ultra', payload: { id: 'review-ui', ultra: { enabled: true, task: { objective: 'Finish the parser', status: 'needs_attention', startedAt: Date.now(), reason: 'Independent review still finds gaps', review: { verdict: 'gaps', text: 'Parser tests still fail.' } } } } }));
+  await page.getByRole('button', { name: 'Resume', exact: true }).waitFor();
+  assert.match(await page.locator('.ultra-review-gaps').innerText(), /Parser tests still fail/);
+  assert.match(await page.locator('.ultra-banner').innerText(), /Needs attention/);
+  assert.doesNotMatch(await page.locator('.ultra-banner').innerText(), /Done/);
+  await page.screenshot({ path: join(screenshots, 'review-needs-attention.png') });
+  await page.setViewportSize({ width: 980, height: 740 });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('.session-main').isVisible(), false, 'narrow review gets the workspace instead of squeezing the conversation');
+  await page.screenshot({ path: join(screenshots, 'workspace-review-narrow.png') });
+  const bounds = await pane.boundingBox(); assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 981 && bounds.y + bounds.height <= 741);
+  await page.getByRole('button', { name: 'Close Git review' }).click();
+  await page.getByRole('textbox', { name: 'Message', exact: true }).waitFor();
+  assert.match(await page.getByRole('textbox', { name: 'Message', exact: true }).inputValue(), /Please explain this constant/);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('heading', { name: 'Models', exact: true }).waitFor();
+  await page.screenshot({ path: join(screenshots, 'workspace-settings.png') });
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Add SSH connection', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Add manually', exact: true }).click();
+  const dialogBounds = await page.getByRole('dialog', { name: 'Add SSH connection', exact: true }).boundingBox();
+  const portBounds = await page.getByRole('textbox', { name: 'Port', exact: true }).boundingBox();
+  assert.ok(portBounds.x + portBounds.width < dialogBounds.x + dialogBounds.width - 10, 'connection form fits inside its dialog');
+  await page.screenshot({ path: join(screenshots, 'workspace-connection-dialog.png') });
+  await page.getByRole('dialog', { name: 'Add SSH connection', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('button', { name: 'Back to app', exact: true }).click();
+  // Frequent capabilities: exercise their real UI-to-IPC paths with isolated fixture hosts/models.
+  await page.getByRole('button', { name: 'Resume', exact: true }).click();
+  await page.locator('.ultra-banner.active').waitFor();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
+  await page.locator('.ultra-banner.paused').waitFor();
+  await page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+  await page.locator('.ultra-banner').waitFor({ state: 'detached' });
+  assert.ok(ipcCalls.some(c => c.method === 'abort' && c.args[0] === session.id));
+  for (const verb of ['resume', 'pause', 'dismiss']) assert.ok(ipcCalls.some(c => c.method === 'prompt' && c.args[0] === session.id && c.args[1] === `/iris-ultra ${verb}`));
+  await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.ultra-trigger')?.getAttribute('aria-pressed') === 'true');
+  await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.ultra-trigger')?.getAttribute('aria-pressed') === 'false');
+  assert.deepEqual(ipcCalls.filter(c => c.method === 'setUltra').map(c => c.args), [[session.id, true], [session.id, false]]);
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  await page.getByRole('button', { name: 'Alternate fixture', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.model-trigger')?.textContent === 'Alternate fixture');
+  assert.ok(ipcCalls.some(c => c.method === 'setModel' && JSON.stringify(c.args) === JSON.stringify([session.id, 'mock', 'alternate'])));
+  await page.getByRole('button', { name: 'New', exact: true }).click();
+  await page.getByRole('button', { name: 'Environment', exact: true }).click();
+  await page.getByRole('button', { name: 'Audit SSH', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.environmentId), 'ssh:audit');
+  assert.ok(ipcCalls.some(c => c.method === 'prepareEnvironment' && c.args[0] === 'ssh:audit'));
+  await page.getByRole('button', { name: 'Folder', exact: true }).click();
+  await page.getByRole('button', { name: 'Browse Audit SSH…', exact: true }).click();
+  await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.cwd), '/home/audit');
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  await page.getByRole('button', { name: 'Alternate fixture', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.model.id), 'alternate');
+  await page.screenshot({ path: join(screenshots, 'ssh-model-selection.png') });
+
+  // Claude Code: chosen by picking a model in its group (Anthropic models only), 5-level effort, Ultracode, upload progress, tool & question cards.
+  const claudeGroup = page.locator('.source-section', { has: page.locator('.source-title', { hasText: 'Claude Code' }) });
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Engine', exact: true }).count(), 0, 'no separate engine menu');
+  assert.equal(await claudeGroup.locator('.menu-item', { hasText: 'Offline fixture' }).count(), 0, 'non-Anthropic models are not offered for Claude Code');
+  await claudeGroup.locator('.menu-item', { hasText: 'Alternate fixture' }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.engine), 'claude-code');
+  assert.equal(await page.evaluate(() => window.__irisState().draft.model.id), 'alternate', 'Claude Code picks an Anthropic Messages model');
+  assert.equal(await page.locator('.ultra-trigger').count(), 0, 'Pi Ultra stays out of Claude Code');
+  assert.equal(await page.locator('.ultracode-trigger').count(), 1, 'Claude Code offers Ultracode');
+  await page.getByRole('button', { name: 'Effort', exact: true }).click();
+  const effortItems = await page.locator('.popover .menu-item .menu-label').allTextContents();
+  assert.deepEqual(effortItems, ['Low', 'Medium', 'High', 'Extra high', 'Max']);
+  await page.getByRole('button', { name: 'Max', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__irisState().draft.effort), 'max');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'claude-code', payload: { id: 'ssh:audit', status: 'preparing', message: 'Uploading Claude Code from this Mac… 60%' } }));
+  await page.locator('.bar-status', { hasText: 'Uploading Claude Code from this Mac… 60%' }).waitFor();
+  await page.evaluate(() => window.fixtureEvent({ channel: 'claude-code', payload: { id: 'ssh:audit', status: 'ready', version: '2.1.322' } }));
+
+  const ccSession = { ...session, id: 'cc-ui', title: 'Audit parser with Claude Code', engine: 'claude-code', model: { provider: 'mock', id: 'alternate' }, effort: 'high', ultracode: false };
+  sessions.unshift(ccSession);
+  await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
+  await page.locator('.session-row', { hasText: 'Audit parser with Claude Code' }).locator('img.session-engine-logo[alt="Claude Code"]').waitFor();
+  await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
+  await page.locator('.header-engine-badge', { hasText: 'Claude Code' }).waitFor();
+  assert.ok(ipcCalls.some(c => c.method === 'jobs' && c.args[0] === 'cc-ui'), 'opening a Claude Code session refreshes background jobs');
+  await page.locator('.header-pill.live', { hasText: '1 running' }).click();
+  await page.locator('.right-panel .job[data-job-id="bmon00001"]', { hasText: 'Watch CI run' }).waitFor();
+  await page.locator('.right-panel .job[data-job-id="bmon00001"] .job-details-toggle').click();
+  await page.locator('.right-panel .job[data-job-id="bmon00001"] .job-output', { hasText: 'ci step 1' }).waitFor();
+  await page.screenshot({ path: join(screenshots, 'right-panel.png') });
+  await page.getByRole('button', { name: 'Stop job bmon00001', exact: true }).click();
+  assert.ok(ipcCalls.some(c => c.method === 'stopBackgroundJob' && c.args[0] === 'cc-ui' && c.args[1] === 'bmon00001' && c.args[2] === 1000));
+  await page.locator('.right-panel .job[data-job-id="bmon00001"]').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Session details', exact: true }).click();
+  await page.locator('.cc-todo-card', { hasText: '1/2' }).waitFor();
+  // Escaped inline `<pre>`/`<span>` inside Markdown lists must stay inline code, never swallow list items into a <pre> block.
+  const ccMd = await page.locator('.markdown', { hasText: 'Audit complete:' }).evaluate(el => ({
+    preCount: el.querySelectorAll('pre').length,
+    olScrollW: el.querySelector('ol')?.scrollWidth ?? 0,
+    olClientW: el.querySelector('ol')?.clientWidth ?? 0,
+    text: el.textContent,
+  }));
+  assert.equal(ccMd.preCount, 0, 'inline `<pre>` must stay escaped inline code');
+  assert.ok(ccMd.olScrollW <= ccMd.olClientW + 1, `list must wrap inside column: ${JSON.stringify(ccMd)}`);
+  assert.ok(ccMd.text.includes('<pre>') && ccMd.text.includes('<span>'));
+
+  // Right-click file links and inline file refs in messages to download without opening preview.
+  await page.getByRole('link', { name: 'unordered trace' }).click({ button: 'right' });
+  await page.locator('.popover .menu-item', { hasText: 'Download' }).click();
+  await page.locator('.markdown code.file-ref', { hasText: 'example.js' }).click({ button: 'right' });
+  await page.locator('.popover .menu-item', { hasText: 'Download' }).click();
+  assert.deepEqual(ipcCalls.filter(c => c.method === 'downloadFile').map(c => c.args), [['cc-ui', 'trace-unordered.json'], ['cc-ui', 'example.js']]);
+
+  // Left-clicking a 1 MiB single-line trace JSON opens a bounded, wrapped preview without syntax-highlight freeze.
+  await page.getByRole('link', { name: 'unordered trace' }).click();
+  await page.locator('.fp-notice', { hasText: 'Long single-line file' }).waitFor();
+  const traceLayout = await page.locator('.file-pane').evaluate(() => {
+    const content = document.querySelector('.fp-content');
+    const src = document.querySelector('.fp-source');
+    return { spans: src?.querySelectorAll('span').length ?? -1, len: src?.textContent.length ?? 0, scrollW: content?.scrollWidth ?? 0, clientW: content?.clientWidth ?? 0 };
+  });
+  assert.equal(traceLayout.spans, 0, 'minified trace JSON skips syntax highlighting');
+  assert.equal(traceLayout.len, 65536, 'minified trace JSON bounds initial preview size');
+  assert.ok(traceLayout.scrollW <= traceLayout.clientW + 2, `wrapped trace must fit pane: ${JSON.stringify(traceLayout)}`);
+
+  // Clicking a directory link in Markdown opens a clickable directory listing instead of failing.
+  await page.getByRole('link', { name: 'trace dir' }).click();
+  await page.locator('.fp-dir-row', { hasText: 'rank0.json' }).waitFor();
+  await page.getByRole('button', { name: 'Close files', exact: true }).click();
+  await page.locator('.file-pane').waitFor({ state: 'detached' });
+
+  await page.locator('.cc-task-card', { hasText: 'Inspect parser module' }).waitFor();
+  await page.locator('.cc-task-head', { hasText: 'Inspect parser module' }).click();
+  await page.locator('.cc-task-step', { hasText: 'example.js' }).waitFor();
+  await page.getByRole('button', { name: 'Ultracode', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.ultracode-trigger')?.getAttribute('aria-pressed') === 'true');
+  const ccInput = page.getByRole('textbox', { name: 'Message', exact: true });
+  await ccInput.fill('/');
+  await page.locator('.slash-menu .slash-hint', { hasText: '[target]' }).waitFor();
+  await ccInput.fill('');
+  await page.evaluate(() => window.fixtureEvent({
+    channel: 'question',
+    payload: {
+      id: 'cc-ui',
+      question: {
+        requestId: 'cc-q1', method: 'select', header: 'Features', title: 'Which checks should run?',
+        multiSelect: true, options: ['Types', 'Security'],
+        optionDetails: [{ label: 'Types', description: 'Verify TypeScript types' }, { label: 'Security', description: 'Audit shell quoting' }],
+      },
+    },
+  }));
+  await page.locator('.question-header-chip', { hasText: 'Features' }).waitFor();
+  await page.locator('.question-option-desc', { hasText: 'Verify TypeScript types' }).waitFor();
+  await page.locator('.question-option', { hasText: 'Types' }).click();
+  await page.locator('.question-option', { hasText: 'Security' }).click();
+  await page.getByRole('button', { name: 'Submit (2)', exact: true }).click();
+  assert.ok(ipcCalls.some(c => c.method === 'answer' && c.args[0] === 'cc-ui' && c.args[1] === 'cc-q1' && JSON.stringify(c.args[2]) === JSON.stringify({ value: ['Types', 'Security'] })));
+  await page.screenshot({ path: join(screenshots, 'claude-code-session.png') });
+
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  await page.getByRole('button', { name: 'Manage models…', exact: true }).click();
+  await page.getByRole('button', { name: 'Add provider', exact: true }).click();
+  await page.getByRole('button', { name: 'Custom endpoint', exact: true }).click();
+  await page.getByLabel('Base URL', { exact: true }).fill('https://example.invalid/v1');
+  await page.getByLabel('API key', { exact: true }).fill('fixture-key');
+  await page.getByRole('button', { name: 'Add model', exact: true }).click();
+  await page.screenshot({ path: join(screenshots, 'model-provider-editor.png') });
+  assert.deepEqual(errors, []);
+  console.log('PASS built renderer: Code empty state, task mode, attachments, project navigation, settings, responsive layout, real Git diff, line feedback draft, stage/unstage, commit, confirmed discard, clean state and Ultra review failure UI');
+  console.log(`Screenshots: ${screenshots}`);
+} finally {
+  await browser?.close(); await new Promise(r => server.close(r)); await rm(profile, { recursive: true, force: true });
+}

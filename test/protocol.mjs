@@ -1,0 +1,246 @@
+// M0 verification: drive two Pi sessions at once — one local, one over a real SSH connection —
+// and check streaming, per-session multi-provider model switching, tool calls, questions to the user
+// (allow and deny), and that API keys held by the desktop never appear in argv, tool environments
+// or session files.
+//
+// Usage: node test/protocol.mjs --ssh-host <alias> [--ssh-config <file>] [--remote-node <path>] [--remote-pi <path>]
+// Without --ssh-host the "remote" session uses the local transport (no SSH coverage).
+import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import { PiSession } from '../core/pi-session.mjs';
+import { localTransport, sshTransport } from '../core/transports.mjs';
+import { startMockLlm } from './mock-llm.mjs';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const { values: opts } = parseArgs({ options: {
+  'ssh-host': { type: 'string' }, 'ssh-config': { type: 'string' },
+  'remote-node': { type: 'string' }, 'remote-pi': { type: 'string' }, verbose: { type: 'boolean' },
+} });
+const piCli = join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
+const bridge = join(root, 'agent/iris-bridge.js');
+// Where the harness itself runs on an Electron-provided node (Iris's fallback is an Electron
+// helper), the remote side must use that helper's launcher: it sets ELECTRON_RUN_AS_NODE for it.
+const remoteNode = process.versions.electron ? (process.env.PI_NODE || process.execPath) : process.execPath;
+
+const results = [];
+function check(name, ok, detail = '') {
+  results.push({ name, ok: !!ok, detail });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
+}
+
+// ---------------------------------------------------------------------------- fixtures
+const mock = await startMockLlm({ chunkDelay: 60 }); // slow enough that the two streams overlap on a loaded runner
+const keys = { alpha: 'sk-alpha-' + randomBytes(12).toString('hex'), beta: 'sk-beta-' + randomBytes(12).toString('hex'), gemini: 'AIza-gemini-' + randomBytes(12).toString('hex') };
+const providers = [
+  { id: 'mock-alpha', name: 'Mock Alpha', api: 'openai-completions', baseUrl: mock.baseUrl('mock-alpha'), apiKey: keys.alpha, models: [{ id: 'alpha-1' }, { id: 'alpha-2' }] },
+  { id: 'mock-beta', name: 'Mock Beta', api: 'openai-completions', baseUrl: mock.baseUrl('mock-beta'), apiKey: keys.beta, models: [{ id: 'beta-1' }] },
+  // A custom endpoint speaking Google's protocol, with the base Iris saves for it.
+  // Its second model stands for Gemini 4 Argon behind a Volcengine Ark endpoint id.
+  { id: 'mock-gemini', name: 'Mock Gemini', api: 'google-generative-ai', baseUrl: `${mock.geminiRoot('mock-gemini')}/v1beta`, apiKey: keys.gemini,
+    models: [{ id: 'gemini-mock-1' }, { id: 'ep-mock-argon', name: 'gemini-4-argon', reasoning: true }] },
+];
+const work = mkdtempSync(join(tmpdir(), 'iris-m0-'));
+const dirs = {
+  localAgent: join(work, 'local/agent'), localProject: join(work, 'local/project'),
+  remoteAgent: join(work, 'remote-home/agent'), remoteProject: join(work, 'remote-home/project'),
+};
+for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
+
+const localTarget = { cwd: dirs.localProject, node: process.execPath, piCli, agentDir: dirs.localAgent, extensions: [bridge] };
+const remoteTarget = { cwd: dirs.remoteProject, node: opts['remote-node'] ?? remoteNode, piCli: opts['remote-pi'] ?? piCli, agentDir: dirs.remoteAgent, extensions: [bridge] };
+const remoteTransport = opts['ssh-host']
+  ? sshTransport({ host: opts['ssh-host'], sshOptions: opts['ssh-config'] ? ['-F', opts['ssh-config']] : [], ...remoteTarget })
+  : localTransport(remoteTarget);
+const boot = { providers };
+
+const local = new PiSession({ id: 'local', transport: localTransport(localTarget), boot });
+const remote = new PiSession({ id: 'remote', transport: remoteTransport, boot });
+const sessions = [local, remote];
+
+// Desktop-side state per session: streamed text, tool events, questions answered.
+const trace = new Map();
+for (const session of sessions) {
+  const state = { deltas: [], tools: [], questions: [], answer: () => undefined };
+  trace.set(session, state);
+  session.on('event', event => {
+    if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') state.deltas.push({ at: Date.now(), text: event.assistantMessageEvent.delta });
+    if (event.type === 'tool_execution_end') state.tools.push(event);
+    if (opts.verbose) console.log(`  [${session.id}] ${event.type}`);
+  });
+  session.on('ui', request => {
+    if (request.method !== 'select' && request.method !== 'input') return;
+    const value = state.answer(request);
+    state.questions.push({ ...request, value });
+    session.respondUi(request.id, value === undefined ? { cancelled: true } : { value });
+  });
+  if (opts.verbose) session.on('stderr', text => process.stderr.write(`  [${session.id} stderr] ${text}`));
+}
+
+async function run(session, message) {
+  const state = trace.get(session);
+  state.deltas = []; state.tools = []; state.questions = [];
+  const settled = session.nextSettled();
+  const accepted = await session.prompt(message);
+  await settled;
+  return { accepted, text: state.deltas.map(d => d.text).join(''), deltas: state.deltas, tools: state.tools, questions: state.questions };
+}
+const allFiles = dir => readdirSync(dir).flatMap(name => {
+  const path = join(dir, name);
+  return statSync(path).isDirectory() ? allFiles(path) : [path];
+});
+const requestsSince = mark => mock.requests.slice(mark);
+
+// ---------------------------------------------------------------------------- run
+try {
+  await Promise.all(sessions.map(session => session.start()));
+  check('both sessions started', true, `local pid ${local.pid}; remote via ${remote.transport.kind}${opts['ssh-host'] ? ' ' + opts['ssh-host'] : ''}`);
+
+  // argv check while both processes are alive (local ssh client, sshd children, Pi processes)
+  const ps = execFileSync('ps', ['-axww', '-o', 'pid=,command='], { encoding: 'utf8' });
+  check('no API key in any process argv', !Object.values(keys).some(key => ps.includes(key)));
+  if (opts['ssh-host']) check('SSH transport process is running', ps.includes(opts['ssh-host']) && ps.includes('iris'));
+
+  for (const session of sessions) {
+    const models = (await session.availableModels()).map(m => `${m.provider}/${m.id}`);
+    check(`[${session.id}] providers registered from boot record`, ['mock-alpha/alpha-1', 'mock-alpha/alpha-2', 'mock-beta/beta-1', 'mock-gemini/gemini-mock-1'].every(id => models.includes(id)), models.filter(id => id.startsWith('mock-')).join(', '));
+  }
+
+  await local.setModel('mock-alpha', 'alpha-1');
+  await remote.setModel('mock-beta', 'beta-1');
+  let mark = mock.requests.length;
+  const [a, b] = await Promise.all([run(local, 'hello from the laptop'), run(remote, 'hello from the server')]);
+  check('[local] streamed reply from mock-alpha/alpha-1', a.deltas.length > 3 && a.text === '[mock-alpha/alpha-1] echo: hello from the laptop', `${a.deltas.length} deltas: "${a.text}"`);
+  check('[remote] streamed reply from mock-beta/beta-1', b.deltas.length > 3 && b.text === '[mock-beta/beta-1] echo: hello from the server', `${b.deltas.length} deltas: "${b.text}"`);
+  const overlap = a.deltas[0].at < b.deltas.at(-1).at && b.deltas[0].at < a.deltas.at(-1).at;
+  check('both sessions streamed concurrently', overlap);
+  const reqs = requestsSince(mark);
+  check('each provider received its own key', reqs.some(r => r.provider === 'mock-alpha' && r.authorization === `Bearer ${keys.alpha}`) && reqs.some(r => r.provider === 'mock-beta' && r.authorization === `Bearer ${keys.beta}`) && reqs.every(r => r.authorization === `Bearer ${keys[r.provider.slice(5)]}`));
+
+  // Switch the local session to another provider mid-conversation.
+  await local.setModel('mock-beta', 'beta-1');
+  mark = mock.requests.length;
+  const c = await run(local, 'second turn after switching');
+  check('[local] switched provider mid-session', c.text === '[mock-beta/beta-1] echo: second turn after switching' && requestsSince(mark).every(r => r.provider === 'mock-beta'), `"${c.text}"`);
+  const state = await local.state();
+  check('[local] state reports current model', state.model?.provider === 'mock-beta' && state.model?.id === 'beta-1', `${state.model?.provider}/${state.model?.id}`);
+
+  // Tool call on the remote session runs without any approval round-trip (YOLO).
+  const d = await run(remote, '[[bash:echo approved > marker.txt && pwd]]');
+  const dTool = d.tools.find(t => t.toolName === 'bash');
+  check('[remote] tool ran without asking the desktop', d.questions.length === 0);
+  check('[remote] tool ran in the remote project', dTool && !dTool.isError && existsSync(join(dirs.remoteProject, 'marker.txt')), dTool?.result?.content?.[0]?.text?.trim());
+  check('[remote] model received the tool result', d.text.startsWith('Tool result: '), `"${d.text}"`);
+
+  // ask_user: the model asks the desktop a question and gets the answer back.
+  trace.get(local).answer = request => request.options?.[1];
+  const e = await run(local, '[[ask:Pick a color|red,green,blue]]');
+  const eTool = e.tools.find(t => t.toolName === 'ask_user');
+  check('[local] ask_user question reached the desktop with options', e.questions.length === 1 && e.questions[0].title === 'Pick a color' && e.questions[0].options?.join() === 'red,green,blue');
+  check('[local] the answer reached the model', eTool?.result?.content?.[0]?.text === 'The user answered: green' && e.text === 'Tool result: The user answered: green', e.text);
+
+  // Tool subprocesses must not see the keys or the boot record.
+  const f = await run(remote, `[[bash:echo "boot=$(env | grep -c IRIS_BOOT) alpha=$(env | grep -c ${keys.alpha.slice(0, 12)}) beta=$(env | grep -c ${keys.beta.slice(0, 11)}) gemini=$(env | grep -c ${keys.gemini.slice(0, 14)})"]]`);
+  const envOut = f.tools.find(t => t.toolName === 'bash')?.result?.content?.[0]?.text?.trim();
+  check('[remote] tool environment has no boot record or keys', envOut === 'boot=0 alpha=0 beta=0 gemini=0', envOut);
+
+  // History is available for the desktop to render after reconnecting.
+  const history = await remote.messages();
+  check('[remote] history readable via get_messages', history.filter(m => m.role === 'user').length === 3, `${history.length} messages`);
+
+  // Google's protocol: Pi speaks the Gemini API to a custom endpoint, streams the reply, runs a tool
+  // through it, and sends the key in its header, never in the URL.
+  for (const session of sessions) {
+    await session.setModel('mock-gemini', 'gemini-mock-1');
+    const before = mock.requests.length;
+    const g = await run(session, `hello over Gemini from ${session.id}`);
+    check(`[${session.id}] streamed reply over Google's protocol`, g.deltas.length > 3 && g.text === `[mock-gemini/gemini-mock-1] echo: hello over Gemini from ${session.id}`, `${g.deltas.length} deltas: "${g.text}"`);
+    const t = await run(session, '[[bash:echo gemini-tool]]');
+    const tTool = t.tools.find(x => x.toolName === 'bash');
+    check(`[${session.id}] tool call and its result over Google's protocol`, tTool && !tTool.isError && t.text === 'Tool result: gemini-tool', `"${t.text}"`);
+    const sent = mock.requests.slice(before);
+    check(`[${session.id}] Gemini gets the system prompt and tools, and the key only in x-goog-api-key`, sent.length >= 3 && sent.every(r => r.provider === 'mock-gemini' && r.api === 'google' && r.apiKey === keys.gemini && !r.authorization && !r.url.includes(keys.gemini)) && sent.some(r => r.system.includes('<working_style>') && r.tools.some(x => x.name === 'bash')), JSON.stringify(sent.map(r => ({ provider: r.provider, url: r.url, tools: r.tools?.length }))));
+    await session.setModel('mock-beta', 'beta-1');
+  }
+
+  // A Gemini 4 model behind an endpoint id, which refuses thinkingBudget: Iris hands it to pi-ai as
+  // the model its name gives (gemini-4-argon), so it gets thinkingLevel (off becomes its lowest level, low)
+  // and tool results with their call ids, while requests and replies keep the endpoint's id.
+  const thinkingBefore = (await local.state()).thinkingLevel;
+  await local.setModel('mock-gemini', 'ep-mock-argon');
+  for (const [level, expected] of [['off', 'LOW'], ['high', 'HIGH']]) {
+    await local.request('set_thinking_level', { level });
+    const before = mock.requests.length;
+    const r = await run(local, `thinking ${level} behind an endpoint id`);
+    const sent = mock.requests.slice(before);
+    check(`[local] an endpoint id named gemini-4-argon gets thinkingLevel ${expected} at ${level}`, r.text === `[mock-gemini/ep-mock-argon] echo: thinking ${level} behind an endpoint id` && sent.length === 1 && sent[0].thinking?.thinkingLevel === expected && sent[0].thinking.thinkingBudget === undefined, JSON.stringify({ text: r.text, thinking: sent.map(s => s.thinking) }));
+  }
+  const argonTool = await run(local, '[[bash:echo argon-tool]]');
+  const argonResult = mock.requests.at(-1);
+  const argonMessages = await local.messages();
+  const argonReply = argonMessages.filter(m => m.role === 'assistant').at(-1);
+  // Every Gemini request carries the full history, so the request's function responses include the call
+  // ids of earlier turns; the fresh one is the last, and it must carry this turn's tool call id.
+  const argonCallId = argonMessages.flatMap(m => (m.role === 'assistant' ? (m.content ?? []) : [])).filter(b => b.type === 'toolCall' && b.name === 'bash').at(-1)?.id;
+  check('[local] behind the endpoint id: tool results carry their call id, replies keep the endpoint id', argonTool.text === 'Tool result: argon-tool' && argonResult.functionResponseIds.length >= 1 && argonResult.functionResponseIds.every(Boolean) && argonResult.functionResponseIds.at(-1) === argonCallId && argonReply?.model === 'ep-mock-argon' && (await local.state()).model?.id === 'ep-mock-argon', JSON.stringify({ text: argonTool.text, ids: argonResult.functionResponseIds, callId: argonCallId, model: argonReply?.model }));
+  await local.setModel('mock-beta', 'beta-1');
+  await local.request('set_thinking_level', { level: thinkingBefore });
+
+  // Subagents execute through the owning session, with its model/key/cwd and no extra Pi process.
+  for (const session of sessions) {
+    const before = mock.requests.length;
+    const delegated = await run(session, '[[subagents]]');
+    const result = delegated.tools.find(t => t.toolName === 'subagent')?.result;
+    check(`[${session.id}] subagent returned two successful tasks`, result?.details?.results?.length === 2 && result.details.results.every(r => r.status === 'completed'), JSON.stringify(result?.details?.results?.map(r => ({ status: r.status, error: r.error }))));
+    const cwd = session === local ? dirs.localProject : dirs.remoteProject;
+    check(`[${session.id}] delegated file is on the session machine and cwd`, existsSync(join(cwd, 'subagent-result.txt')) && readFileSync(join(cwd, 'subagent-result.txt'), 'utf8') === 'created by subagent');
+    const childRequests = mock.requests.slice(before).filter(r => r.subagent);
+    check(`[${session.id}] subagents inherit current provider credentials`, childRequests.length >= 4 && childRequests.every(r => r.provider === 'mock-beta' && r.model === 'beta-1' && r.authorization === `Bearer ${keys.beta}`));
+    check(`[${session.id}] the delegation note reaches the parent prompt, and the details its subagent tool`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('Start agents only when the user') && r.tools.some(t => t.name === 'subagent' && t.description.includes('Keep for yourself the main task'))));
+    check(`[${session.id}] the working-style note reaches the parent prompt`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('<working_style>') && r.system.includes('the answer is your assessment')));
+    const runtimeCheck = await run(session, '[[subagents-runtime]]');
+    const runtimeResult = runtimeCheck.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];
+    const runtimeOutput = runtimeResult?.steps.find(s => s.name === 'bash')?.output ?? '';
+    check(`[${session.id}] child shell can use node and PI_NODE from the actual runtime`, runtimeResult?.status === 'completed' && runtimeOutput.includes('runtime=false') && runtimeOutput.includes('pi-node=false'), runtimeOutput);
+    for (const scenario of ['length', 'length-tools', 'length-repeat']) {
+      const limited = await run(session, `[[subagents-${scenario}]]`);
+      const child = limited.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];
+      check(`[${session.id}] real SSE ${scenario} has one bounded output-limit recovery`, child?.lengthRecoveries === 1 && (scenario === 'length-repeat' ? child.status === 'failed' && child.failureKind === 'output_limit' : child.status === 'completed'), JSON.stringify({ status: child?.status, error: child?.error }));
+      check(`[${session.id}] ${scenario} neither leaks reasoning nor executes clipped writes`, !JSON.stringify(child).includes('PRIVATE_REASONING_FIXTURE_NOT_FOR_TRACE') && !existsSync(join(cwd, 'must-not-be-written.txt')) && (scenario !== 'length-tools' || child.skippedToolCalls === 1));
+    }
+  }
+
+  // Abort an actual delegated shell tool, not only a mock model request.
+  const started = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { local.off('event', listener); reject(new Error('delegated command did not start')); }, 15000);
+    const listener = event => {
+      if (event.type === 'tool_execution_start' && event.parentToolCallId && event.args?.command?.includes('cancelled-subagent')) {
+        clearTimeout(timer); local.off('event', listener); resolve();
+      }
+    };
+    local.on('event', listener);
+  });
+  const cancelled = local.nextSettled(15000);
+  await local.prompt('[[subagents-slow]]');
+  await started;
+  await local.abort();
+  await cancelled;
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  check('[local] Stop cancels delegated shell work before its side effect', [1, 2].every(i => !existsSync(join(dirs.localProject, `cancelled-subagent-${i}.txt`))));
+  check('[local] parent is idle after delegated cancellation', !(await local.state()).isStreaming);
+} catch (error) {
+  check('unexpected error', false, error.stack);
+  for (const session of sessions) if (session.stderr) console.log(`--- ${session.id} stderr ---\n${session.stderr.slice(-3000)}`);
+} finally {
+  await Promise.all(sessions.map(session => session.stop().catch(() => {})));
+  const leaked = allFiles(work).filter(path => { const text = readFileSync(path, 'utf8'); return Object.values(keys).some(key => text.includes(key)); });
+  check('no API key written to agent or session files', leaked.length === 0, leaked.join(', ') || `${allFiles(work).length} files scanned`);
+  await mock.close();
+  const failed = results.filter(r => !r.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} checks passed. Work dir: ${work}`);
+  process.exitCode = failed.length ? 1 : 0;
+}

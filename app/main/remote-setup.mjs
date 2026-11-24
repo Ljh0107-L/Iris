@@ -1,0 +1,515 @@
+// Prepare an SSH host for Iris sessions, the way Claude Desktop does: no manual setup.
+//
+// Everything lives in one install root on the host (default ~/.iris):
+//   <root>/node   a portable Node.js, only if the host has no usable Node (>= 22.19)
+//   <root>/pi     Pi, installed with npm --ignore-scripts at the same version as the desktop
+//   <root>/ext    the bridge extension and the relay (uploaded over stdin, refreshed by hash)
+//   <root>/cli  for the CLI engines (Antigravity, Codex): relay and adapters, with a portable Node if needed
+//   <root>/agent  agent directory (sessions, settings)
+//   <root>/run    the relay's socket and log;  <root>/tmp  TMPDIR for Pi and npm
+//
+// Node is looked up on PATH, in a login shell, and in the usual version managers (nvm, fnm, volta,
+// asdf, Homebrew), because non-interactive SSH shells usually don't load them. When the home
+// directory is nearly full, the root moves to the roomiest writable scratch disk.
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, relative } from 'node:path';
+import { join } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { shellQuote, sshMuxArgs } from '../../core/transports.mjs';
+import { EXTENSION_FILES, EXTENSION_PACKAGE } from './extensions.mjs';
+
+const MIN_NODE = '22.19.0';
+const NEEDED_KB = 900 * 1024;                 // portable Node + Pi + Claude Code headroom
+const ANTIGRAVITY_ENGINE = 'antigravity';
+const RELAY_FILE = 'iris-relay.mjs';
+const ANTIGRAVITY_ADAPTER = 'iris-antigravity.mjs';
+const HISTORY_FILE = 'iris-history.mjs';
+const CODEX_ADAPTER = 'iris-codex.mjs';
+const CLI_FILES = [RELAY_FILE, ANTIGRAVITY_ADAPTER, CODEX_ADAPTER, HISTORY_FILE];
+const SCRATCH = ['/opt/tmp', '/data', '/data00', '/data0', '/mnt/data', '/scratch', '/var/tmp', '/tmp'];
+const NODE_MIRRORS = ['https://nodejs.org/dist/latest-v22.x', 'https://npmmirror.com/mirrors/node/latest-v22.x'];
+
+export function sshBaseArgs(env) {
+  return ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', ...sshMuxArgs(), ...(env.sshArgs ?? [])];
+}
+
+export function runSsh(env, script, { input, upload, timeout = 120000, onUpload } = {}) {
+  return new Promise((resolve, reject) => {
+    // Always POSIX sh: the login shell may be zsh/fish, where e.g. unmatched globs are errors.
+    const child = spawn('ssh', [...sshBaseArgs(env), env.host, `sh -c ${shellQuote(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`${env.label ?? env.host}: timed out`)); }, timeout);
+    // Decode as a stream: a multi-byte character split across two chunks must not become U+FFFD.
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout);
+      else {
+        const detail = stderr.split('\n').filter(l => l.trim() && !/^Warning: Permanently added/.test(l)).slice(-3).join(' ') || stdout.trim().slice(-300);
+        reject(Object.assign(new Error(code === 255 ? `Could not connect to ${env.label ?? env.host}: ${detail}` : detail || `exit ${code}`), { code, stderr }));
+      }
+    });
+    child.stdin.on('error', () => {});
+    if (upload) {
+      let sent = 0;
+      const track = new Transform({ transform(chunk, _, done) {
+        sent += chunk.length;
+        onUpload?.(Math.min(1, sent / upload.size));
+        done(null, chunk);
+      } });
+      pipeline(createReadStream(upload.path), track, child.stdin).catch(error => {
+        // The remote script can exit before reading stdin (e.g. another installer won the race).
+        if (['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE'].includes(error.code)) return;
+        child.kill('SIGTERM');
+        reject(error);
+      });
+      return;
+    }
+    if (!Buffer.isBuffer(input) || input.length < 4 << 20) { child.stdin.end(input ?? ''); return; }
+    // Large uploads go in chunks so the caller can show progress.
+    (async () => {
+      const CHUNK = 1 << 20;
+      for (let offset = 0; offset < input.length; offset += CHUNK) {
+        if (!child.stdin.write(input.subarray(offset, offset + CHUNK))) await new Promise(r => child.stdin.once('drain', r));
+        onUpload?.(Math.min(1, (offset + CHUNK) / input.length));
+      }
+      child.stdin.end();
+    })().catch(() => {});
+  });
+}
+
+const parseVersion = v => String(v ?? '').replace(/^v/, '').split('.').map(Number);
+const versionAtLeast = (version, minimum) => {
+  const a = parseVersion(version), b = parseVersion(minimum);
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+};
+const kv = text => {
+  const out = {};
+  for (const line of text.split('\n')) { const i = line.indexOf('='); if (i > 0) (out[line.slice(0, i)] ??= []).push(line.slice(i + 1)); }
+  return out;
+};
+
+// Step 1: what the host has (Node candidates, disk space, executability, platform).
+export async function probeHost(env, preferredRoot, { engine, run = runSsh } = {}) {
+  const installRoots = ['"$HOME"/.iris', ...SCRATCH.map(d => `${d}/.iris-$user`), ...(preferredRoot ? [shellQuote(preferredRoot)] : [])];
+  const portableNodes = installRoots.map(root => `${root}/node/bin/node`);
+  if (engine === ANTIGRAVITY_ENGINE) portableNodes.push(...installRoots.map(root => `${root}/cli/node/bin/node`));
+  const extraDir = preferredRoot ? ` ${shellQuote(dirname(preferredRoot))}` : '';
+  const script = [
+    "user=$(id -un); printf 'home=%s\\n' \"$HOME\"; printf 'user=%s\\n' \"$user\"; printf 'hostname=%s\\n' \"$(hostname)\"",
+    "printf 'os=%s\\n' \"$(uname -s)\"; printf 'arch=%s\\n' \"$(uname -m)\"",
+    "if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ] || (ldd --version 2>&1 | grep -qi musl); then echo 'musl=1'; fi",
+    'SH=$SHELL; [ -n "$SH" ] || SH=sh',
+    'for c in "$(command -v node 2>/dev/null)" "$($SH -lc \'command -v node\' 2>/dev/null | tail -1)" ' +
+      '$HOME/.nvm/versions/node/*/bin/node $HOME/.local/share/fnm/node-versions/*/installation/bin/node $HOME/.fnm/node-versions/*/installation/bin/node ' +
+      '$HOME/.volta/bin/node $HOME/.asdf/installs/nodejs/*/bin/node $HOME/.local/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node ' +
+      portableNodes.join(' ') + '; do',
+    "  [ -n \"$c\" ] && [ -x \"$c\" ] && printf 'node=%s %s\\n' \"$c\" \"$(\"$c\" -v 2>/dev/null)\"",
+    'done',
+    'for d in "$HOME" ' + SCRATCH.join(' ') + extraDir + '; do',
+    // -w is not enough: read-only mounts still pass it, and noexec mounts block Node/Claude binaries.
+    "  t=\"$d/.iris-probe.$$\"; if [ -d \"$d\" ] && printf '#!/bin/sh\\nexit 0\\n' > \"$t\" 2>/dev/null; then exec_ok=0; chmod +x \"$t\" 2>/dev/null && \"$t\" 2>/dev/null && exec_ok=1; rm -f \"$t\"; printf 'disk=%s %s %s\\n' \"$d\" \"$(df -Pk \"$d\" 2>/dev/null | awk 'NR==2{print $4}')\" \"$exec_ok\"; fi",
+    'done',
+    "command -v curl >/dev/null && echo 'curl=1'; command -v sha256sum >/dev/null && echo 'sha=sha256sum'; command -v shasum >/dev/null && echo 'sha=shasum'",
+    'true',
+  ].join('\n');
+  const raw = kv(await run(env, script));
+  const nodes = (raw.node ?? []).map(line => /^(.*) (v\S+)$/.exec(line)).filter(Boolean)
+    .map(([, path, version]) => ({ path, version }));
+  const disks = (raw.disk ?? []).map(line => /^(.*) (\d*) ([01])$/.exec(line)).filter(Boolean)
+    .map(([, dir, kb, execFlag]) => ({ dir, kb: Number(kb) || 0, exec: execFlag !== '0' }));
+  return { home: raw.home?.[0], user: raw.user?.[0], hostname: raw.hostname?.[0], os: raw.os?.[0], arch: raw.arch?.[0], musl: !!raw.musl, nodes, disks, curl: !!raw.curl, sha: raw.sha?.[0] };
+}
+
+function chooseRoot(host, preferred, { preserve = false } = {}) {
+  const disks = host.disks ?? [];
+  const matchDisk = target => disks
+    .filter(d => target === d.dir || target.startsWith(d.dir.replace(/\/$/, '') + '/'))
+    .sort((a, b) => b.dir.length - a.dir.length)[0];
+  if (preferred) {
+    const matched = disks.length ? matchDisk(preferred) : null;
+    if (!matched || (matched.exec !== false && matched.kb >= NEEDED_KB)) return preferred;
+    if (preserve) {
+      throw Object.assign(new Error(`Cannot install portable Node.js in the existing session directory ${preferred} on ${host.label}. Free up about 900 MB on its executable disk or install Node.js ${MIN_NODE}+ on the host, then try again.`), { code: 'DISK_FULL' });
+    }
+  }
+  const home = disks.find(d => d.dir === host.home);
+  if (home && home.exec !== false && home.kb >= NEEDED_KB) return `${host.home}/.iris`;
+  const minFor = dir => ['/tmp', '/var/tmp'].includes(dir) ? 2 * NEEDED_KB : NEEDED_KB;
+  const roomy = disks.filter(d => d.dir !== host.home && d.exec !== false && d.kb >= minFor(d.dir)).sort((a, b) => b.kb - a.kb)[0];
+  if (!roomy) {
+    const free = home ? (home.exec === false ? 'mounted noexec' : `${Math.round(home.kb / 1024)} MB free`) : 'no write access';
+    throw Object.assign(new Error(`No usable install directory on ${host.label} (${free} in ${host.home}). Free up about 900 MB on an executable disk, then try again.`), { code: 'DISK_FULL' });
+  }
+  return `${roomy.dir.replace(/\/$/, '')}/.iris-${host.user}`;
+}
+
+// Portable Node for hosts without one: newest 22.x from nodejs.org (or npmmirror), downloaded on the
+// host when it has internet, otherwise on this Mac (cached, checksum-verified) and streamed over SSH.
+async function nodeRelease(platform, cacheDir) {
+  let lastError;
+  for (const base of NODE_MIRRORS) {
+    try {
+      const res = await fetch(`${base}/SHASUMS256.txt`, { signal: AbortSignal.timeout(15000) });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const sums = await res.text();
+      const line = sums.split('\n').find(l => l.endsWith(`-${platform}.tar.gz`));
+      if (!line) throw new Error(`No Node.js build for ${platform}`);
+      const [sha, file] = line.trim().split(/\s+/);
+      return { url: `${base}/${file}`, urls: NODE_MIRRORS.map(m => `${m}/${file}`), file, sha };
+    } catch (error) { lastError = error; }
+  }
+  // Offline Mac fallback: reuse a previously cached tarball for this platform if present.
+  try {
+    const re = new RegExp(`^node-v(22\\.\\d+\\.\\d+)-${platform}\\.tar\\.gz$`);
+    const cached = readdirSync(cacheDir).map(name => ({ name, m: re.exec(name) })).filter(x => x.m)
+      .sort((a, b) => (versionAtLeast(a.m[1], b.m[1]) ? -1 : 1))[0];
+    if (cached) return { file: cached.name, cachedOnly: true };
+  } catch { /* cacheDir absent */ }
+  throw lastError ?? new Error(`Could not resolve Node.js 22 build for ${platform}`);
+}
+const PLATFORMS = { 'Linux x86_64': 'linux-x64', 'Linux aarch64': 'linux-arm64', 'Linux arm64': 'linux-arm64', 'Darwin arm64': 'darwin-arm64', 'Darwin x86_64': 'darwin-x64' };
+const nodeDownloads = new Map();
+
+async function downloadLocalNode(release, cacheDir, onProgress) {
+  mkdirSync(cacheDir, { recursive: true });
+  const local = join(cacheDir, release.file);
+  if (existsSync(local)) return local;
+  if (release.cachedOnly) throw new Error(`Node.js cache missing for ${release.file}`);
+  if (nodeDownloads.has(local)) return nodeDownloads.get(local);
+  const promise = (async () => {
+    onProgress('Downloading Node.js…');
+    let lastError;
+    for (const url of release.urls ?? [release.url]) {
+      try {
+        const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const body = Buffer.from(await res.arrayBuffer());
+        if (release.sha && createHash('sha256').update(body).digest('hex') !== release.sha) throw new Error('Node.js download failed its checksum');
+        const part = `${local}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+        writeFileSync(part, body);
+        renameSync(part, local);
+        return local;
+      } catch (error) { lastError = error; }
+    }
+    throw lastError ?? new Error('Node.js download failed');
+  })().finally(() => nodeDownloads.delete(local));
+  nodeDownloads.set(local, promise);
+  return promise;
+}
+
+async function installNode(env, host, root, cacheDir, onProgress, run, { uploadOnly = false } = {}) {
+  if (host.musl) {
+    throw new Error(`No usable Node.js (>= ${MIN_NODE}) on ${host.label ?? env.host} (musl Linux). Install Node.js 22.19+ on the server (e.g. apk add nodejs) and retry.`);
+  }
+  const platform = PLATFORMS[`${host.os} ${host.arch}`];
+  if (!platform) throw new Error(`No usable Node.js on ${env.label} and no portable build for ${host.os} ${host.arch}.`);
+  onProgress('Installing Node.js…');
+  const release = await nodeRelease(platform, cacheDir);
+  const dest = `${root}/node`;
+  const destQ = shellQuote(dest);
+  // Extract without --strip-components=1 so BusyBox tar works too, and keep stdin single-pass.
+  const extract = source => [
+    `rm -rf ${destQ}.extract ${destQ}.tmp`,
+    `mkdir -p ${destQ}.extract`,
+    `tar -xzf ${source} -C ${destQ}.extract`,
+    `set -- ${destQ}.extract/*`,
+    '[ -d "$1" ]',
+    `mv "$1" ${destQ}.tmp`,
+    `rm -rf ${destQ}.extract ${destQ}`,
+    `mv ${destQ}.tmp ${destQ}`,
+  ].join('\n');
+  if (!uploadOnly && host.curl && host.sha && !release.cachedOnly) {
+    const sum = host.sha === 'shasum' ? 'shasum -a 256' : 'sha256sum';
+    const tarball = `${root}/tmp/${release.file}`;
+    const tarballQ = shellQuote(tarball);
+    for (const url of release.urls ?? [release.url]) {
+      const remote = [
+        'set -e',
+        `trap ${shellQuote(`rm -f ${tarballQ}`)} EXIT`,
+        `mkdir -p ${shellQuote(root)}/tmp`,
+        // Fast 8s connection check so firewalled/offline hosts don't stall 300s before uploading.
+        `curl -fsS -m 8 -o /dev/null -r 0-0 ${shellQuote(url)}`,
+        `curl -fsSL --connect-timeout 8 -m 300 ${shellQuote(url)} -o ${tarballQ}`,
+        `[ "$(${sum} ${tarballQ} | cut -d' ' -f1)" = ${release.sha} ]`,
+        extract(tarballQ),
+      ].join('\n');
+      try { await run(env, remote, { timeout: 360000 }); return `${dest}/bin/node`; } catch { /* try next mirror or upload */ }
+    }
+  }
+  const local = await downloadLocalNode(release, cacheDir, onProgress);
+  onProgress('Uploading Node.js…');
+  await run(env, `set -e\nmkdir -p ${shellQuote(root)}\n${extract('-')}`, { upload: { path: local, size: statSync(local).size }, timeout: 600000 });
+  return `${dest}/bin/node`;
+}
+
+// Pi and its whole dependency tree, taken from this app's own node_modules (the exact version the desktop
+// runs), as a tarball laid out like an npm install. Pi ships no native binaries, so it runs on any OS.
+export async function piBundle(piPackageDir, cacheDir) {
+  const version = JSON.parse(readFileSync(join(piPackageDir, 'package.json'), 'utf8')).version;
+  const out = join(cacheDir, `pi-${version}.tgz`);
+  if (existsSync(out)) return { path: out, version };
+  let top = piPackageDir; while (!top.endsWith('/node_modules')) top = dirname(top); // the root node_modules
+  const resolveDep = (fromDir, name) => {
+    for (let dir = fromDir; dir.startsWith(top); dir = dirname(dirname(dir)) === dir ? top + '/x' : dirname(dir)) {
+      const candidate = join(dir, 'node_modules', name);
+      if (existsSync(join(candidate, 'package.json'))) return candidate;
+      if (dir === top) break;
+    }
+    const candidate = join(top, name);
+    return existsSync(join(candidate, 'package.json')) ? candidate : null;
+  };
+  const seen = new Set();
+  const visit = dir => {
+    if (seen.has(dir)) return;
+    seen.add(dir);
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    for (const name of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies })) {
+      const found = resolveDep(dir, name);
+      if (found) visit(found);
+    }
+  };
+  visit(piPackageDir);
+  // Nested packages are included with their parent directory entries; tar the top-level ones only once.
+  const paths = [...seen].map(dir => relative(top, dir)).sort();
+  const roots = paths.filter(p => !paths.some(q => q !== p && p.startsWith(q + '/')));
+  mkdirSync(cacheDir, { recursive: true });
+  const part = `${out}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+  // Not execFileSync: packaging takes seconds, and this runs in the Electron main process (the window would freeze).
+  await new Promise((resolve, reject) => execFile('tar', ['-czf', part, '--exclude', '.cache', '-C', top, ...roots.map(p => './' + p)],
+    { env: { ...process.env, COPYFILE_DISABLE: '1' }, maxBuffer: 1 << 20 }, error => error ? reject(error) : resolve()));
+  renameSync(part, out);
+  return { path: out, version };
+}
+
+async function uploadPi(env, root, bundle, onProgress) {
+  const q = shellQuote(root);
+  const bytes = statSync(bundle.path).size, size = Math.round(bytes / 1048576);
+  onProgress(`Uploading Pi from this Mac (${size} MB)…`);
+  let last = -1;
+  await runSsh(env, `set -e; rm -rf ${q}/pi.new; mkdir -p ${q}/pi.new/node_modules; tar -xzf - -C ${q}/pi.new/node_modules; printf '{"private":true}\\n' > ${q}/pi.new/package.json; rm -rf ${q}/pi.old; [ -d ${q}/pi ] && mv ${q}/pi ${q}/pi.old; mv ${q}/pi.new ${q}/pi; rm -rf ${q}/pi.old`, {
+    upload: { path: bundle.path, size: bytes }, timeout: 1800000, // streamed from disk, never held in memory
+    onUpload: f => { const pct = Math.floor(f * 100 / 5) * 5; if (pct !== last) { last = pct; onProgress(`Uploading Pi from this Mac… ${pct}%`); } },
+  });
+}
+
+// Installation hints contain paths/version metadata only, never provider definitions or credentials.
+// They are revalidated over SSH on every preparation; stale/missing hints fall back to discovery.
+function installHintPath(env, cacheDir, engine) {
+  if (!cacheDir) return null;
+  const key = createHash('sha256').update(JSON.stringify([env.host, env.sshArgs ?? []])).digest('hex');
+  const suffix = engine === ANTIGRAVITY_ENGINE ? '-cli' : '';
+  return join(cacheDir, `remote-install-${key}${suffix}.json`);
+}
+export function readInstallHint(env, root, cacheDir, engine) {
+  if (!root && engine !== ANTIGRAVITY_ENGINE) return null;
+  try {
+    const hint = JSON.parse(readFileSync(installHintPath(env, cacheDir, engine), 'utf8'));
+    return (!root || hint.root === root) && typeof hint.root === 'string' && hint.root.startsWith('/') && typeof hint.node === 'string' && hint.node.startsWith('/') && typeof hint.home === 'string' && typeof hint.hostname === 'string' ? hint : null;
+  } catch { return null; }
+}
+
+function remoteAssetHashes(dir, files) {
+  return `for f in ${files.join(' ')}; do printf '%s=%s\\n' "$f" "$( (sha256sum ${dir}/$f 2>/dev/null || shasum -a 256 ${dir}/$f 2>/dev/null) | cut -d' ' -f1)"; done`;
+}
+
+export function remoteInspectionScript(root, node, piVersion) {
+  const q = shellQuote(root), n = shellQuote(node);
+  const packagePath = `${root}/pi/node_modules/@earendil-works/pi-coding-agent/package.json`;
+  return String.raw`
+mkdir -p ${q}/ext ${q}/agent ${q}/run ${q}/tmp 2>/dev/null || exit 1
+chmod 700 ${q}/run 2>/dev/null || exit 1
+# npm's shebang must use the selected Node, not an older Node on the login PATH.
+export PATH=${shellQuote(dirname(node))}:"$PATH"
+printf 'nodeVersion=%s\n' "$(${n} -v 2>/dev/null)"
+PI=$(${n} -p ${shellQuote(`require(${JSON.stringify(packagePath)}).version`)} 2>/dev/null)
+[ -r ${q}/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js ] || PI=
+printf 'pi=%s\n' "$PI"
+# npm config and registry access are install prerequisites, not connection prerequisites.
+if [ "$PI" != ${shellQuote(piVersion)} ]; then
+  [ -x ${shellQuote(node.replace(/\/node$/, '/npm'))} ] && echo 'npm=1'
+  REG=$(${shellQuote(node.replace(/\/node$/, '/npm'))} config get registry 2>/dev/null); [ -n "$REG" ] || REG=https://registry.npmjs.org/
+  command -v curl >/dev/null && curl -fsS -m 6 -o /dev/null "$REG" 2>/dev/null && echo 'registry=1'
+fi
+${remoteAssetHashes(`${q}/ext`, [...EXTENSION_FILES, RELAY_FILE, 'package.json'])}
+true`;
+}
+
+function cliInspectionScript(root, node) {
+  const q = shellQuote(root), dir = shellQuote(`${root}/cli`);
+  return String.raw`
+mkdir -p ${dir} ${q}/agent ${q}/run ${q}/tmp 2>/dev/null || exit 1
+chmod 700 ${q}/run 2>/dev/null || exit 1
+printf 'nodeVersion=%s\n' "$(${shellQuote(node)} -v 2>/dev/null)"
+${remoteAssetHashes(dir, CLI_FILES)}
+true`;
+}
+
+export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, relayPath, antigravityAdapterPath, engine, providerHosts = [], root: preferredRoot, cacheDir, onProgress = () => {} }, { run = runSsh, probe = probeHost } = {}) {
+  // The CLI engines need no Pi on the host: only Node, the relay and their adapters (asked for with the
+  // Antigravity engine id, whichever of them it is for).
+  const cliOnly = engine === ANTIGRAVITY_ENGINE;
+  // Observe an in-flight catalog rejection even if SSH fails. Antigravity doesn't need the
+  // catalog, so don't start or await it for this engine.
+  if (!cliOnly) providerHosts = Promise.resolve(providerHosts);
+  if (providerHosts instanceof Promise) providerHosts.catch(() => {});
+  onProgress('Checking remote installation…');
+  let host, state, node, nodeVersion, root;
+  const inspect = (root, node) => cliOnly ? cliInspectionScript(root, node) : remoteInspectionScript(root, node, piVersion);
+  // Verify a known Pi Node too, but never overwrite Pi's hint with a standalone install.
+  const hint = readInstallHint(env, preferredRoot, cacheDir, engine) ?? (cliOnly ? readInstallHint(env, preferredRoot, cacheDir) : null);
+  if (hint) {
+    // One lightweight check instead of a login shell, every Node version manager, and every disk.
+    state = kv(await run(env, inspect(hint.root, hint.node)).catch(() => ''));
+    nodeVersion = state.nodeVersion?.[0];
+    if (/^v\d+\.\d+\.\d+/.test(nodeVersion ?? '') && versionAtLeast(nodeVersion, MIN_NODE)) {
+      ({ root, node } = hint);
+      host = { home: hint.home, hostname: hint.hostname };
+    }
+  }
+  if (!node) {
+    onProgress('Discovering remote environment…');
+    host = { ...(await probe(env, preferredRoot, { engine, run })), label: env.label ?? env.host };
+    const suitable = host.nodes.filter(n => versionAtLeast(n.version, MIN_NODE)).sort((a, b) => (versionAtLeast(a.version, b.version) ? -1 : 1));
+    // Keep the established run/agent directories even if the disk no longer has room for Pi.
+    root = cliOnly && preferredRoot && suitable.length ? preferredRoot : chooseRoot(host, preferredRoot, { preserve: cliOnly });
+    node = suitable.find(n => n.path.startsWith(root + '/'))?.path ?? suitable[0]?.path;
+    // A simultaneous Pi setup may also need to install Node. Never share its staging paths.
+    if (!node) node = await installNode(env, host, cliOnly ? `${root}/cli` : root, cacheDir, onProgress, run, { uploadOnly: cliOnly });
+    state = kv(await run(env, inspect(root, node)));
+    nodeVersion = state.nodeVersion?.[0];
+  }
+  if (!/^v\d+\.\d+\.\d+/.test(nodeVersion ?? '') || !versionAtLeast(nodeVersion, MIN_NODE)) {
+    throw new Error(`No usable Node.js at ${node} on ${env.label ?? env.host}; remote installation changed during setup.`);
+  }
+  const q = shellQuote(root);
+
+  if (!cliOnly && state.pi?.[0] !== piVersion) {
+    // Like Claude Code: install on the host when it can reach the npm registry, otherwise (or if that
+    // fails or stalls) package Pi on this Mac and upload it over SSH.
+    const bin = shellQuote(node.replace(/\/node$/, ''));
+    const canNpm = !process.env.IRIS_FORCE_PI_UPLOAD && state.npm?.[0] === '1' && state.registry?.[0] === '1';
+    let installed = false;
+    if (canNpm) {
+      onProgress(`Installing Pi ${piVersion}…`);
+      installed = await run(env, `set -e; export PATH=${bin}:"$PATH" TMPDIR=${q}/tmp npm_config_cache=${q}/npm-cache npm_config_fetch_timeout=20000 npm_config_fetch_retries=1; mkdir -p ${q}/pi; cd ${q}/pi; [ -f package.json ] || printf '{"private":true}\\n' > package.json; npm install --ignore-scripts --no-audit --no-fund --loglevel=error @earendil-works/pi-coding-agent@${piVersion}`, { timeout: 240000 })
+        .then(() => true, () => false);
+    }
+    if (!installed) {
+      if (!piPackageDir) throw new Error(`Installing Pi on ${env.label} failed`);
+      onProgress('Packaging Pi…');
+      await uploadPi(env, root, await piBundle(piPackageDir, cacheDir), onProgress);
+    }
+  }
+
+  const deployDir = `${root}/${cliOnly ? 'cli' : 'ext'}`;
+  const relay = [RELAY_FILE, readFileSync(relayPath)];
+  const changed = [];
+  // The standalone .mjs files don't need a package.json or any Pi extensions.
+  // For Pi, package.json keeps the bridge out of any "type": "module" package above the root.
+  const files = cliOnly ? [
+    relay,
+    [ANTIGRAVITY_ADAPTER, readFileSync(antigravityAdapterPath ?? new URL(`../../agent/${ANTIGRAVITY_ADAPTER}`, import.meta.url))],
+    [CODEX_ADAPTER, readFileSync(new URL(`../../agent/${CODEX_ADAPTER}`, import.meta.url))],
+    [HISTORY_FILE, readFileSync(new URL(`../../agent/${HISTORY_FILE}`, import.meta.url))],
+  ] : [
+    ...EXTENSION_FILES.map(name => [name, readFileSync(name === 'iris-bridge.js' ? bridgePath : join(dirname(bridgePath), name))]),
+    relay,
+    ['package.json', Buffer.from(EXTENSION_PACKAGE)],
+  ];
+  for (const [name, content] of files) {
+    if (state[name]?.[0] !== createHash('sha256').update(content).digest('hex')) changed.push({ name, content: content.toString('base64') });
+  }
+  if (changed.length) {
+    onProgress(cliOnly ? 'Updating the CLI bridge…' : 'Updating the Iris bridge…');
+    // All changed files travel on stdin in one SSH operation, not three serial round trips.
+    const upload = `const fs = require('node:fs'), path = require('node:path');
+for (const { name, content } of JSON.parse(fs.readFileSync(0, 'utf8'))) {
+  const dest = path.join(process.argv[1], name), tmp = dest + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, Buffer.from(content, 'base64'), { mode: 0o644 }); fs.renameSync(tmp, dest);
+}`;
+    await run(env, `${shellQuote(node)} -e ${shellQuote(upload)} ${shellQuote(deployDir)}`, { input: JSON.stringify(changed) });
+  }
+  try {
+    const path = installHintPath(env, cacheDir, engine);
+    if (path) {
+      mkdirSync(cacheDir, { recursive: true });
+      writeFileSync(path, JSON.stringify({ root, node, home: host.home, hostname: host.hostname }), { mode: 0o600 });
+    }
+  } catch { /* a read-only cache must not prevent connecting */ }
+
+  const facts = {
+    hostname: host.hostname, home: host.home, root, node, nodeVersion,
+    relay: `${deployDir}/${RELAY_FILE}`,
+    agentDir: `${root}/agent`, runDir: `${root}/run`, tmpDir: `${root}/tmp`,
+  };
+  if (cliOnly) {
+    onProgress('Ready');
+    return { ...facts, adapter: `${deployDir}/${ANTIGRAVITY_ADAPTER}`, history: `${deployDir}/${HISTORY_FILE}`, unreachable: [], preparedAt: Date.now() };
+  }
+
+  // Catalog discovery runs alongside host setup; only egress selection needs its result.
+  providerHosts = await providerHosts;
+  // Which provider endpoints can the host reach on its own? (DNS failure, refused, timeout → no)
+  const unreachable = [];
+  if (providerHosts.length) {
+    onProgress('Checking model access…');
+    // All endpoints at once. Bound the whole curl process when timeout is available;
+    // when curl is absent, fall back to Node TCP connect so minimal containers still enable egress proxy.
+    const checks = providerHosts.map(hp => {
+      const scheme = hp.endsWith(':80') ? 'http' : 'https';
+      return `( if $T curl -sS -m 4 -o /dev/null ${shellQuote(`${scheme}://${hp.replace(/:(?:443|80)$/, '')}/`)} 2>/dev/null; then echo ${shellQuote(`ok ${hp}`)}; else rc=$?; case $rc in 6|7|28|35|124) echo ${shellQuote(`no ${hp}`)};; *) echo ${shellQuote(`ok ${hp}`)};; esac; fi ) &`;
+    }).join(' ');
+    const out = await run(env, `command -v curl >/dev/null || { echo nocurl; exit 0; }; T=; command -v timeout >/dev/null && T="timeout 5"; ${checks} wait`).catch(() => '');
+    const trimmed = out.trim();
+    if (trimmed === 'nocurl' || !trimmed) {
+      const nodeProbe = "const net=require('node:net');Promise.all(process.argv.slice(1).map(hp=>new Promise(res=>{const m=/^(\\[[^\\]]+\\]|[^:]+):(\\d+)$/.exec(hp);if(!m)return res('no '+hp);const s=net.connect(Number(m[2]),m[1].replace(/^\\[|\\]$/g,''),()=>{s.destroy();res('ok '+hp);});s.setTimeout(4000,()=>{s.destroy();res('no '+hp);});s.on('error',()=>res('no '+hp));}))).then(r=>console.log(r.join('\\n')));";
+      const nodeOut = await run(env, `${shellQuote(node)} -e ${shellQuote(nodeProbe)} ${providerHosts.map(shellQuote).join(' ')}`).catch(() => null);
+      if (nodeOut == null) unreachable.push(...providerHosts);
+      else for (const line of nodeOut.trim().split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));
+    } else {
+      for (const line of trimmed.split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));
+    }
+  }
+  onProgress('Ready');
+  return {
+    ...facts, piVersion,
+    piCli: `${root}/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js`,
+    bridge: `${root}/ext/iris-bridge.js`,
+    retryPath: `${root}/ext/iris-retry.mjs`,
+    unreachable,
+    preparedAt: Date.now(),
+  };
+}
+
+export async function listRemoteDir(env, path) {
+  const script = `printf '__IRIS_DIR__\\n'; cd ${path ? shellQuote(path) : '~'} 2>/dev/null || cd ~; pwd; ls -1pA 2>/dev/null | grep '/$' | head -500`;
+  const out = await runSsh(env, script, { timeout: 30000 });
+  const lines = out.split('\n');
+  const mark = lines.lastIndexOf('__IRIS_DIR__');
+  const relevant = (mark >= 0 ? lines.slice(mark + 1) : lines).filter(Boolean);
+  const [cwd, ...entries] = relevant;
+  return { path: cwd, entries: entries.map(e => e.replace(/\/$/, '')).filter(e => !e.startsWith('.')).sort((a, b) => a.localeCompare(b)) };
+}
+
+const relayCmd = (facts, args) => `env IRIS_RUN_DIR=${shellQuote(facts.runDir)} ${shellQuote(facts.node)} ${shellQuote(facts.relay)} ${args}`;
+
+// Sessions the relay on this host is running (alive or recently exited).
+export async function listRelaySessions(env, facts) {
+  const out = await runSsh(env, relayCmd(facts, 'list'), { timeout: 30000 });
+  return JSON.parse(out.trim().split('\n').pop()).sessions ?? [];
+}
+
+export const stopRelayCommand = ({ forUpdate, requireTree } = {}) => forUpdate ? 'stop-for-update' : requireTree ? 'stop' : 'stop-compatible';
+
+export function stopRelaySession(env, facts, sessionId, options) {
+  return runSsh(env, relayCmd(facts, `${stopRelayCommand(options)} ${shellQuote(sessionId)}`), { timeout: 30000 });
+}

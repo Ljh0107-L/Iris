@@ -1,0 +1,57 @@
+name: Release
+
+# Push a v* tag to test, package and publish that commit. Run manually for a preview build (no release).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: macOS app (arm64 + x64)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/electron/install.js
+      - name: Version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+      - run: npm run build
+      - run: npm test
+      - name: Package
+        run: npx electron-builder --mac --arm64 --x64 --publish never
+      - name: Update manifest and smoke test
+        run: |
+          node build/release-manifest.mjs
+          sh build/smoke-test.sh "release/mac-arm64/Iris.app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iris-mac
+          compression-level: 0 # DMGs and ZIPs are already compressed
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node build/release-notes.mjs "${GITHUB_REF_NAME#v}" > release/notes.md
+          gh release create "$GITHUB_REF_NAME" release/*.dmg release/*.zip release/latest-mac.yml \
+            --title "Iris ${GITHUB_REF_NAME#v}" --notes-file release/notes.md

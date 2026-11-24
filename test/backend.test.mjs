@@ -1,0 +1,688 @@
+// Backend lifecycle regressions. Isolated relay + fake RPC, no SSH/model required.
+import assert from 'node:assert/strict';
+import { spawn, execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { promisify } from 'node:util';
+import test from 'node:test';
+import { PiSession } from '../core/pi-session.mjs';
+import { localRelayTransport, relaySpawnSpec, shellQuote } from '../core/transports.mjs';
+import { startEgressProxy } from '../core/egress-proxy.mjs';
+import { SessionManager } from '../app/main/session-manager.mjs';
+import { findCli } from '../app/main/cli-engines.mjs';
+import { planSessionUpdate, restartUpdatedSessions } from '../app/main/session-update.mjs';
+import { Store } from '../app/main/store.mjs';
+
+const exec = promisify(execFile);
+const relaySource = resolve('agent/iris-relay.mjs');
+const peer = resolve('test/fixtures/rpc-peer.mjs');
+const waitFor = async predicate => {
+  for (let i = 0; i < 200; i++) { if (await predicate()) return; await sleep(25); }
+  assert.fail('condition timed out');
+};
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function fixture(t, { startDaemon = true, mode, delay = 0 } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'pdb-'));
+  const runDir = join(dir, 'run'); mkdirSync(runDir);
+  const relayPath = join(dir, 'relay.mjs'); copyFileSync(relaySource, relayPath);
+  const env = { ...process.env, IRIS_RUN_DIR: runDir };
+  const relay = async (...args) => JSON.parse((await exec(process.execPath, [relayPath, ...args], { env, timeout: 10000 })).stdout);
+  let daemon, daemonClosed;
+  if (startDaemon) {
+    daemon = spawn(process.execPath, [relayPath, 'daemon'], { env, stdio: 'ignore' });
+    // Listen from the start: a manager's shutdown ends the daemon before cleanup gets here.
+    daemonClosed = once(daemon, 'close');
+    await waitFor(async () => (await relay('list')).daemon !== false);
+  }
+  const sessions = [], cleanups = [];
+  t.after(async () => {
+    for (const cleanup of cleanups) await cleanup();
+    await Promise.all(sessions.map(s => s.stop(50).catch(() => {})));
+    for (const s of (await relay('list')).sessions ?? []) if (s.alive) await relay('stop', s.id);
+    if (daemon) { daemon.kill(); await daemonClosed; }
+    else { // only this fixture's private script; never stop an app/user relay
+      await exec('pkill', ['-f', `${relayPath} daemon`]).catch(() => {});
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const spec = relaySpawnSpec({ cwd: dir, node: process.execPath, piCli: peer, agentDir: dir,
+    extraEnv: { TEST_RPC_MODE: mode ?? '', TEST_READY_DELAY: String(delay) } });
+  const connect = (id = 'test', spawnSpec = spec) => {
+    const session = new PiSession({ id, transport: localRelayTransport({ node: process.execPath, relayPath, runDir }), relay: { spawn: spawnSpec } });
+    sessions.push(session); return session;
+  };
+  return { dir, runDir, relayPath, relay, connect, cleanups };
+}
+function managerFor(t, f, extraEnv = {}, options = {}) {
+  const store = { sessions: [], settings: { providers: [], environments: {} }, saveSessions() {}, touchRecent() {} };
+  const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'Local' }, { id: 'remote', kind: 'ssh', enabled: true }],
+    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, uploadDir: join(f.dir, 'uploads'), extraEnv }, relayPath: f.relayPath, bridgePath: peer, ...options });
+  f.cleanups.push(() => manager.shutdown());
+  return manager;
+}
+
+test('Antigravity discovery prefers the official installer location without running the binary', t => {
+  const home = mkdtempSync(join(tmpdir(), 'pda-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const install = join(home, '.local/bin'), path = join(home, 'custom');
+  mkdirSync(install, { recursive: true }); mkdirSync(path);
+  writeFileSync(join(install, 'agy'), 'not executable', { mode: 0o600 });
+  writeFileSync(join(path, 'agy'), 'fixture', { mode: 0o700 });
+  assert.equal(findCli({ home, path }), join(path, 'agy'));
+  rmSync(join(install, 'agy'));
+  writeFileSync(join(install, 'agy'), 'fixture', { mode: 0o700 });
+  assert.equal(findCli({ home, path }), join(install, 'agy'));
+});
+
+test('Antigravity readiness is read-only and does not throw away a healthy standby', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  const scenario = join(cwd, '.iris-agy-scenario.json');
+  const manager = managerFor(t, f, {}, { locateCli: () => existsSync(bin) ? bin : null,
+    locateRemoteCli: async () => { throw new Error('connection refused'); } });
+  assert.equal(await manager.cliReadiness('local'), 'missing');
+  assert.equal(await manager.cliReadiness('remote'), 'unreachable');
+  writeFileSync(bin, `#!/bin/sh\nexport IRIS_AGY_FIXTURE_DIR=${shellQuote(cwd)}\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(scenario, '{}');
+  await manager.prewarm({ engine: 'antigravity', environmentId: 'local', cwd });
+  const [spare] = manager.spares.values();
+  await manager.ensureStarted(spare.id, spare.record);
+  assert.equal(await manager.cliReadiness('local'), 'signedOut');
+  writeFileSync(join(cwd, '.iris-fake-agy-cache.json'), '{"signedIn":true}');
+  assert.equal(await manager.cliReadiness('local'), 'ready');
+  writeFileSync(scenario, '{"list":false}');
+  assert.equal(await manager.cliReadiness('local'), 'unknown');
+  assert.equal([...manager.spares.values()][0], spare);
+  assert.deepEqual(manager.store.sessions, []);
+  const trace = readFileSync(join(cwd, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(new Set(trace.filter(r => r.method).map(r => r.method)), new Set(['initialize', 'session/list']));
+});
+
+test('Antigravity keeps a failed startup on the same record and reconnects without sending', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  const scenario = join(cwd, '.iris-agy-scenario.json');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(scenario, '{"badProtocol":true}');
+  writeFileSync(join(cwd, '.iris-fake-agy-cache.json'), '{"signedIn":true}');
+  const manager = managerFor(t, f, {}, { locateCli: () => bin });
+  const progress = []; manager.on('status', status => progress.push(status));
+  const creationId = 'pending:1';
+  const record = await manager.create({ engine: 'antigravity', environmentId: 'local', cwd, creationId });
+  assert.equal(record.status, 'error');
+  assert.match(record.statusMessage, /did not negotiate ACP/);
+  assert.ok(progress.some(p => p.phase === 'starting' && p.creationId === creationId));
+  assert.equal(progress.at(-1).creationId, creationId);
+  writeFileSync(scenario, '{}');
+  progress.length = 0;
+  await manager.reconnect(record.id);
+  assert.deepEqual(manager.list().map(s => [s.id, s.status]), [[record.id, 'connected']]);
+  assert.ok(progress.some(p => p.phase === 'opening' && !p.creationId));
+  const trace = readFileSync(join(cwd, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(trace.filter(r => r.method).map(r => r.method), ['initialize', 'initialize', 'session/new']);
+});
+
+test('Antigravity runs through the local relay, gates permissions and reopens the same CLI session', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(join(cwd, '.iris-agy-scenario.json'), JSON.stringify({ resume: true }));
+  const trace = () => readFileSync(join(cwd, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const manager = managerFor(t, f, { GEMINI_API_KEY: 'test-never-sent' }, { locateCli: () => bin, locateRemoteCli: async () => null });
+  manager.store.settings.providers = [{ id: 'paid', kind: 'builtin' }];
+  manager.store.getKey = () => assert.fail('Antigravity must never access a Pi provider key');
+  const engine = 'antigravity', args = { engine, cwd, model: { provider: 'paid', id: 'model' }, ultra: true, speed: 'ultrafast' };
+  await assert.rejects(manager.create({ ...args, environmentId: 'remote' }), /agy\) was not found/);
+  assert.deepEqual(manager.store.sessions, []);
+  assert.equal(await manager.prewarm({ ...args, environmentId: 'local' }), true);
+  const [spare] = manager.spares.values();
+  const prewarmed = await manager.ensureStarted(spare.id, spare.record);
+  assert.equal(prewarmed.initialState.cli.standby, true);
+  assert.equal(manager.store.sessions.length, 0, 'prewarm must not create a conversation');
+  assert.equal(existsSync(join(f.dir, 'sessions')), false);
+  assert.deepEqual(trace().filter(row => row.method).map(row => row.method), ['initialize']);
+  const session = await manager.create({ ...args, environmentId: 'local' });
+  assert.equal(session.id, spare.id);
+  assert.equal(await manager.ensureStarted(session.id), prewarmed, 'reuse both the ACP child and the relay attachment');
+  assert.equal(trace().filter(row => row.boot).length, 1);
+  assert.equal(trace().filter(row => row.method === 'initialize').length, 1);
+  assert.equal(session.cli.standby, undefined);
+  assert.equal(prewarmed.initialState.sessionFile, session.piSessionFile);
+  assert.equal(session.engine, engine);
+  assert.equal(session.model, undefined);
+  assert.equal(session.speed, undefined);
+  assert.equal(session.ultra, undefined);
+  assert.equal(session.cli.authRequired, true);
+  assert.equal(session.cli.permissionMode, 'bypassPermissions');
+  // Its own data directory: conversations made here stay out of the user's own Antigravity.
+  assert.deepEqual(trace()[0].boot.argv, ['acp', '--app-data-dir', 'iris', '--dangerously-skip-permissions']);
+  await assert.rejects(manager.prompt(session.id, 'not logged in'), /Sign in with Google/);
+  assert.equal(trace().some(row => ['authenticate', 'session/prompt'].includes(row.method)), false);
+  assert.equal((await manager.cliLogin(session.id)).authRequired, false);
+  const config = await manager.cliSetConfig(session.id, 'model', 'mock-gemini-pro');
+  assert.equal(config.options.find(o => o.id === 'model').currentValue, 'mock-gemini-pro');
+  const connected = await manager.ensureStarted(session.id);
+  const settled = connected.nextSettled(5000);
+  await manager.prompt(session.id, 'with file', [{ kind: 'file', name: 'test.txt', data: 'aW1hZ2U=' }]);
+  await settled;
+  assert.match(trace().find(row => row.method === 'session/prompt').params.prompt[0].text, /Attached files:\n- .*\/test\.txt/);
+  assert.deepEqual(manager.list()[0].pendingQuestions, []);
+  manager.store.settings.defaults = { antigravityBypassPermissions: false };
+  const questionReceived = once(manager, 'question');
+  assert.deepEqual(await manager.prompt(session.id, 'permission test'), { disposition: 'started' });
+  const [{ question }] = await questionReceived;
+  assert.equal(question.permission, true);
+  assert.deepEqual(trace().filter(row => row.boot).at(-1).boot.argv.filter(a => a !== '--app-data-dir' && a !== 'iris'), ['acp'], 'asks before tools: no skip-permissions flag');
+  assert.equal(manager.list()[0].cli.permissionMode, 'confirm');
+  assert.throws(() => manager.answer(session.id, question.requestId, { confirmed: true }), /Choose one/);
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === session.id).pendingUi, 1);
+  const resolved = once(manager, 'question-resolved');
+  await manager.abort(session.id);
+  assert.deepEqual((await resolved)[0], { id: session.id, requestId: question.requestId });
+  assert.deepEqual(manager.list()[0].pendingQuestions, []);
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === session.id).pendingUi, 0);
+  assert.equal(trace()[0].boot.env.includes('GEMINI_API_KEY'), false);
+  assert.equal(trace().filter(row => row.method === 'session/prompt').at(-1).params.prompt[0].text, 'permission test');
+  await assert.rejects(manager.compact(session.id), /not available/);
+  await assert.rejects(manager.fork(session.id), /not available/);
+
+  const original = await manager.historyPage(session.id);
+  assert.equal(original.messages.filter(m => m.role === 'user').length, 2);
+  await manager.close(session.id);
+  await f.relay('stop', session.id);
+  // Simulate a crash before the initial transcript path was registered by Desktop.
+  delete manager.store.sessions[0].piSessionFile;
+  delete manager.store.sessions[0].piSessionId;
+  await manager.ensureStarted(session.id);
+  assert.equal(manager.list()[0].piSessionFile, session.piSessionFile);
+  assert.deepEqual((await manager.historyPage(session.id)).messages, original.messages);
+  assert.equal(trace().filter(row => row.method === 'session/new').length, 2, 'auth rejection + successful new, never another new on resume');
+  assert.equal(trace().find(row => row.method === 'session/resume').params.sessionId, 'fake-acp/session?exact=1');
+});
+
+test('a pre-warmed No-folder Antigravity opens in the first prompt’s workspace', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const parent = realpathSync(f.dir), root = join(parent, 'projectless'), bin = join(parent, 'agy');
+  mkdirSync(root);
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nexport IRIS_AGY_FIXTURE_DIR=${shellQuote(parent)}\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  const scenario = join(parent, '.iris-agy-scenario.json');
+  writeFileSync(scenario, '{}');
+  const manager = managerFor(t, f, {}, { locateCli: () => bin });
+  manager.projectlessRoot = async () => root;
+  manager.store.saveSessions = () => writeFileSync(scenario, JSON.stringify({ workspace: manager.store.sessions[0].cwd }));
+  const draft = { engine: 'antigravity', environmentId: 'local' };
+  assert.equal(await manager.prewarm(draft), true);
+  const [spare] = manager.spares.values();
+  const record = await manager.create({ ...draft, prompt: 'Startup workspace' });
+  assert.equal(record.id, spare.id);
+  assert.ok(record.cwd.startsWith(root + '/'));
+  assert.match(record.cwd, /\/\d{4}-\d{2}-\d{2}\/startup-workspace$/);
+  assert.equal(record.noFolder, true);
+  const trace = readFileSync(join(parent, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(trace[0].boot.cwd, root);
+  assert.deepEqual(trace.filter(r => r.method).map(r => [r.method, r.params?.cwd]), [['initialize', undefined], ['session/new', record.cwd]]);
+});
+
+test('Antigravity discards an unused standby if its permission launch mode changed', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(join(cwd, '.iris-agy-scenario.json'), '{}');
+  const manager = managerFor(t, f, {}, { locateCli: () => bin });
+  const draft = { engine: 'antigravity', environmentId: 'local', cwd };
+  assert.equal(await manager.prewarm(draft), true);
+  const [spare] = manager.spares.values();
+  await manager.ensureStarted(spare.id, spare.record);
+  manager.store.settings.defaults = { antigravityBypassPermissions: false };
+  const record = await manager.create(draft);
+  assert.notEqual(record.id, spare.id);
+  assert.equal(record.cli.permissionMode, 'confirm');
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === spare.id)?.alive, false);
+  const trace = readFileSync(join(cwd, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(trace.filter(r => r.boot).map(r => r.boot.argv.filter(a => a !== '--app-data-dir' && a !== 'iris')), [['acp', '--dangerously-skip-permissions'], ['acp']]);
+  assert.equal(trace.filter(r => r.method === 'session/new').length, 1, 'only the real conversation opens a CLI session');
+});
+
+test('cancelling a starting spare is silent and cannot drop its replacement', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f, { TEST_READY_DELAY: '400' });
+  const statuses = []; manager.on('status', s => statuses.push(s));
+  const draft = { environmentId: 'local', cwd: f.dir };
+  await manager.prewarm(draft);
+  const oldId = [...manager.spares.values()][0].id;
+  await waitFor(() => manager.runtimes.get(oldId)?.session?.attachInfo);
+  manager.providersChanged(); // cancels while get_state is pending
+  await manager.prewarm(draft); // same key, new identity
+  const replacement = [...manager.spares.values()][0];
+  await waitFor(() => manager.runtimes.get(replacement.id)?.status === 'connected');
+  await waitFor(async () => !(await f.relay('list')).sessions.find(s => s.id === oldId)?.alive);
+  assert.equal([...manager.spares.values()][0], replacement);
+  assert.equal(statuses.length, 0, 'background warm/cancel must not publish a visible error/status');
+  const record = await manager.create(draft);
+  assert.equal(record.id, replacement.id, 'warm process remains adoptable');
+});
+
+test('closing during remote preparation prevents a late spawn or visible error', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  let prepared;
+  const preparing = new Promise(resolve => { prepared = resolve; });
+  manager.prepare = () => preparing;
+  manager.stopRelay = async () => {};
+  let starts = 0;
+  t.mock.method(PiSession.prototype, 'start', async () => { starts++; throw new Error('should not spawn'); });
+  const statuses = []; manager.on('status', s => statuses.push(s));
+  await manager.prewarm({ environmentId: 'remote', cwd: f.dir });
+  const id = [...manager.spares.values()][0].id;
+  const closing = manager.close(id);
+  prepared({ unreachable: [] });
+  await closing;
+  assert.equal(starts, 0);
+  assert.equal(statuses.length, 0);
+  assert.equal(manager.runtimes.has(id), false);
+});
+
+test('real foreground startup errors are still visible', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f, { TEST_RPC_MODE: 'exit' });
+  const statuses = []; manager.on('status', s => statuses.push(s));
+  await assert.rejects(manager.create({ environmentId: 'local', cwd: f.dir }), /the agent exited.*code=23/);
+  assert.ok(statuses.some(s => s.status === 'error' && s.message.includes('cannot load session')));
+});
+
+test('relay preserves Pi exit code and stderr through attach shutdown', { timeout: 10000 }, async t => {
+  const f = await fixture(t, { mode: 'exit' });
+  const s = f.connect();
+  await assert.rejects(s.start(), /the agent exited \(code=23 signal=null\)\nfixture: cannot load session/);
+  assert.equal(s.piExit.code, 23);
+});
+
+test('spawn ENOENT is reported promptly and is not retained as an alive session', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const s = f.connect('missing', { cwd: f.dir, argv: [join(f.dir, 'does-not-exist')], env: {} });
+  await assert.rejects(s.start({ readyTimeout: 1500 }), /spawn failed:.*ENOENT/);
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === 'missing').alive, false);
+});
+
+test('malformed handshakes cannot crash the shared relay daemon', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  for (const value of [null, [], { op: 'attach', sessionId: 'bad', spawn: {} }]) {
+    const socket = net.connect(join(f.runDir, 'relay.sock'));
+    socket.on('error', () => {}); socket.resume();
+    const closed = once(socket, 'close');
+    socket.end(JSON.stringify(value) + '\n'); await closed;
+  }
+  const s = f.connect(); await s.start();
+  assert.equal(s.initialState.sessionId, 'fixture');
+});
+
+test('stop acknowledgement waits for forced exit before reusing the session id', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { mode: 'stubborn' });
+  const s = f.connect(); await s.start();
+  const pid = s.attachInfo.pid;
+  await f.relay('stop', s.id);
+  assert.equal(alive(pid), false, 'old writer must be dead when stop returns');
+  const next = f.connect(); await next.start();
+  assert.equal(next.attachInfo.created, true);
+  assert.notEqual(next.attachInfo.pid, pid);
+});
+
+test('startup timeout cleans up its attach transport', { timeout: 10000 }, async t => {
+  const f = await fixture(t, { mode: 'silent' });
+  const s = f.connect();
+  await assert.rejects(s.start({ readyTimeout: 100 }), /timeout waiting for get_state/);
+  assert.equal(alive(s.pid), false);
+  assert.equal((await f.relay('list')).sessions[0].clients, 0);
+});
+
+test('concurrent cold attaches recover a stale socket without split daemons', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  // A regular stale socket-path file produces EADDRINUSE/EEXIST across Node/macOS versions.
+  writeFileSync(join(f.runDir, 'relay.sock'), 'stale');
+  const sessions = Array.from({ length: 12 }, (_, i) => f.connect(`concurrent-${i}`));
+  await Promise.all(sessions.map(s => s.start({ readyTimeout: 10000 })));
+  const list = (await f.relay('list')).sessions;
+  assert.equal(list.length, sessions.length);
+  assert.ok(list.every(s => s.alive && s.clients === 1));
+  const log = readFileSync(join(f.runDir, 'relay.log'), 'utf8');
+  assert.ok(!/EEXIST|EADDRINUSE|uncaught/i.test(log), log);
+});
+
+test('interrupt deadline includes a hung abort RPC', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f, { TEST_RPC_MODE: 'stubborn' });
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const runtime = manager.runtimes.get(record.id);
+  const pid = runtime.session.attachInfo.pid;
+  runtime.streaming = true;
+  const stopRelay = manager.stopRelay.bind(manager);
+  let hardStopAt;
+  t.mock.method(manager, 'stopRelay', (...args) => { hardStopAt ??= performance.now(); return stopRelay(...args); });
+  const started = performance.now();
+  const result = await manager.prompt(record.id, 'replacement', [], { interrupt: true });
+  assert.equal(result.interrupted, true);
+  assert.ok(hardStopAt - started < 6000, 'the hard stop must begin after the 4s Abort deadline, not the 30s RPC timeout');
+  assert.equal(alive(pid), false);
+  assert.notEqual(manager.runtimes.get(record.id).session.attachInfo.pid, pid);
+});
+
+test('an unapplied model blocks both prompt and compaction RPCs until it can be selected', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'old', id: 'model' } });
+  const session = manager.runtimes.get(record.id).session;
+  // A model can be saved while a process is detached, before Pi tries to apply it.
+  manager.record(record.id).model = { provider: 'selected', id: 'model' };
+  const request = session.request.bind(session);
+  const sent = [];
+  let available = false;
+  t.mock.method(session, 'request', async (type, payload, options) => {
+    if (type === 'set_model' && payload.provider === 'selected' && !available) throw new Error('Selected model unavailable');
+    if (type === 'prompt' || type === 'compact') sent.push(type);
+    return request(type, payload, options);
+  });
+  await assert.rejects(manager.prompt(record.id, 'Private text'), /Selected model unavailable/);
+  await assert.rejects(manager.compact(record.id), /Selected model unavailable/);
+  assert.deepEqual(sent, []);
+  assert.equal(manager.record(record.id).title, 'New session');
+  available = true;
+  await manager.prompt(record.id, 'Private text');
+  await manager.compact(record.id);
+  assert.deepEqual(sent.filter(type => type === 'compact'), ['compact']);
+  assert.ok(sent.includes('prompt'));
+  assert.equal(manager.runtimes.get(record.id).applied.model.provider, 'selected');
+});
+
+test('Stop hard-stops after rejected Abort even when streaming state is stale', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const runtime = manager.runtimes.get(record.id);
+  const pid = runtime.session.attachInfo.pid;
+  assert.equal(runtime.streaming, false);
+  t.mock.method(runtime.session, 'abort', async () => { throw new Error('Abort rejected'); });
+  const stopRelay = manager.stopRelay.bind(manager);
+  const stop = t.mock.method(manager, 'stopRelay', async () => { throw new Error('Relay offline'); });
+  const statuses = [];
+  manager.on('status', status => statuses.push(status));
+  await assert.rejects(manager.abort(record.id), /Relay offline/);
+  assert.equal(stop.mock.callCount(), 1);
+  assert.equal(manager.runtimes.get(record.id), runtime);
+  assert.ok(alive(pid));
+  assert.ok(!statuses.some(status => status.status === 'disconnected'));
+  stop.mock.restore();
+  const resolved = t.mock.method(manager, 'stopRelay', stopRelay);
+  await manager.abort(record.id);
+  assert.equal(resolved.mock.callCount(), 1);
+  assert.deepEqual(resolved.mock.calls[0].arguments[2], { requireTree: true });
+  assert.equal(alive(pid), false);
+  assert.equal(manager.runtimes.has(record.id), false);
+  assert.equal(statuses.at(-1).status, 'disconnected');
+});
+
+test('startup state and compaction events keep an unfocused Pi out of the idle sweep', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const start = PiSession.prototype.start;
+  t.mock.method(PiSession.prototype, 'start', async function (...args) {
+    await start.apply(this, args);
+    this.initialState.isCompacting = true;
+    return this;
+  });
+  const statuses = [];
+  manager.on('status', status => statuses.push(status));
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  assert.equal(record.compacting, true);
+  const { session } = manager.runtimes.get(record.id);
+  const sweepStale = () => manager.sweep(Date.now() + 60 * 60 * 1000);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_end' });
+  session.emit('event', { type: 'compaction_start' });
+  session.emit('event', { type: 'agent_settled' });
+  assert.equal(statuses.at(-1).compacting, true);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_end' });
+  assert.equal(statuses.at(-1).compacting, false);
+  assert.deepEqual(await sweepStale(), [record.id]);
+});
+
+test('manual compaction stays busy before its first event and after the RPC times out', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const { session } = manager.runtimes.get(record.id);
+  const request = session.request.bind(session);
+  let started, fail;
+  const pending = new Promise(resolve => { started = resolve; });
+  t.mock.method(session, 'request', (type, ...args) => type !== 'compact' ? request(type, ...args) : new Promise((_, reject) => {
+    fail = reject;
+    started();
+  }));
+  const compaction = manager.compact(record.id);
+  await pending;
+  const sweepStale = () => manager.sweep(Date.now() + 60 * 60 * 1000);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_start', reason: 'manual' });
+  fail(new Error('timeout waiting for compact'));
+  await assert.rejects(compaction, /timeout waiting for compact/);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_end', reason: 'manual' });
+  assert.deepEqual(await sweepStale(), [record.id]);
+});
+
+for (const environmentId of ['local', 'remote']) test(`${environmentId}: attachments with identical sanitized names keep their own bytes`, { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const { session } = manager.runtimes.get(record.id);
+  const text = [];
+  t.mock.method(session, 'prompt', async message => { if (message.includes('Attached files:')) text.push(message); });
+  const attachment = (name, value) => ({ kind: 'file', name, data: Buffer.from(value).toString('base64') });
+  const originalPath = process.env.PATH;
+  if (environmentId === 'remote') {
+    // Execute only the fixture's upload command, in a throwaway root, with no SSH host.
+    const bin = join(f.dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'ssh'), '#!/bin/sh\nfor arg do cmd=$arg; done\nexec /bin/sh -c "$cmd"\n', { mode: 0o755 });
+    process.env.PATH = `${bin}:${originalPath}`;
+    manager.prepare = async () => ({ root: f.dir });
+    manager.record(record.id).environmentId = 'remote';
+  }
+  try {
+    await Promise.all([
+      manager.prompt(record.id, 'first', [attachment('a b.txt', 'one'), attachment('a?b.txt', 'two')]),
+      manager.prompt(record.id, 'second', [attachment('a_b.txt', 'three'), attachment('..', 'four')]),
+    ]);
+  } finally { process.env.PATH = originalPath; }
+  const paths = text.flatMap(message => [...message.matchAll(/^- (.+)$/gm)].map(match => match[1]));
+  assert.equal(new Set(paths).size, 4);
+  assert.deepEqual(paths.map(path => readFileSync(path, 'utf8')).sort(), ['four', 'one', 'three', 'two']);
+});
+
+test('deletion keeps history when the relay cannot stop its writer', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const file = join(f.dir, 'retained.jsonl');
+  writeFileSync(file, 'retained history\n');
+  manager.store.sessions.push({ id: 'retained', environmentId: 'local', piSessionFile: file });
+  t.mock.method(manager, 'stopRelay', async () => { throw new Error('Stop failed'); });
+  await assert.rejects(manager.delete('retained'), /Stop failed/);
+  assert.equal(manager.record('retained').piSessionFile, file);
+  assert.equal(readFileSync(file, 'utf8'), 'retained history\n');
+});
+
+test('deleting a conversation on an unreachable SSH host forgets it here and queues the host cleanup', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  let saved = 0;
+  manager.store.saveSettings = () => { saved += 1; };
+  manager.store.sessions.push({ id: 'offline', environmentId: 'remote', engine: 'claude-code', piSessionFile: '/remote/offline.jsonl' });
+  t.mock.method(manager, 'stopRelay', async () => { throw new Error('ssh: connect to host timed out'); });
+  await manager.delete('offline');
+  assert.equal(manager.store.sessions.length, 0);
+  assert.deepEqual(manager.store.settings.pendingCleanups, [{ environmentId: 'remote', id: 'offline', file: '/remote/offline.jsonl', engine: 'claude-code' }]);
+  assert.equal(saved, 1);
+});
+
+test('deleting a conversation removes the attachments uploaded for it', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const file = join(f.dir, 'gone.jsonl');
+  writeFileSync(file, 'history\n');
+  const upload = join(f.dir, 'uploads', 'gone', 'batch', '1');
+  mkdirSync(upload, { recursive: true });
+  writeFileSync(join(upload, 'notes.txt'), 'attached');
+  manager.store.sessions.push({ id: 'gone', environmentId: 'local', piSessionFile: file });
+  t.mock.method(manager, 'stopRelay', async () => '');
+  await manager.delete('gone');
+  assert.equal(existsSync(file), false);
+  assert.equal(existsSync(join(f.dir, 'uploads', 'gone')), false);
+});
+
+test('cancelled forks never persist a second record pointing at the source file', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const file = join(f.dir, 'source.jsonl'); writeFileSync(file, 'source history\n');
+  manager.store.sessions.push({ id: 'source', title: 'Source', environmentId: 'local', cwd: f.dir, piSessionFile: file });
+  const request = PiSession.prototype.request;
+  t.mock.method(PiSession.prototype, 'request', function (type, ...args) {
+    if (type === 'clone') return Promise.resolve({ cancelled: true });
+    return request.call(this, type, ...args);
+  });
+  await assert.rejects(manager.fork('source'), /Forking was cancelled/);
+  assert.equal(manager.store.sessions.length, 1);
+  assert.equal(readFileSync(file, 'utf8'), 'source history\n');
+  assert.ok((await f.relay('list')).sessions.every(s => !s.alive));
+});
+
+test('Keychain failures never replace the master key or erase saved ciphertext', { skip: process.platform !== 'darwin' }, t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pdk-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const saved = { provider: { kc: Buffer.alloc(64).toString('base64') } };
+  writeFileSync(join(dir, 'secrets.json'), JSON.stringify(saved));
+  for (const status of [36, 44, 128]) {
+    const calls = [];
+    const store = new Store(dir, {}, { keychainCommand: args => { calls.push(args[0]); throw Object.assign(new Error('Keychain unavailable'), { status }); } });
+    assert.throws(() => store.getKey('provider'), /saved keys were not changed/);
+    assert.deepEqual(calls, ['find-generic-password']);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'secrets.json'), 'utf8')), saved);
+  }
+  const invalid = new Store(dir, {}, { keychainCommand: () => 'invalid key' });
+  assert.throws(() => invalid.setKey('new', 'test-only'), /Invalid Iris Keychain key/);
+});
+
+test('first Keychain key creation does not overwrite a racing existing item', { skip: process.platform !== 'darwin' }, t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pdk-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const calls = [];
+  const store = new Store(dir, {}, { keychainCommand: args => {
+    calls.push(args);
+    if (args[0] === 'find-generic-password') throw Object.assign(new Error('missing'), { status: 44 });
+    return '';
+  } });
+  store.setKey('provider', 'test-only');
+  assert.equal(calls[1][0], 'add-generic-password');
+  assert.ok(!calls[1].includes('-U'));
+  assert.equal(store.getKey('provider'), 'test-only');
+  assert.ok(!readFileSync(join(dir, 'secrets.json'), 'utf8').includes('test-only'));
+});
+
+test('egress shutdown destroys CONNECT tunnels and handles listen errors', { timeout: 5000 }, async t => {
+  const peers = new Set();
+  const upstream = net.createServer(s => { peers.add(s); s.on('close', () => peers.delete(s)); });
+  upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
+  t.after(() => { for (const s of peers) s.destroy(); upstream.close(); });
+  const target = `127.0.0.1:${upstream.address().port}`;
+  const proxy = await startEgressProxy({ allow: [target] });
+  t.after(() => proxy.close());
+  const client = net.connect(proxy.port, '127.0.0.1');
+  client.on('error', () => {});
+  client.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
+  const [response] = await once(client, 'data');
+  assert.match(response.toString(), /200 Connection Established/);
+  await assert.rejects(startEgressProxy({ port: proxy.port }), { code: 'EADDRINUSE' });
+  await proxy.close();
+  await waitFor(() => client.destroyed && peers.size === 0);
+});
+
+test('egress proxy forwards allowed HTTP and requires CONNECT for HTTPS', { timeout: 5000 }, async t => {
+  const http = await import('node:http');
+  let requests = 0;
+  const upstream = http.createServer((req, res) => {
+    requests++;
+    res.writeHead(200, { 'content-type': 'text/plain' }).end(`ok:${req.url}`);
+  });
+  upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections?.(); upstream.close(); });
+  const target = `127.0.0.1:${upstream.address().port}`;
+  const proxy = await startEgressProxy({ allow: [target, '127.0.0.1:0'] });
+  t.after(() => proxy.close());
+  const viaProxy = path => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path }, res => {
+      let body = ''; res.on('data', d => { body += d; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.deepEqual(await viaProxy(`http://${target}/v1/models`), { status: 200, body: 'ok:/v1/models' });
+  assert.equal((await viaProxy(`https://${target}/v1/models`)).status, 405);
+  assert.equal((await viaProxy('http://127.0.0.1:0/v1/models')).status, 403);
+  assert.equal((await viaProxy('http://disallowed.invalid/v1/models')).status, 403);
+  assert.equal(requests, 1, 'an HTTPS URL must never reach the plaintext upstream');
+});
+
+// Nothing of the app keeps running on this Mac after it quits; sessions on SSH hosts keep their relays.
+test('the relay shutdown stops every session, answers, then exits', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  const a = f.connect('quit-a'), b = f.connect('quit-b');
+  await a.start(); await b.start();
+  const pids = (await f.relay('list')).sessions.map(s => s.pid);
+  assert.equal(pids.length, 2);
+  assert.equal((await f.relay('shutdown')).relay, 'shutdown');
+  await waitFor(async () => (await f.relay('list')).daemon === false);
+  for (const pid of pids) assert.equal(alive(pid), false, `Pi ${pid} stopped with the relay`);
+});
+
+test('quitting the app leaves no local relay or Pi behind', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'fixture', id: 'model' } });
+  const pid = (await f.relay('list')).sessions.find(s => s.id === record.id)?.pid;
+  assert.ok(pid && alive(pid));
+  await manager.shutdown();
+  assert.equal((await f.relay('list')).daemon, false, 'the relay daemon exited');
+  assert.equal(alive(pid), false);
+});
+
+test('updating reopens a local conversation in a new process with its saved file and settings', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  const old = managerFor(t, f);
+  const record = await old.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'openai', id: 'gpt-6.2-sol' }, thinkingLevel: 'high', speed: 'ultrafast' });
+  const piSessionFile = join(f.dir, 'saved.jsonl');
+  const saved = { ...record, piSessionFile };
+  const previousPid = old.runtimes.get(record.id).session.attachInfo.pid;
+  const plan = await planSessionUpdate(old, '0.2.29');
+  await old.shutdown();
+  assert.equal(alive(previousPid), false);
+  const updated = managerFor(t, f);
+  updated.store.sessions.push(saved, { ...saved, id: 'inactive' });
+  const result = await restartUpdatedSessions(updated, plan);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.restarted.map(s => s.id), [record.id]);
+  const replacement = updated.runtimes.get(record.id).session;
+  assert.notEqual(replacement.attachInfo.pid, previousPid);
+  assert.equal(replacement.initialState.sessionFile, piSessionFile);
+  assert.deepEqual(updated.record(record.id).model, record.model);
+  assert.equal(updated.record(record.id).speed, 'ultrafast');
+  assert.equal(updated.runtimes.has('inactive'), false);
+});
+

@@ -1,0 +1,41 @@
+.cli-settings { border: 0; }
+.cli-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 24px;
+  min-height: 53px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 14px;
+}
+.cli-setting-row:last-of-type { border-bottom: 0; }
+.cli-setting-row:has(.cli-install) { flex-wrap: wrap; }
+.cli-setting-text { display: grid; gap: 2px; min-width: 0; }
+.cli-setting-desc { font-size: var(--fs-sm); line-height: 18px; color: var(--muted); }
+.cli-setting-row > .cli-setting-actions, .cli-setting-row > .trigger, .cli-setting-row > .switch { flex-shrink: 0; }
+.cli-setting-row .cli-machine { height: 28px; padding: 0 8px; margin-right: -8px; gap: 6px; border-radius: var(--r-sm); color: var(--text); font-size: var(--fs-base); max-width: 260px; }
+.cli-setting-row .cli-machine > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-setting-row .cli-machine:hover, .cli-setting-row .cli-machine.active { background: var(--row-hover); }
+.cli-setting-actions, .cli-account-state { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.cli-account-state { color: var(--muted); }
+.cli-install { flex: 1 0 100%; display: grid; gap: 7px; }
+.cli-install > div { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.cli-install progress { width: 100%; height: 8px; accent-color: var(--accent); border-radius: 999px; overflow: hidden; }
+.cli-install progress::-webkit-progress-bar { background: var(--surface-2); }
+.cli-install progress::-webkit-progress-value { border-radius: 999px; background: var(--spectrum); transition: width .12s ease; }
+.cli-install progress:indeterminate { background: var(--spectrum) left / 35% 100% no-repeat var(--surface-2); animation: cli-install-progress 1.25s ease-in-out infinite alternate; }
+.cli-install progress:indeterminate::-webkit-progress-bar { background: transparent; }
+@keyframes cli-install-progress { to { background-position: right; } }
+@media (prefers-reduced-motion: reduce) { .cli-install progress { animation: none; } }
+.cli-settings-error { margin: 0; padding: 8px 0; color: var(--red); overflow-wrap: anywhere; }
+.cli-terminal-card { margin: 12px 0; border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; }
+.cli-terminal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; }
+.cli-settings-terminal { height: 290px; padding: 8px 6px; background: #141414; }
+.cli-composer-error { margin: 4px 12px; color: var(--red); font-size: 12px; }
+.cli-add-account { border-bottom: 1px solid var(--hairline); }
+.cli-account-name { height: 30px; width: 180px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--field); color: var(--text); font-size: var(--fs-base); }
+.cli-account-name:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.trigger.cli-session-account { cursor: default; }
+.cli-setting-row .button { white-space: nowrap; flex-shrink: 0; }
+.cli-setting-row > .cli-setting-actions { flex-wrap: nowrap; }
