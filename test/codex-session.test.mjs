@@ -48,7 +48,8 @@ test('Codex: found on the login PATH, opened with the choices made beforehand, a
   // The conversation is Iris's own: it runs in Iris's Codex home, never the user's.
   assert.ok(calls('home').length > 1 && calls('home').every(c => c.params === ownHome), 'every Codex start used Iris’s own home');
   // Named by Codex after its first reply (the first words until then).
-  for (let i = 0; i < 100 && manager.record(first.id).title !== 'Weather lookup by city'; i++) await new Promise(r => setTimeout(r, 20));
+  // (Naming is a Codex start of its own; a busy CI machine has taken more than two seconds over it.)
+  for (let i = 0; i < 750 && manager.record(first.id).title !== 'Weather lookup by city'; i++) await new Promise(r => setTimeout(r, 20));
   assert.equal(manager.record(first.id).title, 'Weather lookup by city');
   // A choice made in a conversation is the default for the next one, and its menus are known beforehand.
   await manager.cliSetConfig(first.id, 'effort', 'high');
