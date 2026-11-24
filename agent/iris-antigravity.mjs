@@ -47,7 +47,13 @@ function readLines(stream, onLine, onOverflow) {
   });
 }
 
-const CLI_ENV = ['HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LANGUAGE', 'TZ',
+// What the CLI is started with: where things are, the language, and how the network is reached. Not the
+// rest of the environment, which can hold keys (GEMINI_API_KEY would replace the Google sign-in). The proxy
+// and certificate settings are part of it: on a machine that reaches Google only through a proxy, a CLI
+// started without them signs nobody in, however the sign-in itself went.
+const CLI_ENV = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS', // (the commands the agent runs get these too)
+  'HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LANGUAGE', 'TZ',
   'LC_ALL', 'LC_ADDRESS', 'LC_COLLATE', 'LC_CTYPE', 'LC_IDENTIFICATION', 'LC_MEASUREMENT', 'LC_MESSAGES',
   'LC_MONETARY', 'LC_NAME', 'LC_NUMERIC', 'LC_PAPER', 'LC_TELEPHONE', 'LC_TIME',
   'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
@@ -144,14 +150,16 @@ class Transcript {
   close() { if (this.fd !== undefined) { closeSync(this.fd); this.fd = undefined; } }
 }
 
+// What a request to the CLI was for, in words a person reads in a message.
+const REQUESTS = {
+  initialize: 'initialize', authenticate: 'complete sign-in', 'session/list': 'check sign-in', 'session/new': 'start a session',
+  'session/load': 'load the original session', 'session/resume': 'resume the original session',
+  'session/set_config_option': 'change session settings', 'session/prompt': 'complete the prompt',
+};
 class AcpError extends Error {
   constructor(error, method) {
     const code = Number.isInteger(error?.code) ? error.code : null;
-    const what = {
-      initialize: 'initialize', authenticate: 'complete sign-in', 'session/list': 'check sign-in', 'session/new': 'start a session',
-      'session/load': 'load the original session', 'session/resume': 'resume the original session',
-      'session/set_config_option': 'change session settings', 'session/prompt': 'complete the prompt',
-    }[method];
+    const what = REQUESTS[method];
     super(`Antigravity could not ${what}${code == null ? '' : ` (ACP error ${code})`}.`);
     this.code = code;
     // -32000 is also used as a generic server error by JSON-RPC implementations.
@@ -213,7 +221,8 @@ class AcpPeer {
     if (this.closed) return Promise.reject(new Error('The Antigravity CLI connection closed.'));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
-      const timer = timeout ? setTimeout(() => this.close(new Error(`Antigravity timed out waiting for ${method}.`)), timeout) : null;
+      // No answer usually means the CLI is waiting on the network: it asks Google before it replies.
+      const timer = timeout ? setTimeout(() => this.close(new Error(`Antigravity did not answer in time (asked to ${REQUESTS[method] ?? method}). It may not be reaching Google from this machine.`)), timeout) : null;
       this.pending.set(id, { method, resolve, reject, timer });
       this.send({ id, method, params });
     });
@@ -857,6 +866,17 @@ if (isMain && ['--account-check', '--account-login'].includes(process.argv[2])) 
       home: process.argv[5], menus: process.env.IRIS_CLI_MENUS_DIR ? { dir: process.env.IRIS_CLI_MENUS_DIR } : null });
     output(process.stdout, { cliAccountStatus: result });
   } catch (error) { output(process.stdout, { cliAccountError: error.message }); }
+} else if (isMain && process.argv[2] === '--account-login-terminal') {
+  // The CLI's own terminal sign-in (a link, then the code its page shows), started with exactly what a
+  // conversation's CLI is started with: the same variables and the same data directory. Whatever the CLI
+  // decides from those (where it keeps the sign-in, how it reaches Google) is then the same for both; a
+  // sign-in made in a person's own shell could succeed there and still not be one for Iris's conversations.
+  const dataDir = dataDirName(process.argv[5]);
+  if (!isAbsolute(process.argv[3] ?? '')) { process.stdout.write('couldn\'t log in: the Antigravity CLI was not found\n'); process.exit(1); }
+  const child = spawn(process.argv[3], ['acp', '--login', ...(dataDir ? ['--app-data-dir', dataDir] : [])],
+    { cwd: process.cwd(), env: { ...cliEnv(process.env), ...(process.env.TERM ? { TERM: process.env.TERM } : {}) }, stdio: 'inherit' });
+  child.on('error', error => { process.stdout.write(`couldn't log in: ${error.message}\n`); process.exit(1); });
+  child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 } else if (isMain) {
   let boot;
   try { boot = JSON.parse(takeBoot() ?? '{}'); } catch { boot = {}; }

@@ -18,7 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/iris-speed.mjs';
 import { readHistory } from '../../agent/iris-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter } from './cli-engines.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -695,6 +695,7 @@ export class SessionManager extends EventEmitter {
     // directory (where npm and Homebrew put node as well); on a host, that directory comes first.
     const path = env.kind === 'local' ? [dirname(bin), ...(this.local.extraEnv?.PATH ?? process.env.PATH ?? '').split(delimiter)].filter(Boolean) : [dirname(bin)];
     if (home) return { env, path, bin: 'sh', args: ['-c', 'mkdir -p "$1" && chmod 700 "$1" && home=$1 && shift && CODEX_HOME="$home" exec "$@"', 'sh', home, bin, ...args] };
+    if (action === 'login' && engine === ANTIGRAVITY_ENGINE && env.kind === 'ssh') return { env, path, ...remoteLoginCommand(await this.prepare(env.id, { engine }), engine, bin, AGY_DATA_DIR) };
     return { env, path, bin, args };
   }
 

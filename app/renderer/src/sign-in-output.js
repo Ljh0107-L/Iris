@@ -15,6 +15,9 @@ export function readSignInOutput(output) {
     wantsCode: !!link && /paste the authorization code/i.test(text),
     signedInAs,
     failure: signedInAs ? null : failed?.[1].trim() || null,
+    // Google turned the code down (mistyped, used before, or from an older link), as opposed to the host
+    // failing to get as far as asking: no route to Google, a proxy, a timeout.
+    refused: !signedInAs && /invalid_grant|malformed auth code|bad verification code|code was already redeemed/i.test(failed?.[1] ?? ''),
     // The last thing it said, for when it stops before offering a link (the CLI is missing, the host is away).
     lastLine: text.split('\n').map(line => line.trim()).filter(Boolean).at(-1) ?? '',
   };

@@ -323,7 +323,13 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
       </div>
     </div>}
     {hostSignIn && !signedIn && <HostCodeSignIn environmentId={environmentId} engine={engine} account={accountId} host={hostLabel}
-      onSignedIn={identity => { setHostIdentity(identity); setHostSignIn(false); void check(); }} onClose={() => setHostSignIn(false)} />}
+      onSignedIn={async identity => {
+        setHostIdentity(identity); setHostSignIn(false);
+        const result = await check();
+        // The CLI said it signed in, and a CLI started the same way a moment later says nobody is. Say so,
+        // rather than a bare "Not signed in" after a sign-in that looked as if it worked.
+        if (result && result.signedIn === false) setError(`The CLI on ${hostLabel} signed in as ${identity}, but its next start there found no sign-in. Its log in ~/.gemini/iris/log on the host says why.`);
+      }} onClose={() => setHostSignIn(false)} />}
     {installing && <InstallProgress progress={progress} />}
     {limits.length > 0 && <div className="sub-limits">{limits.map((limit, index) => <LimitBar key={index} limit={limit} />)}</div>}
     {signedIn && !limits.length && readingUsage && <div className="sub-reading" role="status"><Spinner size={11} />Reading quota from the CLI…</div>}
@@ -376,7 +382,9 @@ function HostCodeSignIn({ environmentId, engine, account, host, onSignedIn, onCl
           const end = readSignInOutput(output);
           term.current = null;
           if (end.signedInAs) { done.current.onSignedIn?.(end.signedInAs); return; }
-          setProblem(end.link ? 'That code was not accepted. Sign in again and paste the new code.' : (end.lastLine || 'The sign-in could not be started on this host.'));
+          setProblem(end.refused ? 'That code was not accepted. Sign in again and paste the new code.'
+            : end.failure ? `The host could not finish the sign-in: ${end.failure.slice(0, 240)}`
+            : end.lastLine || 'The sign-in could not be started on this host.');
           setPhase('failed');
         },
       });

@@ -35,6 +35,10 @@ export const remoteCliAdapter = (facts, engine) => (facts.adapter ?? `${facts.ro
 export const ANTIGRAVITY_ENGINE = 'antigravity';
 export const ANTIGRAVITY_REMOTE_LOGIN = 'Sign in to Antigravity on this host in Settings → Subscriptions, then reconnect.';
 
+// The sign-in a person completes for Antigravity on a host (a link, then a code), run through the adapter
+// there so that it gets what a conversation's CLI gets (see --account-login-terminal in the adapter).
+export const remoteLoginCommand = (facts, engine, bin, home) => ({ bin: facts.node, args: [remoteCliAdapter(facts, engine), '--account-login-terminal', bin, app.version, home] });
+
 export function antigravityInstallMessage(env, engine) {
   const target = env.kind === 'local' ? '' : ` on ${env.label ?? env.host}`;
   const cli = cliEngine(engine);

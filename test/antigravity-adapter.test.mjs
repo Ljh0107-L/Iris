@@ -24,8 +24,11 @@ const secretEnv = {
   GEMINI_API_KEY: 'fixture-private-gemini', GOOGLE_API_KEY: 'fixture-private-google',
   ANTHROPIC_API_KEY: 'fixture-private-anthropic', OPENAI_API_KEY: 'fixture-private-openai',
   GOOGLE_APPLICATION_CREDENTIALS: '/fixture-private-service-key', AGY_API_KEY: 'fixture-private-agy',
-  HTTPS_PROXY: 'http://fixture-private-proxy', LC_API_KEY: 'fixture-private-not-a-locale',
+  LC_API_KEY: 'fixture-private-not-a-locale',
 };
+// How the machine reaches the network is not a secret to keep from the CLI: without it, a CLI behind a proxy
+// cannot reach Google at all.
+const networkEnv = { HTTPS_PROXY: 'http://proxy.example.test:3128', no_proxy: 'localhost,127.0.0.1' };
 const shellQuote = value => "'" + value.replace(/'/g, "'\\''") + "'";
 const parseLines = value => value.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 async function until(fn, description, ms = 4000) {
@@ -62,7 +65,7 @@ function fixture(t, scenario = {}, signedIn = false) {
   function start(sessionFile, overrides = {}) {
     const boot = { antigravity: { ...config, sessionFile, ...overrides }, providers: [{ apiKey: 'fixture-private-boot-provider' }] };
     const child = spawn(process.execPath, [adapter], { cwd, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...secretEnv, IRIS_BOOT: JSON.stringify(boot) } });
+      env: { ...process.env, ...secretEnv, ...networkEnv, IRIS_BOOT: JSON.stringify(boot) } });
     const closed = once(child, 'close');
     const events = [];
     let stderr = '', n = 0;
@@ -229,6 +232,7 @@ test('negotiates ACP v1 as Iris, handles personal auth and serializes concurrent
   assert.deepEqual(boot.argv, ['acp']);
   assert.equal(boot.cwd, f.cwd);
   assert.ok(boot.env.includes('HOME') && boot.env.includes('PATH'));
+  for (const key of Object.keys(networkEnv)) assert.ok(boot.env.includes(key), `${key} is passed on`);
   for (const key of [...Object.keys(secretEnv), 'IRIS_BOOT', 'NODE_OPTIONS']) assert.ok(!boot.env.includes(key), key);
   const failedLogin = await peer.rpc('cli_login');
   assert.equal(failedLogin.success, false);
@@ -558,15 +562,23 @@ test('SSH deploys the adapter, prompts for host-side login, and reattaches a run
   // The host has no keychain: the CLI keeps a sign-in in the data directory it was made with. Signing in the
   // way a person would by hand, in the CLI's own directory, is therefore not a sign-in for Iris's conversations
   // (which is how a host could say "Logged in" and Iris still "Not signed in").
-  const signInOnHost = (bin, args, code) => execFileSync(bin, args, { input: `${code}\n`, encoding: 'utf8', cwd: home, env: { ...process.env, HOME: home } });
-  assert.match(signInOnHost(join(home, '.local/bin/agy'), ['acp', '--login'], '4/fixture-code'), /Logged in as fixture@example\.test/);
+  const signInOnHost = (bin, args, code) => execFileSync(bin, args, { input: `${code}\n`, encoding: 'utf8', cwd: home,
+    env: { ...process.env, HOME: home, HTTPS_PROXY: 'http://proxy.example.test:3128', no_proxy: 'localhost', GEMINI_API_KEY: 'fixture-remote-secret', SOME_TOKEN: 'fixture-private' } });
+  assert.match(execFileSync(join(home, '.local/bin/agy'), ['acp', '--login'], { input: '4/fixture-code\n', encoding: 'utf8', cwd: home, env: { HOME: home, PATH: process.env.PATH } }), /Logged in as fixture@example\.test/);
   assert.equal((await manager.cliAccountStatus(env.id, { engine: 'antigravity' })).signedIn, false);
-  // The sign-in Iris starts names the directory its conversations use, and is found by the check and by them.
+  // The sign-in Iris starts goes through the adapter on the host, which starts the CLI the way it starts one
+  // for a conversation: the same data directory and the same variables. So the CLI reaches Google the same
+  // way (the proxy settings are passed on) and keeps the sign-in where a conversation's CLI looks for it.
   const login = await manager.cliTerminal(env.id, 'login', 'antigravity');
-  assert.deepEqual([login.bin, login.args], [join(home, '.local/bin/agy'), ['acp', '--login', '--app-data-dir', 'iris']]);
+  assert.equal(login.bin, remoteNode);
+  assert.deepEqual([login.args[0], login.args[1], login.args[2], login.args.at(-1)], [join(root, 'cli/iris-antigravity.mjs'), '--account-login-terminal', join(home, '.local/bin/agy'), 'iris']);
   assert.throws(() => signInOnHost(login.bin, login.args, 'not-a-code'), error => /Malformed auth code/.test(error.stdout));
   assert.equal((await manager.cliAccountStatus(env.id, { engine: 'antigravity' })).signedIn, false);
   assert.match(signInOnHost(login.bin, login.args, '4/fixture-code'), /Logged in as fixture@example\.test/);
+  const started = f.log().filter(r => r.boot).at(-1).boot;
+  assert.deepEqual(started.argv, ['acp', '--login', '--app-data-dir', 'iris']);
+  assert.ok(['HTTPS_PROXY', 'no_proxy', 'HOME'].every(name => started.env.includes(name)), 'the CLI is told how to reach the network');
+  assert.ok(!started.env.includes('GEMINI_API_KEY') && !started.env.includes('SOME_TOKEN'), 'and gets none of the keys in the environment');
   assert.equal((await manager.cliAccountStatus(env.id, { engine: 'antigravity' })).signedIn, true);
   await manager.reconnect(record.id);
   assert.equal(manager.list()[0].cli.authRequired, false);

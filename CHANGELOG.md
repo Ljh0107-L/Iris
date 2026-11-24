@@ -2,6 +2,18 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.5
+
+**Fixed**
+
+- **Antigravity works on a host that reaches Google through a proxy.** Iris starts the CLI with only part of the environment, so that no API key in it replaces the Google sign-in, and the proxy settings were left out with the rest. A sign-in on such a host succeeded, and then every check and conversation waited for Google until it timed out ("timed out waiting for session/list"). The proxy and certificate settings (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE` and the like) are now passed on; keys still are not. Commands the agent runs there get them too.
+- **Signing in on a host is the same start as a conversation.** The sign-in runs through Iris's adapter on the host, with the environment and data directory a conversation's CLI gets, so a sign-in that succeeds is one the conversations have.
+- **Clearer messages when a host sign-in goes wrong:** a refused code, a host that cannot reach Google, and a CLI that signed in but finds no sign-in at its next start are each said as what they are. A CLI that does not answer says so in words, and that it may not be reaching Google.
+
+A host you already signed in with 0.1.4 does not need another sign-in.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.4
 
 **Fixed**
