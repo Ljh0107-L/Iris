@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState } from 'react';
 import { isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
 import { Spinner, baseName, shortPath, useResizable } from './ui.jsx';
-import { antigravityTurnSpeed, formatTokens, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
+import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
 import { api, stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
@@ -22,7 +22,7 @@ function Card({ title, children, open: initial = true, aside, collapsible = true
   );
 }
 
-// Speed and token usage per turn, where a turn is one model call (one assistant message): the last turn's
+// Speed and token usage per turn, where a turn is one model call, with every agent: the last turn's
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
 export function UsageMetrics({ transcript, antigravity }) {
@@ -42,7 +42,8 @@ export function UsageMetrics({ transcript, antigravity }) {
       </div>
     </div>;
   }
-  const messages = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason));
+  // One entry per model request, with every agent (see requestReplies).
+  const messages = requestReplies(transcript?.messages).filter(m => m.role === 'assistant' && m.usage && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason));
   if (!messages.length) return null;
   const lastMessage = messages.at(-1);
   const last = usageOf([lastMessage]);

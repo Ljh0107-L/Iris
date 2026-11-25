@@ -90,6 +90,16 @@ function readLines(stream, onLine, onOverflow) {
 
 // The conversation as the desktop shows it, in Pi's session-file layout, with the Codex thread it
 // belongs to. Private to the user, append-only.
+// The time a turn's tools ran, with runs that overlap counted once. A turn's length less this is the time the
+// model itself took, which is what the turn's speed is measured over.
+const toolTime = runs => {
+  let total = 0, until = -Infinity;
+  for (const [start, end] of runs.filter(([start, end]) => end > start).sort((a, b) => a[0] - b[0])) { total += Math.max(0, end - Math.max(start, until)); until = Math.max(until, end); }
+  return total;
+};
+// Codex's token counts as the desktop keeps them (cached input apart from the rest of the input).
+const usageOf = u => ({ input: Math.max(0, (u.inputTokens ?? 0) - (u.cachedInputTokens ?? 0)), output: u.outputTokens ?? 0, cacheRead: u.cachedInputTokens ?? 0, cacheWrite: u.cacheWriteInputTokens ?? 0,
+  reasoning: u.reasoningOutputTokens ?? 0, totalTokens: u.totalTokens ?? 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 class Transcript {
   constructor({ cwd, sessionsDir, sessionFile, recordId }) {
     this.entries = []; this.leafId = null; this.binding = null;
@@ -443,7 +453,10 @@ export class CodexAdapter {
     this.transcript.append([{ type: 'message', message: user }]);
     const options = this.#options(), effort = options.find(o => o.id === 'effort')?.currentValue;
     const speed = options.find(o => o.id === 'speed')?.currentValue;
-    const turn = { startedAt: Math.max(Date.now(), user.timestamp + 1), items: new Map(), content: [], tools: new Map(), results: [], model: this.model, usage: null, text: message };
+    const turn = { startedAt: Math.max(Date.now(), user.timestamp + 1), items: new Map(), content: [], tools: new Map(), results: [], model: this.model, usage: null, text: message,
+      // The model requests of the turn, each with its tokens and how long it took (see thread/tokenUsage/updated).
+      requests: [], from: 0, counted: -Infinity };
+    turn.from = turn.startedAt;
     turn.done = new Promise(resolve => { turn.finish = resolve; });
     this.turn = turn;
     this.write({ type: 'agent_start' });
@@ -638,7 +651,11 @@ export class CodexAdapter {
   #toolEnd(tool, isError, shown, more = null) {
     const content = [{ type: 'text', text: shown }], details = { engine: ENGINE, ...more };
     tool.message = { role: 'toolResult', toolCallId: tool.call.id, toolName: tool.call.name, content, details, isError, timestamp: Date.now() };
-    this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError, durationMs: Date.now() - tool.start });
+    tool.end = Date.now();
+    // The next model request cannot begin before the tools of the last one are done. (A tool that started after
+    // the last count belongs to the request still being answered, and does not move its start.)
+    if (this.turn && tool.start <= this.turn.counted) this.turn.from = tool.end;
+    this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError, durationMs: tool.end - tool.start });
   }
   #finishTurn(turn, stopReason, errorMessage) {
     if (this.turn !== turn) return;
@@ -647,9 +664,12 @@ export class CodexAdapter {
     const agentTools = new Set([...(turn.agents?.values() ?? [])].map(agent => agent.tool));
     for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, stopReason === 'aborted' || !agentTools.has(tool), stopReason === 'aborted' ? 'Interrupted.' : agentTools.has(tool) ? 'The agent was still running when this turn ended.' : 'Codex did not report the result.');
     const u = turn.usage;
-    const usage = u ? { input: Math.max(0, (u.inputTokens ?? 0) - (u.cachedInputTokens ?? 0)), output: u.outputTokens ?? 0, cacheRead: u.cachedInputTokens ?? 0, cacheWrite: u.cacheWriteInputTokens ?? 0,
-      reasoning: u.reasoningOutputTokens ?? 0, totalTokens: u.totalTokens ?? 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } : undefined;
-    let message = { ...this.#assistant(turn, turn.content), stopReason, ...(usage ? { usage } : {}), durationMs: Math.max(1, Date.now() - turn.startedAt), ...(errorMessage ? { errorMessage } : {}) };
+    const usage = u ? usageOf(u) : undefined;
+    // A turn is saved as one reply. Its speed is measured per model request (requests); when Codex counted
+    // none, over the model's own time in the turn: its length less the time its commands and tools ran (modelMs).
+    const ended = Date.now(), durationMs = Math.max(1, ended - turn.startedAt);
+    const modelMs = Math.max(1, durationMs - toolTime([...turn.tools.values()].flat().map(tool => [Math.max(tool.start, turn.startedAt), tool.end ?? ended])));
+    let message = { ...this.#assistant(turn, turn.content), stopReason, ...(usage ? { usage } : {}), durationMs, modelMs, ...(turn.requests.length ? { requests: turn.requests } : {}), ...(errorMessage ? { errorMessage } : {}) };
     const results = [...turn.tools.values()].flat().map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
     catch { message = { ...message, stopReason: 'error', errorMessage: 'Could not save this turn to the Codex transcript.' }; }
@@ -710,6 +730,13 @@ export class CodexAdapter {
       // A turn's usage is the thread total now minus the total before the turn's first model call.
       if (this.turn && usage?.total) {
         this.turn.usageBase ??= Object.fromEntries(Object.entries(usage.total).map(([key, value]) => [key, value - (usage.last?.[key] ?? 0)]));
+        // Codex counts tokens once per model request, when the request ends: that is one request of the turn,
+        // from when it could begin (the turn's start, or the end of the tools before it) until now.
+        if (usage.last && usage.total.totalTokens !== this.turn.usageTotal?.totalTokens) {
+          const now = Date.now();
+          this.turn.requests.push({ ms: Math.max(1, now - this.turn.from), ...usageOf(usage.last) });
+          this.turn.counted = now; this.turn.from = now;
+        }
         this.turn.usageTotal = usage.total;
       }
       this.#updateState();

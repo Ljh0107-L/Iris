@@ -388,3 +388,58 @@ test('readHistory never splits an assistant tool call from its tool results acro
   const page2 = await readHistory(file, { cursor: page1.next });
   assert.equal(displayBlocks(fromHistory(mergeHistory(page2.messages, page1.messages))).some(b => b.kind === 'orphanResult'), false);
 });
+
+test('a long Codex or Antigravity turn (one reply of hundreds of blocks) reopens as its steps and its answer, not as loose results', async t => {
+  // The turn as the adapters save it: one reply with every thought, tool call and paragraph, then each tool's result.
+  const content = [], results = [];
+  for (let i = 0; i < 150; i++) {
+    content.push({ type: 'thinking', thinking: `Thought ${i}. `.repeat(40) });
+    content.push(i % 3 === 2
+      ? { type: 'toolCall', id: `call-${i}`, name: 'write', arguments: { path: `/work/file-${i}.js`, content: 'x'.repeat(50000) } }
+      : { type: 'toolCall', id: `call-${i}`, name: 'bash', arguments: { command: `echo step ${i} && ${'make '.repeat(200)}`, description: `Step ${i}` } });
+    results.push({ role: 'toolResult', toolName: i % 3 === 2 ? 'write' : 'bash', toolCallId: `call-${i}`, content: [{ type: 'text', text: `output ${i}\n`.repeat(50) }], isError: false, timestamp: 10 + i });
+  }
+  content.push({ type: 'text', text: 'All done. Here is what changed.' });
+  const reply = { role: 'assistant', provider: 'antigravity', model: 'gemini', stopReason: 'stop', timestamp: 5, content,
+    usage: { input: 1000, output: 68000, cacheRead: 9000, cacheWrite: 0, reasoning: 29000, totalTokens: 78000 }, durationMs: 900000, modelMs: 400000,
+    requests: Array.from({ length: 151 }, (_, i) => ({ ms: 2000 + i, output: 450, estimated: true })) };
+  const rows = [entry(0, null, { role: 'user', content: [{ type: 'text', text: 'Build it' }] }), entry(1, 'e0', reply)];
+  results.forEach((result, i) => rows.push(entry(2 + i, `e${1 + i}`, result)));
+  const file = fixture(t, rows), before = hash(file);
+  const page = await readHistory(file);
+  assert.equal(hash(file), before);
+  const shown = page.messages.find(m => m.role === 'assistant');
+  assert.notEqual(shown.__history.placeholder, true, 'the reply is in the page');
+  assert.equal(shown.content.length, 301, 'with every block of it');
+  assert.ok(Buffer.byteLength(JSON.stringify(shown)) < 400 * 1024, `as an outline, not in full (${Buffer.byteLength(JSON.stringify(shown))} bytes of ${Buffer.byteLength(JSON.stringify(reply))})`);
+  // Past the first blocks a tool call keeps its name, its path and the start of its command; the answer is there.
+  const late = shown.content[281];
+  assert.deepEqual([late.type, late.id, late.name], ['toolCall', 'call-140', 'write']);
+  assert.equal(late.arguments.path, '/work/file-140.js');
+  assert.ok(late.arguments.content.length < 500);
+  assert.match(shown.content[279].arguments.command, /^echo step 139 /);
+  assert.equal(shown.content.at(-1).text, 'All done. Here is what changed.');
+  assert.equal(shown.__history.truncated, true);
+  assert.ok(shown.__history.deferredContent.includes(281), 'the rest of a block is read when it is looked at');
+  // What the turn's speed is measured from survives the outline.
+  assert.deepEqual([shown.durationMs, shown.modelMs, shown.requests.length, shown.requests.at(-1)], [900000, 400000, 151, { ms: 2150, output: 450, estimated: true }]);
+  // In the conversation: steps that name what they did, and the answer. No result stands alone as "Command result".
+  const transcript = fromHistory(page.messages), blocks = displayBlocks(transcript);
+  assert.equal(blocks.filter(block => block.kind === 'orphanResult').length, 0);
+  assert.ok(blocks.some(block => block.kind === 'text' && /All done/.test(block.text)));
+  assert.equal(Object.values(transcript.tools).filter(tool => tool.status === 'done').length, 150);
+  // Read in full, it is exactly what was saved.
+  const full = await readHistory(file, { ref: shown.__history.ref });
+  assert.equal(full.content[281].arguments.content.length, 50000);
+  assert.equal(full.content.length, 301);
+
+  // A reply too large even for an outline is a placeholder, read when it comes into view; until then its
+  // results are not shown as steps of their own.
+  const huge = { ...reply, content: Array.from({ length: 5000 }, (_, i) => ({ type: 'toolCall', id: `big-${i}`, name: 'bash', arguments: { command: 'true' } })) };
+  const placeholder = projectEntry(entry(1, 'e0', huge), { id: 'e1' });
+  assert.equal(placeholder.__history.placeholder, true);
+  assert.deepEqual([placeholder.durationMs, placeholder.modelMs, placeholder.usage.output], [900000, 400000, 68000]);
+  const loose = displayBlocks(fromHistory([projectEntry(entry(0, null, { role: 'user', content: [{ type: 'text', text: 'Build it' }] }), { id: 'e0' }), placeholder,
+    projectEntry(entry(2, 'e1', { role: 'toolResult', toolName: 'bash', toolCallId: 'big-0', content: [{ type: 'text', text: 'ok' }] }), { id: 'e2' })]));
+  assert.deepEqual(loose.map(block => block.kind), ['user', 'pendingHistory']);
+});

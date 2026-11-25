@@ -2,6 +2,19 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.8
+
+**Fixed**
+
+- **A long Codex or Antigravity conversation opens again as it was.** Reopened, its steps were a column of "Command result", "Read" and "Wrote" with nothing after them, the answer was missing until you scrolled to the top of the turn, and the speed said "unavailable". These agents save a whole turn as one reply, and a reply of more than 32 parts was left out of the first read. Every part is now read in outline, so each step has its command or file and the answer is where it was; the rest of a step is read when you open it.
+- **Speed is measured per model request with every agent.** Codex and Antigravity were measured over the whole turn, including the time their commands ran, so a turn with a long command looked slow, and the figure changed only once a turn. Each model request now has its own speed, as with Pi and Claude Code, and the time tools ran is in none of them. Antigravity counts tokens for a turn only, so its per-request figure is an estimate and says so.
+
+**New and changed**
+
+- **Quieter marks for work in progress.** The step under way has a small cluster of dots; a command that is running has the app's `>_` with its cursor blinking; a finished step has no mark. In the sidebar a conversation that is working has one dot, in place of a spinner.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.7
 
 **Fixed**

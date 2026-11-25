@@ -9,6 +9,13 @@ export const PAGE_BYTES = 256 * 1024;
 const MAX_LINE = 64 * 1024 * 1024;
 const CHUNK = 64 * 1024;
 const signatures = new Set(['thinkingSignature', 'textSignature', 'thoughtSignature']);
+// A reply of many blocks. Codex and Antigravity save a whole turn as one reply, and a long turn is hundreds of
+// thoughts, tool calls and paragraphs. Every block is kept in the page, so each tool result finds its call and
+// the answer is where it was; past the first FULL_BLOCKS, a block is its outline (a tool's name and the start of
+// its input, the start of a paragraph), and the rest of it is read when it is looked at.
+const FULL_BLOCKS = 32, OUTLINE_BLOCKS = 4096;
+const OUTLINE_BUDGET = { toolCall: 400, text: 600, thinking: 160 };
+const OUTLINE_BYTES = 2 * 1024 * 1024;
 const bytes = value => Buffer.byteLength(JSON.stringify(value));
 
 function clean(value, preview, state, depth = 0) {
@@ -33,14 +40,20 @@ function clean(value, preview, state, depth = 0) {
       continue;
     }
     if (preview && key === 'steps') { if (v?.length) state.clipped = true; continue; }
+    if (preview && key === 'requests' && depth === 0) continue; // a turn's model requests: compact figures, kept whole below
     if (preview && key === 'content' && depth === 0 && Array.isArray(v)) {
       state.deferredContent = [];
-      if (v.length > 32) { state.clipped = true; state.structural = true; }
-      out[key] = v.slice(0, 32).map((block, index) => {
-        const budget = Math.min(state.left, block?.type === 'toolCall' ? 6000 : state.left);
-        const part = { left: budget, textLimit: state.textLimit, nodes: 0, clipped: false };
-        const projected = clean(block, preview, part, depth + 1);
-        state.left -= budget - part.left;
+      if (v.length > FULL_BLOCKS) { state.clipped = true; state.outlined = true; }
+      if (v.length > OUTLINE_BLOCKS) state.structural = true;
+      out[key] = v.slice(0, OUTLINE_BLOCKS).map((block, index) => {
+        const outline = index >= FULL_BLOCKS ? OUTLINE_BUDGET[block?.type] ?? 160 : null;
+        const budget = outline ?? Math.min(state.left, block?.type === 'toolCall' ? 6000 : state.left);
+        const part = { left: budget, textLimit: outline ?? state.textLimit, ...(outline ? { stringLimit: outline } : {}), nodes: 0, clipped: false };
+        let projected = clean(block, preview, part, depth + 1);
+        if (!outline) state.left -= budget - part.left;
+        // In a reply of many blocks, one block too large or too deep to outline is its bare frame: the reply
+        // still lists it, and the rest of the reply is not lost with it.
+        if (part.structural && state.outlined) { projected = block?.type === 'toolCall' ? { type: 'toolCall', id: block.id, name: block.name, arguments: {} } : { type: block?.type, ...(typeof block?.type === 'string' ? { [block.type]: '…' } : {}) }; part.structural = false; part.clipped = true; }
         state.clipped ||= part.clipped;
         state.structural ||= part.structural;
         if (part.clipped) state.deferredContent.push(index);
@@ -72,7 +85,7 @@ export function projectEntry(entry, ref, { preview = true, omitted = false } = {
   const folded = message.role === 'toolResult' && ['read', 'bash', 'write', 'edit', 'grep', 'find', 'ls', 'powershell'].includes(message.toolName);
   const state = { left: prose ? 24000 : folded ? 512 : 6000, textLimit: prose ? 16384 : folded ? 256 : 2048, nodes: 0, clipped: false };
   let out = clean(message, preview, state);
-  const placeholder = preview && (state.structural || bytes(out) > 32 * 1024);
+  const placeholder = preview && (state.structural || bytes(out) > (state.outlined ? OUTLINE_BYTES : 32 * 1024));
   if (placeholder) {
     state.clipped = true;
     out = { role: message.role, timestamp: message.timestamp, stopReason: message.stopReason, toolName: message.toolName, toolCallId: message.toolCallId,
@@ -80,6 +93,9 @@ export function projectEntry(entry, ref, { preview = true, omitted = false } = {
   }
   // Usage/timing are compact metadata, not excerpts; never calculate costs from truncated fields.
   for (const key of ['usage', '__timing', '__speed', '__usageProvenance', '__agyTurn']) if (message[key] && bytes(message[key]) < 8192) out[key] = message[key];
+  // How long a Codex or Antigravity turn took, and its model requests (the last of them when there are very many).
+  for (const key of ['durationMs', 'modelMs']) if (Number.isFinite(message[key])) out[key] = message[key];
+  if (preview && Array.isArray(message.requests) && message.requests.length) out.requests = message.requests.slice(-256).filter(r => r && typeof r === 'object' && bytes(r) < 1024);
   return { ...out, __entryId: entry.id, ...(omitted && message.stopReason === 'error' ? { __retryOmitted: true } : {}),
     __history: { ref, truncated: state.clipped, ...(state.deferredContent ? { deferredContent: state.deferredContent } : {}), ...(placeholder ? { placeholder: true } : {}) } };
 }

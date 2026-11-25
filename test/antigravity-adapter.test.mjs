@@ -14,7 +14,7 @@ import { localRelayTransport } from '../core/transports.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote } from '../app/main/remote-setup.mjs';
 import { readHistory } from '../agent/iris-history.mjs';
-import { antigravityTurnSpeed, usageOf } from '../app/renderer/src/transcript.js';
+import { antigravityTurnSpeed, requestReplies, usageOf } from '../app/renderer/src/transcript.js';
 
 const adapter = fileURLToPath(new URL('../agent/iris-antigravity.mjs', import.meta.url));
 const fake = fileURLToPath(new URL('./fixtures/fake-agy-acp-antigravity.mjs', import.meta.url));
@@ -292,6 +292,44 @@ test('a turn carries the token counts the CLI reports: input, cached, output, an
   const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
   assert.deepEqual(reply.usage, { input: 1000, output: 24, cacheRead: 600, cacheWrite: 0, reasoning: 22, totalTokens: 1624 });
   assert.ok(reply.durationMs > 0, 'with the length of the turn, for its speed');
+  assert.ok(reply.modelMs > 0 && reply.modelMs <= reply.durationMs, 'and the model\'s own time in it');
+});
+
+test('speed is measured per model request: a turn lists its requests, and the time its tools ran is in none of them', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'slow command' });
+  await peer.next(event('agent_settled'));
+  const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
+  assert.ok(reply.durationMs >= 400, `the turn took as long as its command (${reply.durationMs} ms)`);
+  assert.ok(reply.modelMs <= reply.durationMs - 350, `the command's 400 ms are not the model's (${reply.modelMs} of ${reply.durationMs} ms)`);
+  // The CLI says when each model request ends: the turn lists its two requests, each with its own time. It
+  // counts tokens for the turn only, so each request has the share its text, thoughts and tool calls are of it.
+  assert.equal(reply.requests.length, 2);
+  assert.ok(reply.requests.every(r => r.ms > 0 && r.ms < 250), `neither request includes the command's 400 ms (${reply.requests.map(r => r.ms)})`);
+  assert.equal(reply.requests[0].output + reply.requests[1].output, 40, 'the turn\'s tokens, shared out');
+  assert.ok(reply.requests[0].output >= 10 && reply.requests[1].output > 0, 'the thought is the first request\'s');
+  assert.ok(reply.requests.every(r => r.estimated === true));
+  // The Usage card shows one request at a time, as with the other agents: the last one here.
+  const entries = requestReplies([reply]);
+  assert.equal(entries.length, 2);
+  const last = usageOf([entries[1]]);
+  assert.equal(last.genMs, reply.requests[1].ms); assert.equal(last.genOut, reply.requests[1].output);
+  assert.equal(last.speedTokensEstimated, true);
+  assert.equal(last.output, 40, 'the CLI counts tokens per turn: the table keeps the turn\'s');
+  // The reply as a whole: every request, and still not the command.
+  assert.equal(usageOf([reply]).genMs, reply.requests[0].ms + reply.requests[1].ms);
+});
+
+test('a turn of one model request has its exact tokens, not an estimate', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'counted' });
+  await peer.next(event('agent_settled'));
+  const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
+  assert.deepEqual(reply.requests.map(r => [r.output, r.estimated]), [[24, undefined]]);
 });
 
 test('negotiates ACP v1 as Iris, handles personal auth and serializes concurrent sign-in', { timeout: 12000 }, async t => {

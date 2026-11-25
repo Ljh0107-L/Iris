@@ -347,6 +347,13 @@ function agentOf(tool) {
 // The CLI's ordinary tools, shown the way Pi's and Claude Code's are: a command, a file read or written, a web
 // search. The CLI names the kind of each and gives its input (CommandLine, Path, query); anything else keeps
 // the CLI's own title. Only those fields are read: the rest of a tool's input is not passed on.
+// The time a turn's tools ran, with runs that overlap counted once. A turn's length less this is the time the
+// model itself took, which is what the turn's speed is measured over.
+const toolTime = runs => {
+  let total = 0, until = -Infinity;
+  for (const [start, end] of runs.filter(([start, end]) => end > start).sort((a, b) => a[0] - b[0])) { total += Math.max(0, end - Math.max(start, until)); until = Math.max(until, end); }
+  return total;
+};
 const EDIT_SHOWN = 200000; // characters of a written or changed file kept for the conversation
 // The file before and after a change, as the CLI reports it once the change is made.
 const shownDiff = content => { const diff = (Array.isArray(content) ? content : []).find(block => block?.type === 'diff' && typeof block.newText === 'string'); return diff ? { oldText: typeof diff.oldText === 'string' ? diff.oldText : null, newText: diff.newText } : null; };
@@ -402,6 +409,20 @@ const slashCommands = list => (Array.isArray(list) ? list : []).slice(0, 256).fl
     ...(text(c.input?.hint) ? { argumentHint: c.input.hint.slice(0, 200) } : {}) }] : []);
 const contextOf = ({ used, size }) => Number.isSafeInteger(used) && used >= 0 && Number.isSafeInteger(size) && size > 0
   ? { tokens: used, contextWindow: size, percent: 100 * used / size } : null;
+// Roughly how many tokens a piece of text is (a character of Chinese, Japanese or Korean is about one; four of
+// anything else are about one). Used only to share a turn's token count among its model requests.
+const sizeOf = printed => { const cjk = (printed.match(/[\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g) ?? []).length; return cjk + (printed.length - cjk) / 4; };
+// The CLI counts tokens for a turn as a whole, and says when each model request of the turn ends (usage_update).
+// So each request has its own time, and of the turn's output tokens the share its text, thoughts and tool calls
+// are of the turn's: an estimate, marked as one, unless the turn was a single request.
+function requestsOf(requests, usage) {
+  if (!usage || !requests.length) return null;
+  const thought = Math.min(usage.reasoning ?? 0, usage.output), written = usage.output - thought;
+  const said = requests.reduce((n, r) => n + r.text + r.tools, 0), mused = requests.reduce((n, r) => n + r.thinking, 0);
+  const share = (part, whole) => whole > 0 ? part / whole : 1 / requests.length;
+  return requests.map(r => ({ ms: r.ms, output: Math.round(written * share(r.text + r.tools, said) + thought * (mused > 0 ? r.thinking / mused : share(r.text + r.tools, said))),
+    ...(requests.length > 1 ? { estimated: true } : {}) }));
+}
 const estimateOutput = blocks => Math.max(0, Math.round(blocks.reduce((n, block) => {
   const printed = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking : '';
   const cjk = (printed.match(/[\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g) ?? []).length;
@@ -674,12 +695,14 @@ export class AntigravityAdapter {
     if (Buffer.byteLength(JSON.stringify(prompt)) > 6 * 1024 * 1024) throw new Error('Antigravity prompts must be smaller than 6 MB after encoding.');
     const user = { role: 'user', content: prompt, timestamp: Date.now() };
     this.transcript.append([{ type: 'message', message: user }]);
-    const turn = { sessionId: this.sessionId, startedAt: Math.max(Date.now(), user.timestamp + 1), tools: new Map(), content: [], model: this.#model()?.id };
+    const turn = { sessionId: this.sessionId, startedAt: Math.max(Date.now(), user.timestamp + 1), tools: new Map(), content: [], model: this.#model()?.id,
+      // The model requests of the turn (see requestsOf): those that ended, and what the one being answered has written.
+      requests: [], open: { text: 0, thinking: 0, tools: 0 }, from: Date.now() };
     this.turn = turn;
     this.write({ type: 'agent_start' });
     this.#message(user);
     this.write({ type: 'message_start', message: this.#assistant(turn, []) });
-    turn.requestedAt = performance.now();
+    turn.requestedAt = performance.now(); turn.from = Date.now();
     turn.done = this.peer.request('session/prompt', { sessionId: turn.sessionId, prompt: user.content }, null).then(
       ({ result }) => {
         const reason = STOP.get(result?.stopReason);
@@ -708,6 +731,7 @@ export class AntigravityAdapter {
   }
   #chunk(turn, type, content) {
     if (content?.type !== 'text' || !text(content.text)) return;
+    turn.open[type] += sizeOf(content.text);
     if (turn.blockIndex == null || turn.content[turn.blockIndex].type !== type) {
       this.#endBlock(turn);
       turn.blockIndex = turn.content.push({ type, [type]: '' }) - 1;
@@ -730,6 +754,8 @@ export class AntigravityAdapter {
       this.#endBlock(turn);
       tool = { id: randomUUID(), index: turn.content.length, start: Date.now(), paths: [], result: [] };
       turn.tools.set(update.toolCallId, tool);
+      // The CLI names a request's tool calls right after it says the request ended: they are that request's.
+      try { (turn.requests.at(-1) ?? turn.open).tools += sizeOf(JSON.stringify(update.rawInput ?? {}).slice(0, 400000)); } catch { /* an input that cannot be measured weighs nothing */ }
       if (steps) turn.plan = tool;
     }
     if (text(update.kind)) tool.kind = update.kind;
@@ -768,13 +794,22 @@ export class AntigravityAdapter {
     const content = tool.result.length ? tool.result : [{ type: 'text', text: fallback }];
     // Stopped by the person (Stop, or a message sent while it worked) is not the tool failing.
     const details = { engine: ENGINE, ...(fallback === 'Interrupted.' ? { interrupted: true } : {}) };
-    const durationMs = Date.now() - tool.start;
+    tool.end = Date.now();
+    if (this.turn) this.turn.from = tool.end; // the next model request begins once the tools before it are done
+    const durationMs = tool.end - tool.start;
     tool.message = { role: 'toolResult', toolCallId: tool.id, toolName: tool.call.name, content, details, isError, timestamp: Date.now() };
     this.write({ type: 'tool_execution_end', toolCallId: tool.id, toolName: tool.call.name, result: { content, details }, isError, durationMs });
   }
 
+  #requestEnded(turn) {
+    const now = Date.now();
+    turn.requests.push({ ms: Math.max(1, now - turn.from), ...turn.open });
+    turn.open = { text: 0, thinking: 0, tools: 0 }; turn.from = now;
+  }
+
   #finishTurn(turn, stopReason, errorMessage) {
     if (this.turn !== turn) return;
+    if (turn.open.text + turn.open.thinking + turn.open.tools > 0) this.#requestEnded(turn); // a last request the CLI did not close
     this.#cancelPermissions();
     this.#endBlock(turn);
     // A question left open is the turn asking for an answer, not a tool that failed.
@@ -789,7 +824,10 @@ export class AntigravityAdapter {
       && block.text.length < 400 + asked[1].asks.reduce((n, ask) => n + ask.question.length + ask.options.join('').length + ask.options.length * 12, 0)));
     const __agyTurn = { durationMs: Math.max(1, Math.round(performance.now() - turn.requestedAt)), tokenEstimate: estimateOutput(turn.content) };
     // The CLI's own token counts for the turn, when it gives them (with the turn's length, they give its speed).
-    let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
+    // The model's own time: the turn's length less the time its tools ran. The turn's speed is measured over it.
+    const ended = Date.now();
+    const modelMs = Math.max(1, __agyTurn.durationMs - toolTime([...new Set(turn.tools.values())].map(tool => [tool.start, tool.end ?? ended])));
+    let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs, modelMs, ...(requestsOf(turn.requests, turn.usage) ? { requests: requestsOf(turn.requests, turn.usage) } : {}) } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
     const results = [...turn.tools.values()].map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
     catch { message = { ...message, stopReason: 'error', errorMessage: 'Could not save this turn to the Antigravity transcript.' }; }
@@ -884,6 +922,12 @@ export class AntigravityAdapter {
       // session/load replays history as session/update. The local Pi file is authoritative
       // for the UI, so only an active prompt can append/emit messages and tools.
       const turn = this.turn;
+      // The CLI says how full the context is each time a model request ends: that is where one request of the
+      // turn stops. (It also says so when a turn starts, with the figure it gave last: nothing ended then.)
+      if (update.sessionUpdate === 'usage_update' && Number.isSafeInteger(update.used) && update.used > 0) {
+        if (turn && params.sessionId === turn.sessionId && update.used !== this.usedBefore) this.#requestEnded(turn);
+        if (params.sessionId === this.sessionId || this.opening) this.usedBefore = update.used;
+      }
       if (!turn || params.sessionId !== turn.sessionId) return;
       switch (update.sessionUpdate) {
         case 'agent_message_chunk': this.#chunk(turn, 'text', update.content); break;

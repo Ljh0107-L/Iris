@@ -288,8 +288,10 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
   </>;
 }
 
-export function Spinner({ size = 14 }) {
-  return <span className="spinner" style={{ width: size, height: size }} />;
+// Something in progress: six dots, two across and three down, lit in turn as a terminal's spinner draws them.
+// spectrum: in the conversation, beside the app's own mark, each dot is one colour of the spectrum.
+export function Spinner({ size = 14, spectrum = false }) {
+  return <span className={`spinner ${spectrum ? 'spectrum' : ''}`} style={{ width: size, height: size }} aria-hidden="true"><i /><i /><i /><i /><i /><i /></span>;
 }
 
 export function Modal({ title, onClose, children, width = 640, footer, bare }) {

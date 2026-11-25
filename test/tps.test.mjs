@@ -1,7 +1,7 @@
 // Pure regressions: no app, model request or live relay required.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyEvent, emptyTranscript, estimateTokens, fromHistory, speedDisplay, speedReply, usageOf } from '../app/renderer/src/transcript.js';
+import { applyEvent, emptyTranscript, estimateTokens, fromHistory, requestReplies, speedDisplay, speedReply, usageOf } from '../app/renderer/src/transcript.js';
 
 const timing = overrides => ({ source: 'agent', complete: true, requestStart: 0, start: 800, first: 1000, last: 2000, end: 2500,
   chars: 400, deltas: 3, weight: 100, firstWeight: 10, thinkingChars: 0, ...overrides });
@@ -184,4 +184,32 @@ test('each short, burst and tool-only reply shows its own request TPS', () => {
   const other = { ...untimed, model: 'other-model' };
   assert.equal(speedReply([first, other]), other, 'never borrow another model\'s speed');
   assert.equal(speedReply([]), undefined);
+});
+
+test('Codex and Antigravity turns are counted one model request at a time, as Pi\'s and Claude Code\'s replies are', () => {
+  const tokens = (input, output) => ({ input, cacheRead: 0, cacheWrite: 0, output, reasoning: 0, totalTokens: input + output, cost: { total: 0 } });
+  // A Codex turn of a minute: a request of 2 s (60 tokens), a command of 50 s, then a request of 8 s (640 tokens).
+  const codex = { role: 'assistant', provider: 'codex', model: 'gpt-a', stopReason: 'stop', timestamp: 0, content: [{ type: 'text', text: 'done' }],
+    usage: tokens(900, 700), durationMs: 60000, modelMs: 10000, requests: [{ ms: 2000, ...tokens(400, 60) }, { ms: 8000, ...tokens(500, 640) }] };
+  const entries = requestReplies([{ role: 'user', content: 'go' }, codex]);
+  assert.equal(entries.length, 3, 'the message of yours, and one entry per request');
+  const [first, last] = entries.slice(1).map(entry => usageOf([entry]));
+  assert.deepEqual([first.tps, first.output, first.input], [30, 60, 400]);
+  assert.deepEqual([last.tps, last.output, last.input], [80, 640, 500], 'the last request: its own tokens over its own time');
+  assert.equal(speedDisplay(last).label, 'Request TPS');
+  // The turn as a whole (the total): every request, and never the command's fifty seconds.
+  assert.equal(usageOf([codex]).tps, 70); assert.equal(usageOf([codex]).output, 700);
+  // A turn saved before requests were listed: the model's time in the turn, else the turn's length.
+  const { requests, ...older } = codex;
+  assert.equal(usageOf([older]).tps, 70);
+  assert.equal(usageOf([{ ...older, modelMs: undefined }]).tps, 700 / 60);
+  assert.deepEqual(requestReplies([older]), [older]);
+  // Antigravity counts tokens per turn: a request's share of them is an estimate, and says so.
+  const agy = { ...codex, provider: 'antigravity', requests: [{ ms: 2000, output: 100, estimated: true }, { ms: 8000, output: 600, estimated: true }] };
+  const shared = usageOf([requestReplies([agy])[1]]);
+  assert.equal(shared.tps, 75); assert.equal(shared.output, 700);
+  assert.equal(speedDisplay(shared).label, 'Request TPS (estimated)');
+  // A request that wrote nothing countable has no speed; a stopped turn has none either.
+  assert.equal(usageOf([requestReplies([{ ...codex, requests: [{ ms: 500, ...tokens(10, 0) }] }])[0]]).tps, null);
+  assert.equal(usageOf([{ ...codex, stopReason: 'aborted' }]).tps, null);
 });

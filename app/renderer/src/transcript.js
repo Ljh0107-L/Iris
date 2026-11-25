@@ -115,6 +115,12 @@ function requestSpeed(m) {
 }
 function measureSpeed(m) {
   if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
+  // Codex and Antigravity save a turn as one reply that lists its model requests, each with its output tokens
+  // and how long it took. One of them (see requestReplies), or the reply as a whole: the sum of them.
+  const listed = m.__request ? [m.__request] : Array.isArray(m.requests) ? m.requests : [];
+  const timed = listed.filter(r => positive(r?.ms) && positive(r?.output));
+  if (timed.length) return { ms: timed.reduce((n, r) => n + r.ms, 0), out: timed.reduce((n, r) => n + r.output, 0), timeEstimated: false, estimated: timed.some(r => r.estimated) };
+  if (m.__request) return null;
   const t = m.__timing ?? {};
   const time = n => Number.isFinite(n) && n >= 0;
   const source = ['agent', 'relay'].includes(t.source) && t.complete === true &&
@@ -122,6 +128,9 @@ function measureSpeed(m) {
   let ms, timeEstimated = false;
   if (source && time(t.requestStart) && t.requestStart <= t.start) {
     ms = t.end - t.requestStart;
+  } else if (positive(m.modelMs)) {
+    // A whole turn of Codex or Antigravity without a list of its requests: its length less the time its tools ran.
+    ms = m.modelMs;
   } else if (positive(m.durationMs)) {
     ms = m.durationMs;
   } else if (source && time(m.timestamp) && m.timestamp <= t.start) {
@@ -240,6 +249,12 @@ export function speedTier(m) {
     : `The provider ran it at ${label} speed${billing}`;
   return { label, slower: true, title: `Asked for ${asked}. ${why}` };
 }
+// The replies the Usage card counts, one per model request. Pi and Claude Code save each request as a reply of
+// its own. Codex and Antigravity save a turn as one reply listing its requests: each becomes an entry here, with
+// its own tokens where the CLI counts them per request (Codex) and the turn's where it does not (Antigravity).
+export const requestReplies = messages => (messages ?? []).flatMap(m => m.role === 'assistant' && Array.isArray(m.requests) && m.requests.length
+  ? m.requests.map(request => ({ ...m, requests: undefined, __request: request, ...(Number.isFinite(request.input) ? { usage: { ...request, ms: undefined, estimated: undefined } } : {}) }))
+  : [m]);
 // Short and single-chunk replies have their own request TPS; no decode-window threshold applies.
 export const timedReply = m => usageOf([m]).tps != null;
 export function speedReply(replies) {
@@ -381,7 +396,7 @@ export function displayBlocks(t) {
     }
     turn = [];
   };
-  let ordinal = 0;
+  let ordinal = 0, unread = false;
   all.forEach((message, mi) => {
     const mk = historyKey(message);
     const ref = message.__history?.truncated ? message.__history.ref : null;
@@ -389,8 +404,12 @@ export function displayBlocks(t) {
     if (message.__history?.placeholder) {
       flush();
       blocks.push({ kind: 'pendingHistory', key: `pending:${mk}`, historyRef: ref });
+      // A reply too large to preview is read when it comes into view; until then its tool results have no call
+      // to belong to, and are not shown as steps of their own.
+      if (message.role === 'assistant') unread = true;
       return;
     }
+    if (message.role === 'assistant' || message.role === 'user') unread = false;
     if (message.role === 'assistant') turn.push(message);
     if (message.role === 'user') {
       flush();
@@ -447,6 +466,7 @@ export function displayBlocks(t) {
       flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? ''), historyRef: ref }); return;
     }
     if (message.role === 'toolResult' && message.__history && !declaredCalls.has(message.toolCallId)) {
+      if (unread) return;
       flush();
       blocks.push(message.toolName === 'report_progress'
         ? { kind: 'progress', key: `progress:${message.toolCallId}`, call: { id: message.toolCallId, name: message.toolName } }

@@ -109,6 +109,20 @@ test('commands show what was run and what Codex recognised, a patch is one diff 
   assert.deepEqual(saved.content.filter(b => b.type === 'toolCall').map(c => c.name), ['grep', 'read', 'edit', 'write', 'bash']);
 });
 
+test('speed is measured per model request: a turn lists its requests, and the time its commands ran is in none of them', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('prompt', { message: 'slow command' });
+  await a.next(settled);
+  const reply = lastReply(a.events);
+  assert.ok(reply.durationMs >= 400, `the turn took as long as its command (${reply.durationMs} ms)`);
+  assert.ok(reply.modelMs > 0 && reply.modelMs <= reply.durationMs - 350, `the command's 400 ms are not the model's (${reply.modelMs} of ${reply.durationMs} ms)`);
+  // Codex counts tokens as each model request ends: the turn lists its two requests, each with its own tokens
+  // and its own time. The request after the command begins when the command is done.
+  assert.equal(reply.usage.output, 20, 'the turn: both requests');
+  assert.deepEqual(reply.requests.map(r => [r.input, r.cacheRead, r.output, r.reasoning]), [[30, 20, 10, 4], [30, 20, 10, 4]]);
+  assert.ok(reply.requests.every(r => r.ms > 0 && r.ms < 250), `neither request includes the command's 400 ms (${reply.requests.map(r => r.ms)})`);
+});
+
 test('an agent Codex starts is a task with the agent’s brief, steps and answer; its plan is a Tasks card kept current', { timeout: 20000 }, async t => {
   const f = fixture(t), a = f.start();
   await a.rpc('get_state');

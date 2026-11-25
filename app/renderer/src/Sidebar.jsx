@@ -34,7 +34,7 @@ const SessionRow = memo(function SessionRow({ session, active }) {
   const agentName = engineLabel(session.engine);
   const indicator = asking ? <span className="row-dot attention" title={`${agentName} is waiting for your answer`} />
     : session.status === 'reconnecting' ? <span className="row-dot reconnecting" title="Reconnecting…" />
-    : session.streaming ? <Spinner size={11} />
+    : session.streaming ? <span className="row-dot working" title={`${agentName} is working`} />
     : session.status === 'error' || session.status === 'disconnected' ? <span className="row-dot error" title={session.statusMessage ?? 'Disconnected'} /> : null;
   return (
     <div className={`session-row ${active ? 'active' : ''} ${menu || pointMenu ? 'menu-open' : ''}`} onContextMenu={e => { e.preventDefault(); setMenu(false); setPointMenu(pointAnchor(e.clientX, e.clientY)); }}>

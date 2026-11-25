@@ -8,10 +8,12 @@ const log = process.env.FAKE_CODEX_LOG, signedIn = () => home ? fs.existsSync(ho
 const send = m => process.stdout.write(JSON.stringify(m) + '\\n');
 const note = (method, params) => { fs.appendFileSync(log, JSON.stringify({ method, params }) + '\\n'); };
 let cwd = '/w', turn = 0, active = null, total = { totalTokens: 1000, inputTokens: 900, cachedInputTokens: 500, cacheWriteInputTokens: 0, outputTokens: 100, reasoningOutputTokens: 0 };
+// Codex counts tokens when a model request ends: once per request of a turn.
+const count = t => { const last = { totalTokens: 60, inputTokens: 50, cachedInputTokens: 20, cacheWriteInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 4 };
+  total = Object.fromEntries(Object.entries(total).map(([k, v]) => [k, v + last[k]]));
+  send({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: t, tokenUsage: { total, last, modelContextWindow: 400000 } } }); };
 const finish = status => { if (!active) return; const t = active; active = null;
-  const last = { totalTokens: 60, inputTokens: 50, cachedInputTokens: 20, cacheWriteInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 4 };
-  for (const k of Object.keys(total)) total[k] += last[k];
-  send({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: t, tokenUsage: { total, last, modelContextWindow: 400000 } } });
+  count(t);
   send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: t, status, error: null } } }); };
 let buffer = '';
 process.stdin.on('data', d => { buffer += d; let i; while ((i = buffer.indexOf('\\n')) >= 0) { const line = buffer.slice(0, i); buffer = buffer.slice(i + 1); if (line.trim()) handle(JSON.parse(line)); } });
@@ -50,6 +52,13 @@ function handle(m) {
       send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
       const text = m.params.input.find(i => i.type === 'text').text;
       if (text.includes('wait')) return; // stays active until interrupted
+      // A command that takes a while: the model's own time in the turn is the turn's length less this.
+      // (As in the real CLI: the command starts while the request that asked for it is still being answered,
+      // the request is counted when it ends, and the next request begins when the command is done.)
+      if (text.includes('slow command')) { send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-slow', command: 'sleep 1', status: 'inProgress' } } });
+        setTimeout(() => count(active), 20);
+        return setTimeout(() => { send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-slow', command: 'sleep 1', status: 'completed', aggregatedOutput: '', exitCode: 0 } } });
+          send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-slow', delta: 'Slept.' } }); finish('completed'); }, 400); }
       // The model asks the person something (request_user_input): a server request, answered by question id.
       if (text.includes('ask')) return send({ id: 'input-1', method: 'item/tool/requestUserInput', params: { threadId: 'thread-1', turnId: active, itemId: 'ask-1', isBlocking: true, autoResolutionMs: null,
         questions: [{ id: 'colour', header: 'Colour', question: 'Which colour do you prefer?', isOther: true, isSecret: false, options: [{ label: 'Red', description: 'Warm' }, { label: 'Green', description: 'Calm' }] },

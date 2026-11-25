@@ -2403,14 +2403,37 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .tool-console .tool-running, .tool-running { padding: 0 2px; border-top: 0; font-size: var(--fs-sm); color: var(--muted); }
 .tool-command .prompt { color: var(--faint); user-select: none; }
 
-/* Something in progress: a thin arc turning on a faint ring, as in Claude Desktop, in place of the heavy
-   two-tone ring. It takes the colour of the text beside it. */
+/* Something in progress: six dots, two across and three down, lit in turn (the dots a terminal's spinner
+   draws). In the conversation each dot is one colour of the spectrum, as the app's mark beside it is. */
 .spinner {
-  border: 1.5px solid color-mix(in srgb, currentColor 20%, transparent);
-  border-top-color: currentColor;
-  color: var(--muted);
-  animation: spin .9s linear infinite;
+  display: inline-grid; grid-template: repeat(3, 1fr) / repeat(2, 1fr); place-items: center;
+  flex-shrink: 0; border: 0; border-radius: 0; animation: none; color: var(--muted); vertical-align: -2px;
 }
+.spinner i { width: 50%; aspect-ratio: 1; border-radius: 50%; background: currentColor; animation-duration: .9s; animation-timing-function: step-end; animation-iteration-count: infinite; }
+.spinner i:nth-child(1) { animation-name: dots-1; }
+.spinner i:nth-child(2) { animation-name: dots-4; }
+.spinner i:nth-child(3) { animation-name: dots-2; }
+.spinner i:nth-child(4) { animation-name: dots-5; }
+.spinner i:nth-child(5) { animation-name: dots-3; }
+.spinner i:nth-child(6) { animation-name: dots-6; }
+.spinner.spectrum i:nth-child(1) { background: #ff5e57; }
+.spinner.spectrum i:nth-child(2) { background: #ff9500; }
+.spinner.spectrum i:nth-child(3) { background: #ffcc00; }
+.spinner.spectrum i:nth-child(4) { background: #34c759; }
+.spinner.spectrum i:nth-child(5) { background: #0a84ff; }
+.spinner.spectrum i:nth-child(6) { background: #af52de; }
+/* Ten steps; the numbers are the dots of a braille cell (1 to 3 down the left, 4 to 6 down the right). */
+@keyframes dots-1 { 0% { opacity: 1; } 30% { opacity: 0; } 70% { opacity: 1; } }
+@keyframes dots-2 { 0% { opacity: 1; } 10% { opacity: 0; } 60% { opacity: 1; } }
+@keyframes dots-3 { 0% { opacity: 0; } 40% { opacity: 1; } }
+@keyframes dots-4 { 0% { opacity: 1; } 50% { opacity: 0; } 90% { opacity: 1; } }
+@keyframes dots-5 { 0% { opacity: 0; } 10% { opacity: 1; } 60% { opacity: 0; } }
+@keyframes dots-6 { 0% { opacity: 0; } 20% { opacity: 1; } 80% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .spinner i { animation-name: none; } }
+/* A command that is running: the app's mark, its cursor blinking. */
+.step-mark { flex-shrink: 0; }
+/* In the sidebar a conversation that is working has one quiet dot. */
+.row-dot.working { background: var(--muted); animation: pulse 1.6s ease-in-out infinite; }
 /* What a group's line says after its summary (how many failed, lines changed) stays on that line. */
 .group-failed, .group-diff-stats, .step-failed, .step-duration, .reasoning-tokens { white-space: nowrap; flex-shrink: 0; }
 

@@ -190,6 +190,19 @@ lines.on('line', line => {
       }
       // A turn that goes on until it is cancelled.
       if (text === 'long') { turn = { id: r.id, text }; chunk('Working on it'); break; }
+      // A command that takes a while: the model's own time in the turn is the turn's length less this.
+      // (As in the real CLI: it says how full the context is when a turn starts and each time a model request
+      // ends, and names a request's tool calls right after that.)
+      if (text === 'slow command') {
+        update('usage_update', { used: 0, size: 1000000 });
+        update('agent_thought_chunk', { content: { type: 'text', text: 'A command first, then the answer.' } });
+        update('usage_update', { used: 500, size: 1000000 });
+        update('tool_call', { toolCallId: 'slow-1', kind: 'execute', title: 'sleep 1', status: 'in_progress', rawInput: { CommandLine: 'sleep 1' } });
+        setTimeout(() => { update('tool_call_update', { toolCallId: 'slow-1', kind: 'execute', title: 'sleep 1', status: 'completed', rawInput: { CommandLine: 'sleep 1' } }); chunk('Slept, and here is a sentence about it.');
+          update('usage_update', { used: 560, size: 1000000 });
+          reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 40, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 10, totalTokens: 140 } }); }, 400);
+        break;
+      }
       // A turn with the token counts the CLI gives (cached tokens are counted apart from the input).
       if (text === 'counted') { chunk('Counted.'); reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 24, cachedReadTokens: 600, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 1624 } }); break; }
       if (text === 'simple' || bypass) { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }

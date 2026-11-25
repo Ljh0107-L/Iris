@@ -67,6 +67,13 @@ const urlLabel = url => {
   } catch { return String(url ?? '').slice(0, 96); }
 };
 
+// What marks a step that is under way. A command that is running is the app's own mark, a prompt with its
+// cursor blinking; anything else in progress (thinking, reading, an edit, a tool) is the dots. A step that is
+// done has no mark at all.
+const isCommand = call => ['bash', 'Bash', 'powershell', 'PowerShell'].includes(call?.name);
+function Running({ command = false }) {
+  return command ? <IrisMark size={15} className="step-mark" /> : <Spinner size={14} spectrum />;
+}
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 function describeCall(call) {
   if (call.__trace?.status === 'skipped') return { subject: `${call.name} — not executed`, title: 'Output token limit: incomplete tool arguments were not executed.' };
@@ -163,7 +170,7 @@ function ToolCall({ call, tool, bare = false }) {
       {!bare && <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && filePath) { openTarget(filePath); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {status === 'running' && <Spinner size={12} />}
+        {status === 'running' && <Running command={isCommand(call)} />}
         <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
           {filePath ? (
@@ -229,7 +236,7 @@ function ToolGroup({ calls, tools, live }) {
   return (
     <div className="tool-group">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
-        {running && <Spinner size={12} />}
+        {running && <Running command={calls.some(c => isCommand(c) && (tools[c.id]?.status === 'running' || (!tools[c.id] && live)))} />}
         <span>{toolSummary(calls)}</span>
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
@@ -269,7 +276,7 @@ function WorkNote({ item }) {
   return (
     <div className={`step thought ${open ? 'open' : ''}`}>
       <div className="step-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {item.streaming && <Spinner size={12} />}
+        {item.streaming && <Running />}
         <FadeText className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</FadeText>
         <ReasoningTokens tokens={item.tokens} />
         <Caret open={open} />
@@ -303,7 +310,7 @@ function WorkGroup({ items, tools, live }) {
       <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && onlyFile) { openTarget(onlyFile); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {running && <Spinner size={12} />}
+        {running && <Running command={!thinkingNow && calls.some(c => isCommand(c) && (tools[c.id]?.status === 'running' || (!tools[c.id] && live)))} />}
         <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
             : onlyFile && only?.verb ? <>
@@ -787,16 +794,16 @@ function WorkingRow({ session, transcript, sending = false }) {
     if (sent) {
       const setup = session.statusMessage || (isClaude && ccPrep?.status === 'preparing' ? ccPrep.message : null) || (envPrep?.status === 'preparing' ? envPrep.message : null);
       const elapsed = Math.max(0, Date.now() - sent);
-      return <div className="working"><IrisMark size={16} className="working-mark" />{elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}<span className="shimmer">{setup || 'Thinking'}</span></div>;
+      return <div className="working"><Spinner size={14} spectrum />{elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}<span className="shimmer">{setup || 'Thinking'}</span></div>;
     }
-    return <div className="working"><IrisMark size={16} className="working-mark" /><span className="shimmer">{phase}</span></div>;
+    return <div className="working"><Spinner size={14} spectrum /><span className="shimmer">{phase}</span></div>;
   }
   // Sent, and the agent has not started the turn yet: no timer from the previous turn.
   // The first message of a conversation is timed from when it was sent (the conversation was opened for it).
   const first = session ? firstSentAt(session.id) : null;
   if (sending && !session?.streaming) {
     const waited = first ? Date.now() - first : 0;
-    return <div className="working"><IrisMark size={16} className="working-mark" />{waited >= 1000 && <span className="working-meta">{seconds(waited)}</span>}<span className="shimmer">Thinking</span></div>;
+    return <div className="working"><Spinner size={14} spectrum />{waited >= 1000 && <span className="working-meta">{seconds(waited)}</span>}<span className="shimmer">Thinking</span></div>;
   }
   const messages = transcript.messages;
   let from = messages.length; while (from > 0 && messages[from - 1].role !== 'user') from--;
@@ -815,7 +822,7 @@ function WorkingRow({ session, transcript, sending = false }) {
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
   return (
     <div className="working">
-      <IrisMark size={16} className="working-mark" />
+      <Spinner size={14} spectrum />
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
       {tokens > 0 && <span className="working-meta">{formatTokens(tokens)} tokens</span>}
       <span className="shimmer">{session?.activityLabel ?? state}</span>
@@ -1060,7 +1067,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
           const render = () => {
           switch (block.kind) {
             case 'orphanResult': return <ToolCall key={block.key} call={{ id: block.message.toolCallId, name: block.message.toolName ?? 'tool', arguments: { description: 'Command result' } }} tool={transcript.tools[block.message.toolCallId]} />;
-            case 'pendingHistory': return null;
+            case 'pendingHistory': return <div key={block.key} className="block-notice">This part of the conversation is read when it comes into view.</div>;
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && !isCliEngine(session?.engine) && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} block={block} />;
