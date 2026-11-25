@@ -233,7 +233,7 @@ const api = {
   addConnections(ids, engine = store.settings.defaults.engine) {
     for (const id of ids) store.settings.environments[id] = { ...store.settings.environments[id], added: true, enabled: true };
     store.saveSettings();
-    if (!['antigravity', 'codex'].includes(engine)) for (const id of ids) manager.prepare(id).catch(() => {});
+    if (!isCliEngineId(engine)) for (const id of ids) manager.prepare(id).catch(() => {});
     return environments();
   },
   addManualConnection({ label, host, port, identityFile }, engine) {
@@ -343,8 +343,6 @@ const api = {
   cliSignInCancel: (environmentId, engine, account) => manager.cliSignInCancel(environmentId, { engine: cliEngineOf(engine), account }),
   cliCopySignIn: (environmentId, engine, account) => manager.cliCopySignIn(environmentId, { engine: cliEngineOf(engine), account }),
   cliAccountLast: (environmentId, engine, account) => manager.cliAccountLast(environmentId, cliEngineOf(engine), account),
-  cliThreads: (environmentId, engine) => manager.cliThreads(environmentId, cliEngineOf(engine)),
-  importCliThread: (environmentId, engine, thread) => manager.importCliThread(environmentId, cliEngineOf(engine), thread),
   cliUsageLast: (environmentId, engine) => cliEngineOf(engine) === 'antigravity' ? store.settings.cliUsage?.[environmentId] ?? null : null,
   // Antigravity's quota on this Mac, read from the CLI's own /usage screen (see antigravity-usage.mjs). It
   // takes some seconds, so a reading is kept for five minutes unless a fresh one is asked for.

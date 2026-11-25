@@ -3,7 +3,7 @@
 [![CI](https://github.com/Ljh0107-L/Iris/actions/workflows/ci.yml/badge.svg)](https://github.com/Ljh0107-L/Iris/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Codex** and **Antigravity** side by side, on this Mac and on any SSH host, with one interface for conversations, files, diffs and terminals.
+One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Codex**, **Antigravity** and **Cursor** side by side, on this Mac and on any SSH host, with one interface for conversations, files, diffs and terminals.
 
 ![A conversation in Iris with the file pane open](docs/screenshot.png)
 
@@ -15,7 +15,7 @@ One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Cod
 - **A workspace around the conversation.** File tree and previews (Markdown, source, images, PDF), Git review with staging and commit, a terminal in the conversation's folder on its machine, and search across all conversations (⌘K).
 - **Your keys stay on your Mac.** API keys are encrypted with a key held in the macOS Keychain. They are handed to an agent when it starts and are never written to a host's disk.
 
-## The four agents
+## The five agents
 
 | Agent | What it runs on | What you need |
 | --- | --- | --- |
@@ -23,13 +23,15 @@ One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Cod
 | [Claude Code](https://www.anthropic.com/claude-code) | Models served over the Anthropic Messages API, from Anthropic or a compatible endpoint | An API key, added in **Settings → Models** |
 | [Codex](https://github.com/openai/codex) | The models of your ChatGPT plan | The `codex` CLI, signed in with ChatGPT |
 | [Antigravity](https://antigravity.google) | The models of your Google account | The `agy` CLI, signed in with Google |
+| [Cursor](https://cursor.com/cli) | The models of your Cursor plan | The `cursor-agent` CLI, signed in with Cursor |
 
 Notes:
 
 - Pi ships with the app. Iris downloads a pinned, checksum-verified Claude Code build on first use; it does not use a `claude` already on your PATH or a Claude subscription signed in there.
-- **Settings → Subscriptions** shows, for each machine, whether Codex and Antigravity are installed and signed in, and can install either CLI and start its sign-in for you.
-- Codex and Antigravity keep their own credentials. Iris gives each its own data directory, so conversations you start in Iris do not appear in the history of the CLI you use in a terminal, and the other way round. Codex therefore asks you to sign in once inside Iris. Antigravity's Google sign-in is held in the Keychain by the CLI itself and is shared.
-- Codex and Antigravity run with full access: they run commands and edit files without asking. Pi and Claude Code also run without approval prompts, and can still ask you a question when they need a decision.
+- **Settings → Subscriptions** shows, for each machine, whether Codex, Antigravity and Cursor are installed and signed in, and can install each CLI and start its sign-in for you. Iris installs Cursor's CLI as `cursor-agent` only: its own installer also takes the name `agent`, which other tools use.
+- **Settings → Cursor** chooses which of Cursor's models its model menu lists; each model keeps its own settings (effort, context, speed) as menus beside it.
+- Codex, Antigravity and Cursor keep their own credentials. Iris gives each its own data directory, so conversations you start in Iris do not appear in the history of the CLI you use in a terminal, and the other way round. Codex therefore asks you to sign in once inside Iris. Antigravity's and Cursor's sign-ins are held in the Keychain by the CLIs themselves and are shared.
+- Codex, Antigravity and Cursor run with full access: they run commands and edit files without asking. Pi and Claude Code also run without approval prompts, and can still ask you a question when they need a decision.
 
 ## Install
 
@@ -81,7 +83,7 @@ build/         app icon, packaging hook, release scripts
 test/          unit tests, UI drivers, SSH integration suites, mock model servers
 ```
 
-- **Every agent speaks one protocol to the app.** Pi runs as `pi --mode rpc` with Iris's extension ([`agent/iris-bridge.js`](agent/iris-bridge.js)). Claude Code, Codex and Antigravity each run behind a small adapter that translates their own protocol into the same events ([`agent/iris-claude.mjs`](agent/iris-claude.mjs), [`agent/iris-codex.mjs`](agent/iris-codex.mjs), [`agent/iris-antigravity.mjs`](agent/iris-antigravity.mjs)), so the interface is the same for all four.
+- **Every agent speaks one protocol to the app.** Pi runs as `pi --mode rpc` with Iris's extension ([`agent/iris-bridge.js`](agent/iris-bridge.js)). Claude Code, Codex, Antigravity and Cursor each run behind a small adapter that translates their own protocol into the same events ([`agent/iris-claude.mjs`](agent/iris-claude.mjs), [`agent/iris-codex.mjs`](agent/iris-codex.mjs), [`agent/iris-antigravity.mjs`](agent/iris-antigravity.mjs), which [`agent/iris-cursor.mjs`](agent/iris-cursor.mjs) runs with Cursor's profile since both speak ACP), so the interface is the same for all five.
 - **A relay owns the agent processes.** On each machine a small daemon ([`agent/iris-relay.mjs`](agent/iris-relay.mjs)) starts the agents and buffers their events. The app attaches to it, directly on this Mac and through system OpenSSH on a host, which is why a dropped connection loses nothing.
 - **Hosts need nothing preinstalled except SSH.** On first use Iris installs Node, Pi and its own files under `~/.iris` on the host ([`app/main/remote-setup.mjs`](app/main/remote-setup.mjs)).
 - **Keys.** `secrets.json` in the app's data folder is AES-256-GCM encrypted; the key is in the login Keychain as "Iris Keys" ([`app/main/store.mjs`](app/main/store.mjs)). A key reaches an agent over a pipe (over the SSH channel for a host), never in a command line.
@@ -105,7 +107,7 @@ No test calls a real model: answers come from mock servers on localhost. See [CO
 
 ## Trademarks
 
-Iris is an independent open-source project. It is not affiliated with, endorsed by or sponsored by Anthropic, OpenAI or Google. Claude and Claude Code are trademarks of Anthropic; Codex and ChatGPT are trademarks of OpenAI; Antigravity and Gemini are trademarks of Google. Their icons in [`app/renderer/src/assets/engines`](app/renderer/src/assets/engines) belong to their owners and are used only to identify each product inside the app; they are not covered by this repository's licence.
+Iris is an independent open-source project. It is not affiliated with, endorsed by or sponsored by Anthropic, OpenAI, Google or Anysphere. Claude and Claude Code are trademarks of Anthropic; Codex and ChatGPT are trademarks of OpenAI; Antigravity and Gemini are trademarks of Google; Cursor is a trademark of Anysphere. Their icons in [`app/renderer/src/assets/engines`](app/renderer/src/assets/engines) belong to their owners and are used only to identify each product inside the app; they are not covered by this repository's licence.
 
 ## Licence
 

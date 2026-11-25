@@ -203,6 +203,15 @@ lines.on('line', line => {
           reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 40, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 10, totalTokens: 140 } }); }, 400);
         break;
       }
+      // A model that takes a while to begin: the thought comes whole, then the answer in pieces.
+      if (text === 'slow start') {
+        update('usage_update', { used: 0, size: 1000000 });
+        setTimeout(() => { update('agent_thought_chunk', { content: { type: 'text', text: 'A thought of forty characters, all at once' } }); chunk('The first half of it, ');
+          setTimeout(() => { chunk('and the second half.');
+            update('usage_update', { used: 300, size: 1000000 });
+            reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 40, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 10, totalTokens: 140 } }); }, 120); }, 150);
+        break;
+      }
       // A turn with the token counts the CLI gives (cached tokens are counted apart from the input).
       if (text === 'counted') { chunk('Counted.'); reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 24, cachedReadTokens: 600, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 1624 } }); break; }
       if (text === 'simple' || bypass) { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }

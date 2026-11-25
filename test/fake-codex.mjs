@@ -64,6 +64,9 @@ function handle(m) {
         setTimeout(() => count(active), 20);
         return setTimeout(() => { send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-slow', command: 'sleep 1', status: 'completed', aggregatedOutput: '', exitCode: 0 } } });
           send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-slow', delta: 'Slept.' } }); finish('completed'); }, 400); }
+      // A model that takes a while to begin writing: the reasoning item begins when it does, the answer follows.
+      if (text.includes('slow start')) return setTimeout(() => { send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'reasoning', id: 'rs-slow', summary: [], content: [] } } });
+        setTimeout(() => { send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-slow', delta: 'Written.' } }); finish('completed'); }, 120); }, 150);
       // The model asks the person something (request_user_input): a server request, answered by question id.
       if (text.includes('ask')) return send({ id: 'input-1', method: 'item/tool/requestUserInput', params: { threadId: 'thread-1', turnId: active, itemId: 'ask-1', isBlocking: true, autoResolutionMs: null,
         questions: [{ id: 'colour', header: 'Colour', question: 'Which colour do you prefer?', isOther: true, isSecret: false, options: [{ label: 'Red', description: 'Warm' }, { label: 'Green', description: 'Calm' }] },
@@ -127,27 +130,7 @@ function handle(m) {
       }, 20);
       return;
     }
-    // A conversation from Codex's own history, forked into this home from the file it is kept in: a new thread,
-    // with what was said in the old one.
-    case 'thread/fork': cwd = m.params.cwd ?? cwd;
-      if (m.params.threadId !== 'old-1' || m.params.path !== '/codex-home/sessions/rollout-old-1.jsonl') return send({ id: m.id, error: { code: -32000, message: 'no such thread' } });
-      return reply({ model: 'gpt-a', reasoningEffort: 'low', thread: { id: 'thread-1', model: 'gpt-a', turns: [
-        { id: 'old-turn-1', status: 'completed', startedAt: 1764000000, durationMs: 4200, error: null, items: [
-          { type: 'userMessage', id: 'u-1', clientId: null, content: [{ type: 'text', text: 'please fix the parser', text_elements: [] }] },
-          { type: 'reasoning', id: 'r-1', summary: ['Look at it first.'], content: [] },
-          { type: 'commandExecution', id: 'oc-1', command: "/bin/zsh -lc 'cat src/parser.js'", commandActions: [{ type: 'read', command: 'cat src/parser.js', name: 'parser.js', path: '/w/app/src/parser.js' }], status: 'completed', aggregatedOutput: 'parse()', exitCode: 0 },
-          { type: 'commandExecution', id: 'oc-2', command: "/bin/zsh -lc 'npm test'", commandActions: [{ type: 'unknown', command: 'npm test' }], status: 'failed', aggregatedOutput: '1 failing', exitCode: 1 },
-          { type: 'agentMessage', id: 'a-1', text: 'Fixed the parser.', phase: null }] },
-        { id: 'old-turn-2', status: 'interrupted', startedAt: 1764000100, durationMs: null, error: null, items: [
-          { type: 'userMessage', id: 'u-2', clientId: null, content: [{ type: 'text', text: 'and the tests', text_elements: [] }] },
-          { type: 'agentMessage', id: 'a-2', text: 'Starting on them.', phase: null }] }] } });
     case 'thread/revert': return reply({ thread: { id: m.params.threadId }, turnsBackwardsCursor: null, itemsBackwardsCursor: null });
-    // Codex's own history: two conversations, an agent's thread and one in which nothing was said.
-    case 'thread/list': return reply({ data: [
-      { id: 'old-1', name: 'Fix the parser', preview: 'please fix the parser', cwd: process.env.FAKE_CODEX_THREAD_CWD || '/w/app', updatedAt: 1764000300, ephemeral: false, parentThreadId: null, model: 'gpt-a', path: '/codex-home/sessions/rollout-old-1.jsonl' },
-      { id: 'old-agent', name: null, preview: 'check it', cwd: '/w/app', updatedAt: 1764000200, ephemeral: false, parentThreadId: 'old-1', model: 'gpt-a' },
-      { id: 'old-2', name: null, preview: 'what does this repo do?\\nand a second line', cwd: '/w/lib', updatedAt: 1764000100, ephemeral: false, parentThreadId: null, model: null },
-      { id: 'old-empty', name: null, preview: '', cwd: '/w/lib', updatedAt: 1764000000, ephemeral: false, parentThreadId: null, model: null }], nextCursor: null, backwardsCursor: null });
     case 'turn/steer': return m.params.expectedTurnId === active ? reply({}) : send({ id: m.id, error: { code: -32000, message: 'no active turn' } });
     case 'turn/interrupt': reply({}); return finish('interrupted');
     case 'thread/compact/start': reply({}); send({ method: 'thread/compacted', params: { threadId: 'thread-1', turnId: 'compact-1' } }); return send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'compact-1', status: 'completed', error: null } } });

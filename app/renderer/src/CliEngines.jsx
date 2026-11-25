@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
-import { MenuItem, MenuSection, Spinner, Trigger, envIcon, shortPath } from './ui.jsx';
+import { MenuItem, MenuSection, Spinner, Trigger, envIcon } from './ui.jsx';
 import { CliTerminal, watchTerminal } from './TerminalPanel.jsx';
 import { readSignInOutput } from './sign-in-output.js';
-import { api, askConfirm, cliDraftMenus, cliOptionsKey, draftCliAccount, importCliThread, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
+import { api, askConfirm, cliDraftMenus, cliOptionsKey, draftCliAccount, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, shownCliOptions, useStore } from './store.js';
 import { CLI_ENGINES, engineLabel, hasAccounts, readinessKey } from './engines.js';
 import './cli-engines.css';
 
@@ -37,47 +37,6 @@ export function CliSetup({ environmentId, engine = 'antigravity' }) {
   </button>;
 }
 
-// Conversations Codex keeps for itself (the Codex app, the terminal, an editor): pick one and it continues here,
-// with what was said in it. The list is read when the menu opens; the original conversation is left as it is.
-const ago = at => { const s = Math.max(0, (Date.now() - at) / 1000); return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : s < 86400 * 30 ? `${Math.round(s / 86400)}d ago` : new Date(at).toLocaleDateString(); };
-function CliHistoryMenu({ environmentId, engine, close }) {
-  const [threads, setThreads] = useState(null);
-  const [error, setError] = useState(null);
-  const [query, setQuery] = useState('');
-  const [opening, setOpening] = useState(null);
-  const home = useStore(s => s.home);
-  useEffect(() => {
-    let alive = true;
-    api('cliThreads', environmentId, engine).then(list => { if (alive) setThreads(list); }, e => { if (alive) setError(cleanError(e)); });
-    return () => { alive = false; };
-  }, [environmentId, engine]);
-  const open = async thread => {
-    setOpening(thread.id); setError(null);
-    try { await importCliThread(environmentId, engine, thread); close(); }
-    catch (e) { setError(cleanError(e)); setOpening(null); }
-  };
-  const shown = (threads ?? []).filter(thread => !query.trim() || `${thread.title}\n${thread.cwd}`.toLowerCase().includes(query.trim().toLowerCase()));
-  return <div className="cli-history">
-    <input className="cli-history-search" value={query} onChange={e => setQuery(e.target.value)} placeholder={`Search ${engineLabel(engine)} conversations`} autoFocus spellCheck={false} />
-    {error && <p className="cli-settings-error" role="alert">{error}</p>}
-    {!threads && !error && <div className="cli-history-note"><Spinner size={12} /> Reading {engineLabel(engine)}’s conversations…</div>}
-    {threads && !shown.length && <div className="cli-history-note">{threads.length ? 'None match.' : `${engineLabel(engine)} has no conversations of its own on this machine.`}</div>}
-    <div className="cli-history-list">
-      {shown.slice(0, 200).map(thread => <button key={thread.id} type="button" className="cli-history-row" disabled={!!opening} onClick={() => open(thread)} title={thread.cwd}>
-        <span className="cli-history-title">{thread.title}</span>
-        <span className="cli-history-meta">{opening === thread.id ? <Spinner size={11} /> : null}{shortPath(thread.cwd, home)}{thread.updatedAt ? ` · ${ago(thread.updatedAt)}` : ''}</span>
-      </button>)}
-    </div>
-  </div>;
-}
-export function CliHistory({ environmentId, engine }) {
-  if (engine !== 'codex') return null;
-  return <Trigger label="Conversations from Codex" title="Continue a conversation from the Codex app or the terminal" width={380} placement="top-start"
-    menu={close => <CliHistoryMenu environmentId={environmentId} engine={engine} close={close} />}>
-    <Icon name="clock" size={13} /><span>From Codex</span>
-  </Trigger>;
-}
-
 // An account by who it is (its e-mail address, once it has been checked), else by its name in Iris.
 const accountLabel = account => account.identity || account.name;
 // Which of the CLI's accounts a new conversation uses (Codex), once there is more than one.
@@ -99,12 +58,41 @@ export function DraftCliAccount({ engine }) {
   </Trigger>;
 }
 
+// One of a CLI's menus. A long one (Cursor lists dozens of models) can be searched, and scrolls inside the
+// window instead of running past it.
+const LONG_MENU = 12;
+function ChoiceMenu({ option, value, onPick, close }) {
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const long = option.options.length > LONG_MENU;
+  const listed = option.options.filter(choice => !q || `${choice.name} ${choice.value}`.toLowerCase().includes(q));
+  const items = listed.map(choice => <MenuItem key={choice.value} label={choice.name} title={choice.description} checked={choice.value === value}
+    onClick={() => { close(); onPick(choice.value); }} />);
+  if (!long) return <MenuSection title={option.name}>{items}</MenuSection>;
+  return <div className="model-menu">
+    <input className="menu-search" autoFocus placeholder={`Search ${option.name.toLowerCase()}s…`} value={query} onChange={e => setQuery(e.target.value)} />
+    <div className="menu-scroll cli-menu-scroll">
+      <MenuSection title={option.name}>{items}</MenuSection>
+      {!listed.length && <div className="menu-empty">No {option.name.toLowerCase()} matches.</div>}
+    </div>
+  </div>;
+}
+// What a menu shows when closed: its choice, and for a setting that is on or off (Cursor's Fast) or a size
+// (its Context), the setting's name too: "Fast Off" says what "Off" alone does not.
+const choiceLabel = (option, value) => {
+  const name = option.options.find(choice => choice.value === value)?.name;
+  if (!name) return option.name;
+  return option.category === 'model_config' && name !== option.name ? `${option.name} ${name}` : name;
+};
+
 // Model and effort for a conversation that has not started: the menus this CLI offered last time on this
 // machine, with the last choices selected. They are applied when the conversation opens.
 export function DraftCliOptions({ environmentId, engine }) {
   // The account the conversation will use: each has the menus of its own plan.
   const account = useStore(s => draftCliAccount(s.draft));
-  const options = useStore(s => s.cliDraftOptions[cliOptionsKey(engine, environmentId, account)]) ?? [];
+  const remembered = useStore(s => s.cliDraftOptions[cliOptionsKey(engine, environmentId, account)]);
+  const settings = useStore(s => s.settings);
+  const options = useMemo(() => shownCliOptions(engine, remembered ?? [], settings), [engine, remembered, settings]);
   const chosen = useStore(s => s.draft.cliChoices) ?? {};
   const ready = useStore(s => s.cliReadiness[readinessKey(engine, environmentId)] === 'ready');
   useEffect(() => { void loadCliOptions(environmentId, engine, account); }, [environmentId, engine, account]);
@@ -114,11 +102,8 @@ export function DraftCliOptions({ environmentId, engine }) {
     {cliDraftMenus(options, chosen).map(option => {
       const value = option.options.some(choice => choice.value === chosen[option.id]) ? chosen[option.id] : option.currentValue;
       return <Trigger key={option.id} label={option.name} title={option.name} width={280} placement="top-start"
-        menu={close => <MenuSection title={option.name}>
-          {option.options.map(choice => <MenuItem key={choice.value} label={choice.name} title={choice.description} checked={choice.value === value}
-            onClick={() => { close(); setDraft({ cliChoices: { ...(option.category === 'model' ? {} : chosen), [option.id]: choice.value } }); }} />)}
-        </MenuSection>}>
-        {option.category === 'speed' && <Icon name="bolt" size={13} />}<span className={option.category === 'model' ? 'strong' : undefined}>{option.options.find(choice => choice.value === value)?.name ?? option.name}</span><Icon name="chevronDown" size={11} />
+        menu={close => <ChoiceMenu option={option} value={value} close={close} onPick={picked => setDraft({ cliChoices: { ...(option.category === 'model' ? {} : chosen), [option.id]: picked } })} />}>
+        {option.category === 'speed' && <Icon name="bolt" size={13} />}<span className={option.category === 'model' ? 'strong' : undefined}>{choiceLabel(option, value)}</span><Icon name="chevronDown" size={11} />
       </Trigger>;
     })}
   </>;
@@ -138,7 +123,8 @@ export function SessionCliOptions({ session }) {
   const state = session.cli;
   // A choice made while the agent works is shown at once; it takes effect with the next message.
   const waiting = session.cliChoices ?? {};
-  const options = (state?.authRequired ? [] : state?.options ?? []).map(option => typeof waiting[option.id] === 'string' && option.options?.some(choice => choice.value === waiting[option.id]) ? { ...option, currentValue: waiting[option.id] } : option);
+  const settings = useStore(s => s.settings);
+  const options = shownCliOptions(session.engine, state?.authRequired ? [] : state?.options ?? [], settings).map(option => typeof waiting[option.id] === 'string' && option.options?.some(choice => choice.value === waiting[option.id]) ? { ...option, currentValue: waiting[option.id] } : option);
   const change = async (configId, value) => {
     setChanging(true);
     try { await api('cliSetConfig', session.id, configId, value); }
@@ -148,11 +134,8 @@ export function SessionCliOptions({ session }) {
   return <>
     {options.map(option => <Trigger key={option.id} label={option.name} title={option.name} width={280} placement="top-start"
       disabled={changing || session.status !== 'connected'}
-      menu={close => <MenuSection title={option.name}>
-        {option.options.map(choice => <MenuItem key={choice.value} label={choice.name} title={choice.description} checked={choice.value === option.currentValue}
-          onClick={() => { close(); if (choice.value !== option.currentValue) void change(option.id, choice.value); }} />)}
-      </MenuSection>}>
-      {option.category === 'speed' && <Icon name="bolt" size={13} />}<span className={option.category === 'model' ? 'strong' : undefined}>{option.options.find(choice => choice.value === option.currentValue)?.name ?? option.name}</span><Icon name="chevronDown" size={11} />
+      menu={close => <ChoiceMenu option={option} value={option.currentValue} close={close} onPick={picked => { if (picked !== option.currentValue) void change(option.id, picked); }} />}>
+      {option.category === 'speed' && <Icon name="bolt" size={13} />}<span className={option.category === 'model' ? 'strong' : undefined}>{choiceLabel(option, option.currentValue)}</span><Icon name="chevronDown" size={11} />
     </Trigger>)}
     <SessionAccount session={session} />
   </>;
@@ -184,7 +167,11 @@ function InstallProgress({ progress }) {
 // "pro" → "Pro", "promax" → "Pro Max": plan ids as the provider names them, made readable.
 const planName = plan => plan ? `${String(plan).replace(/^(pro|plus|team|free|business|enterprise|edu)(?=.)/i, '$1 ').replace(/\b\w/g, c => c.toUpperCase())} plan` : null;
 
-const SUBSCRIPTION = { codex: 'ChatGPT plan', antigravity: 'Google account' };
+const SUBSCRIPTION = { codex: 'ChatGPT plan', antigravity: 'Google account', cursor: 'Cursor plan' };
+const BRAND = { codex: 'ChatGPT', antigravity: 'Google', cursor: 'Cursor' };
+// How each CLI is installed when Iris does not do it itself: in a terminal here, where it can be watched.
+const TERMINAL_INSTALL = { codex: <>Installing with <code>npm install -g @openai/codex</code></>, cursor: <>Installing Cursor’s CLI from <code>cursor.com</code></> };
+const TERMINAL_INSTALL_TITLE = { codex: 'Runs npm install -g @openai/codex in a terminal here', cursor: 'Downloads Cursor’s own CLI into ~/.local/share/cursor-agent and links it as cursor-agent (an existing agent command is left alone)' };
 // How much of one limit is used, as a bar: "5-hour limit · 42% used · resets 3:00 PM".
 function LimitBar({ limit }) {
   const span = limit.label ?? `${limit.windowMinutes >= 10080 ? 'Weekly' : limit.windowMinutes >= 1440 ? 'Daily' : limit.windowMinutes ? `${Math.round(limit.windowMinutes / 60)}-hour` : 'Usage'} limit`;
@@ -338,7 +325,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   const who = signedIn ? (account.identity || usage?.identity || hostIdentity || profile?.name || 'Signed in') : profile?.name;
   const plan = signedIn ? planName(account.plan) : null;
   const limits = signedIn ? (account.limits?.length ? account.limits : usage?.limits ?? []) : [];
-  const brand = antigravity ? 'Google' : 'ChatGPT';
+  const brand = BRAND[engine] ?? 'ChatGPT';
   return <div className="sub-account">
     <div className="sub-account-row">
       {signedIn ? <span className="sub-state ok"><span className="sub-dot" /><span className="sub-who" title={who}>{who}</span></span>
@@ -350,12 +337,12 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
           {signedIn ? (profile ? <button type="button" className="button small" title="Sign out and remove this account from Iris" onClick={onRemove}>Remove</button>
               : !antigravity && <button type="button" className="button small" disabled={checking} onClick={signOut}>Sign out</button>)
             : <>
-              {!local && !antigravity && <button type="button" className="button small primary" disabled={checking || copying || terminal === 'login'} title="Copies this Mac’s Codex sign-in to the host over SSH" onClick={copySignIn}>{copying ? 'Copying…' : 'Use this Mac’s sign-in'}</button>}
-              <button type="button" className={`button small ${!local && !antigravity ? '' : 'primary'}`} disabled={terminal === 'login' || hostSignIn || checking || copying} onClick={signIn}>{!local && !antigravity ? 'Sign in on the host' : `Sign in with ${brand}`}</button>
+              {!local && engine === 'codex' && <button type="button" className="button small primary" disabled={checking || copying || terminal === 'login'} title="Copies this Mac’s Codex sign-in to the host over SSH" onClick={copySignIn}>{copying ? 'Copying…' : 'Use this Mac’s sign-in'}</button>}
+              <button type="button" className={`button small ${!local && engine === 'codex' ? '' : 'primary'}`} disabled={terminal === 'login' || hostSignIn || checking || copying} onClick={signIn}>{!local && !antigravity ? 'Sign in on the host' : `Sign in with ${brand}`}</button>
               {profile && <button type="button" className="button small ghost" onClick={onRemove}>Remove</button>}
             </>}
         </> : account?.installed === false ? (antigravity ? <button type="button" className="button small primary" onClick={install}>Install</button>
-          : <button type="button" className="button small primary" disabled={terminal === 'install'} title="Runs npm install -g @openai/codex in a terminal here" onClick={() => setTerminal('install')}>Install</button>)
+          : <button type="button" className="button small primary" disabled={terminal === 'install'} title={TERMINAL_INSTALL_TITLE[engine]} onClick={() => setTerminal('install')}>Install</button>)
           : !checking && <button type="button" className="button small" onClick={check}>Retry</button>}
       </div>}
     </div>
@@ -383,7 +370,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     {message && !installing && <p className="cli-settings-error" role="alert">{message}</p>}
     {terminal && <div className="cli-terminal-card">
       <div className="cli-terminal-head">
-        <span>{terminal === 'login' ? `Sign in with ${brand}` : <>Installing with <code>npm install -g @openai/codex</code></>}</span>
+        <span>{terminal === 'login' ? `Sign in with ${brand}` : TERMINAL_INSTALL[engine]}</span>
         <div className="sub-actions">
           {terminal === 'login' && terminalLink && <>
             <button type="button" className="button small primary" onClick={() => api('openExternal', terminalLink)}>Open sign-in page</button>
@@ -525,11 +512,91 @@ export function SubscriptionSettings() {
         <Icon name={envIcon(current)} size={14} /><span>{current?.label ?? 'This computer'}</span><Icon name="chevronDown" size={12} />
       </Trigger>
     </div>}
-    {['codex', 'antigravity'].filter(engine => CLI_ENGINES[engine]).map(engine => <SubscriptionCard key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine}>
+    {['codex', 'antigravity', 'cursor'].filter(engine => CLI_ENGINES[engine]).map(engine => <SubscriptionCard key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine}>
       {engine === 'antigravity' && <label className="sub-option">
         <span>Ask before running commands and editing files</span>
         <button type="button" role="switch" aria-checked={!bypass} aria-label="Antigravity: ask before running tools" className={`switch ${!bypass ? 'on' : ''}`} disabled={saving} onClick={toggle}><span /></button>
       </label>}
     </SubscriptionCard>)}
+  </section>;
+}
+
+// Settings → Cursor: which of Cursor's models its model menu lists. Cursor offers dozens, each with settings of
+// its own (effort, context, speed); the ones switched off here stay out of the menu of every Cursor
+// conversation (a conversation's own model is listed all the same). Until a choice is made, all of them are.
+export function CursorSettings() {
+  const shown = useStore(s => s.settings?.defaults?.cursorModels);
+  const readiness = useStore(s => s.cliReadiness[readinessKey('cursor', 'local')]);
+  const remembered = useStore(s => s.cliDraftOptions[cliOptionsKey('cursor', 'local')]);
+  const [query, setQuery] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => { void refreshCliReadiness('local', 'cursor'); void loadCliOptions('local', 'cursor'); }, []);
+  const models = (remembered ?? []).find(o => o.category === 'model')?.options ?? [];
+  const on = value => !Array.isArray(shown) || shown.includes(value);
+  const count = models.filter(choice => on(choice.value)).length;
+  const save = async next => {
+    setError(null);
+    try { setSettings(await api('updateDefaults', { cursorModels: next })); }
+    catch (err) { setError(cleanError(err)); }
+  };
+  const toggle = value => {
+    const current = Array.isArray(shown) ? shown.filter(v => models.some(choice => choice.value === v)) : models.map(choice => choice.value);
+    const next = on(value) ? current.filter(v => v !== value) : [...current, value];
+    void save(models.every(choice => next.includes(choice.value)) ? null : next);
+  };
+  const refresh = async () => {
+    setRefreshing(true); setError(null);
+    try { await api('cliAccountStatus', 'local', false, 'cursor', null); await loadCliOptions('local', 'cursor'); }
+    catch (err) { setError(cleanError(err)); }
+    finally { setRefreshing(false); }
+  };
+  const q = query.trim().toLowerCase();
+  const listed = models.filter(choice => !q || `${choice.name} ${choice.value}`.toLowerCase().includes(q));
+  if (!models.length) return <section className="section" aria-label="Cursor models">
+    <ul className="rows"><li className="row-card setting-rows"><div className="row-head">
+      <div className="setting-text">
+        <span className="row-name">{readiness === 'missing' ? 'Cursor CLI is not installed on this Mac' : readiness === 'signedOut' ? 'Not signed in to Cursor' : 'Reading Cursor’s models…'}</span>
+        <span className="row-meta">{readiness === 'missing' || readiness === 'signedOut' ? 'Install it and sign in in Settings → Subscriptions; its models are listed here then.' : 'Cursor lists the models of your plan once it is signed in.'}</span>
+      </div>
+      <div className="row-actions">
+        {readiness === 'missing' || readiness === 'signedOut'
+          ? <button type="button" className="button small primary" onClick={() => openSettings(true, 'subscriptions', { environmentId: 'local' })}>Open Subscriptions</button>
+          : <button type="button" className="button small" disabled={refreshing} onClick={refresh}>{refreshing ? <Spinner size={12} /> : 'Refresh'}</button>}
+      </div>
+    </div></li></ul>
+    {error && <p className="cli-settings-error" role="alert">{error}</p>}
+  </section>;
+  return <section className="section" aria-label="Cursor models">
+    <div className="section-head">
+      <div>
+        <h2 className="section-title">Models in the menu</h2>
+        <p className="section-intro">{count === models.length ? `All ${models.length} models of your plan are listed.` : `${count} of ${models.length} models are listed.`} Switch off the ones you don’t use.</p>
+      </div>
+      <div className="row-actions">
+        <button type="button" className="tool-button" aria-label="Refresh the list" title="Read the list again from Cursor" disabled={refreshing} onClick={refresh}>{refreshing ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>
+        <button type="button" className="button small" disabled={count === models.length} onClick={() => save(null)}>Show all</button>
+        <button type="button" className="button small" disabled={count === 0} onClick={() => save([])}>Hide all</button>
+      </div>
+    </div>
+    <input className="cursor-model-search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search models" aria-label="Search models" spellCheck={false} />
+    <ul className="rows">
+      <li className="row-card setting-rows cursor-models">
+        {listed.map(choice => {
+          const settings = (choice.sub ?? []).map(option => option.name);
+          return <div key={choice.value} className="row-head">
+            <div className="setting-text">
+              <span className="row-name" title={choice.value}>{choice.name}</span>
+              <span className="row-meta">{settings.length ? settings.join(' · ') : 'No settings of its own'}</span>
+            </div>
+            <div className="row-actions">
+              <button type="button" role="switch" aria-checked={on(choice.value)} aria-label={`List ${choice.name} in the model menu`} className={`switch ${on(choice.value) ? 'on' : ''}`} onClick={() => toggle(choice.value)}><span /></button>
+            </div>
+          </div>;
+        })}
+        {!listed.length && <div className="row-head"><span className="row-meta">No model matches “{query.trim()}”.</span></div>}
+      </li>
+    </ul>
+    {error && <p className="cli-settings-error" role="alert">{error}</p>}
   </section>;
 }

@@ -106,12 +106,58 @@ export function failureTitle(failure, { cli = false } = {}) {
 
 const nonnegative = n => Number.isFinite(n) && n >= 0 ? n : 0;
 const positive = n => Number.isFinite(n) && n > 0;
-const speedCache = new WeakMap(); // finished message -> its request speed; replaced objects (timing restored, entry reloaded) are new keys
+const speedCache = new WeakMap(); // finished message -> its speed; replaced objects (timing restored, entry reloaded) are new keys
 function requestSpeed(m) {
   if (speedCache.has(m)) return speedCache.get(m);
   const speed = measureSpeed(m);
   if (m.stopReason !== 'pending') speedCache.set(m, speed);
   return speed;
+}
+// Speed is output over the time the model was writing: from its first token to its last ("decode"). The wait
+// for the first token (connecting, queueing, reading the prompt) is not in it: a fast model behind a slow start
+// is still a fast model. Where no first token was seen (a reply that came in one piece, older history), the
+// whole request is the only time there is, and the figure is marked as including the wait ("request").
+const WINDOW_MS = 20; // a shorter window measures the timer and the network, not the model
+const time = n => Number.isFinite(n) && n >= 0;
+// The part of a window (root or answer, as the bridge samples them) in which output was seen arriving: what
+// the first chunk carried was written before the window began, so it is not counted.
+function sampled(w, tokens, end) {
+  if (!w || !time(w.first)) return null;
+  const last = time(w.last) && w.last >= w.first ? w.last : end;
+  if (!time(last)) return null;
+  const lead = positive(w.weight) && Number.isFinite(w.firstWeight) ? Math.min(1, Math.max(0, w.firstWeight / w.weight)) : 0;
+  const ms = last - w.first, out = tokens * (1 - lead);
+  return ms >= WINDOW_MS && out >= 1 && (w.deltas == null || w.deltas >= 2) ? { ms, out } : null;
+}
+function decodeWindow(m, out) {
+  const t = m.__timing ?? {};
+  if (!['agent', 'relay'].includes(t.source) || t.complete !== true || !time(t.start) || !time(t.end) || t.end < t.start) return null;
+  // A window is part of its request: timing that says otherwise is not believed.
+  const within = w => w && time(w.first) && w.first >= t.start && (!time(w.last) || w.last <= t.end) ? w : null;
+  const reasoning = Number.isFinite(m.usage?.reasoning) && m.usage.reasoning > 0 ? Math.min(m.usage.reasoning, out) : 0;
+  const thinkingStreamed = Number.isFinite(t.thinkingChars) ? t.thinkingChars > 0 : (Array.isArray(m.content) && m.content.some(b => b?.type === 'thinking' && b.thinking));
+  // Reasoning the provider kept to itself (hidden, or shown as a summary) was not seen being written.
+  if (m.__usageProvenance?.thinking === 'summary' || (reasoning > 0 && !thinkingStreamed)) {
+    // The provider said when it began to write (its first output item): everything, reasoning included, was
+    // written from then on.
+    if (time(t.genStart) && (!time(t.first) || t.genStart <= t.first)) {
+      const whole = sampled(within({ first: t.genStart, last: t.last }), out, t.end);
+      if (whole) return whole;
+    }
+    // Else the answer alone is measured, without the reasoning tokens: as counted by the provider, or, when it
+    // does not count them apart, as estimated from what was streamed.
+    const usable = within(t.answer) && !t.answer.interrupted;
+    if (reasoning > 0) { const answer = usable ? sampled(t.answer, out - reasoning, t.end) : null; if (answer || !thinkingStreamed) return answer; }
+    else if (usable && positive(t.answer.weight)) { const answer = sampled(t.answer, t.answer.weight, t.end); if (answer) return { ...answer, estimated: true }; }
+  }
+  return sampled(within(t), out, t.end);
+}
+// One model request of a Codex or Antigravity turn: how long it took, how much of that was the wait for its
+// first output (wait), and the share of its output that was already there by then (lead).
+function requestWindow(r) {
+  const lead = Number.isFinite(r.lead) ? Math.min(1, Math.max(0, r.lead)) : 0;
+  const ms = time(r.wait) ? r.ms - r.wait : null, out = r.output * (1 - lead);
+  return ms != null && ms >= WINDOW_MS && out >= 1 ? { ms, out, basis: 'decode' } : { ms: r.ms, out: r.output, basis: 'request' };
 }
 function measureSpeed(m) {
   if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
@@ -119,10 +165,28 @@ function measureSpeed(m) {
   // and how long it took. One of them (see requestReplies), or the reply as a whole: the sum of them.
   const listed = m.__request ? [m.__request] : Array.isArray(m.requests) ? m.requests : [];
   const timed = listed.filter(r => positive(r?.ms) && positive(r?.output));
-  if (timed.length) return { ms: timed.reduce((n, r) => n + r.ms, 0), out: timed.reduce((n, r) => n + r.output, 0), timeEstimated: false, estimated: timed.some(r => r.estimated) };
+  if (timed.length) {
+    const windows = timed.map(requestWindow), basis = windows.some(w => w.basis === 'decode') ? 'decode' : 'request';
+    const used = windows.filter(w => w.basis === basis);
+    return { ms: used.reduce((n, w) => n + w.ms, 0), out: used.reduce((n, w) => n + w.out, 0), timeEstimated: false, estimated: timed.some(r => r.estimated), basis };
+  }
   if (m.__request) return null;
+  const blocks = Array.isArray(m.content) ? m.content : [];
+  const answer = typeof m.content === 'string' ? m.content : blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n');
+  const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
+  const tools = blocks.filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
+  const counted = estimateTokens([answer, tools].filter(Boolean).join('\n')) +
+    (nonnegative(m.usage?.reasoning) || estimateTokens(thinking));
+  const reported = m.usage?.output;
+  // Retain the existing gateway-placeholder fallback without rewriting provider usage. Reported
+  // output already contains reasoning: never subtract it or add it a second time.
+  const inferTokens = !positive(reported) || (reported === 1 && counted >= 20);
+  const out = inferTokens ? counted : reported;
+  if (!positive(out)) return null;
+  const decode = decodeWindow(m, out);
+  if (decode) return { ms: decode.ms, out: decode.out, timeEstimated: false, estimated: inferTokens || decode.estimated === true, basis: 'decode' };
+  // No first token to measure from: the request as a whole, wait included.
   const t = m.__timing ?? {};
-  const time = n => Number.isFinite(n) && n >= 0;
   const source = ['agent', 'relay'].includes(t.source) && t.complete === true &&
     time(t.start) && time(t.end) && t.end >= t.start;
   let ms, timeEstimated = false;
@@ -139,19 +203,7 @@ function measureSpeed(m) {
     ms = t.end - m.timestamp;
     timeEstimated = true;
   }
-  if (!positive(ms)) return null;
-  const blocks = Array.isArray(m.content) ? m.content : [];
-  const answer = typeof m.content === 'string' ? m.content : blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n');
-  const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
-  const tools = blocks.filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
-  const counted = estimateTokens([answer, tools].filter(Boolean).join('\n')) +
-    (nonnegative(m.usage?.reasoning) || estimateTokens(thinking));
-  const reported = m.usage?.output;
-  // Retain the existing gateway-placeholder fallback without rewriting provider usage. Reported
-  // output already contains reasoning: never subtract it or add it a second time.
-  const inferTokens = !positive(reported) || (reported === 1 && counted >= 20);
-  const out = inferTokens ? counted : reported;
-  return positive(out) ? { ms, out, timeEstimated, estimated: inferTokens } : null;
+  return positive(ms) ? { ms, out, timeEstimated, estimated: inferTokens, basis: 'request' } : null;
 }
 export function usageOf(messages) {
   const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedTimeEstimated: false, speedBasis: null, speedScope: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
@@ -194,16 +246,18 @@ export function usageOf(messages) {
       u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end);
     }
   }
-  // Sum complete per-call token counts and request durations, never inter-call/tool gaps or
-  // averages of per-call TPS. Hidden reasoning and answer-only streams now share this scope.
+  // Sum per-call token counts and times, never inter-call/tool gaps or averages of per-call TPS. Calls measured
+  // from their first token are not mixed with calls that could only be timed as a whole: the former are used
+  // when there are any.
   if (speeds.length) {
-    u.speedBasis = 'request'; u.speedScope = 'all';
-    u.speedPartial = speeds.length < speedCalls;
-    for (const g of speeds) {
+    u.speedBasis = speeds.some(g => g.basis === 'decode') ? 'decode' : 'request'; u.speedScope = 'all';
+    const used = speeds.filter(g => g.basis === u.speedBasis);
+    u.speedPartial = used.length < speedCalls;
+    for (const g of used) {
       u.genMs += g.ms; u.genOut += g.out;
       u.speedTokensEstimated ||= g.estimated; u.speedTimeEstimated ||= g.timeEstimated;
     }
-    u.speedEstimated = true; // elapsed time observed by the client, not server decode-only TPS
+    u.speedEstimated = true; // times observed by the client, not counted by the provider
   }
   const prompt = u.input + u.cacheRead + u.cacheWrite;
   return { ...u, prompt, cacheHit: prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start != null && u.end != null ? u.end - u.start : null };
@@ -212,25 +266,28 @@ export function usageOf(messages) {
 // ACP exposes neither per-request timing nor output token counts. Turn speed
 // is a separate estimate and must not contribute to Pi's token totals or TPS.
 export function antigravityTurnSpeed(message) {
-  if (message?.provider !== 'antigravity' || !['stop', 'length'].includes(message.stopReason)) return null;
+  if (!['antigravity', 'cursor'].includes(message?.provider) || !['stop', 'length'].includes(message.stopReason)) return null;
   const { durationMs, tokenEstimate } = message.__agyTurn ?? {};
   if (!positive(durationMs) || !positive(tokenEstimate)) return null;
   const tps = tokenEstimate * 1000 / durationMs;
   return Number.isFinite(tps) ? { tps, durationMs } : null;
 }
 
-// Earlier replies stand in only when the last reply has no usable output or request duration.
+// Earlier replies stand in when the last reply has no usable output or timing, or was too short to time.
 export function speedDisplay(usage, { earlier = false } = {}) {
-  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or usable request timing.' };
+  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or usable timing.' };
+  const decode = usage.speedBasis === 'decode', estimated = usage.speedTokensEstimated || usage.speedTimeEstimated;
   return {
     value: `${usage.speedEstimated ? '~' : ''}${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
-    label: usage.speedTokensEstimated || usage.speedTimeEstimated ? 'Request TPS (estimated)' : 'Request TPS',
-    title: 'Output tokens ÷ request start-to-completion time, including time to first token (TTFT) and completion trailers. Excludes tool execution and gaps between calls. Includes the first chunk and reasoning once, as part of output; not server decode-only TPS.'
+    label: `${decode ? 'Output TPS' : 'Request TPS'}${estimated ? ' (estimated)' : ''}`,
+    title: (decode
+      ? 'Output tokens ÷ the time from the first token to the last. The wait for the first token (TTFT) is not counted, nor tool execution or gaps between requests. Reasoning the provider did not stream is left out with the time it took.'
+      : 'Output tokens ÷ the whole request, from sending it to its end: this reply gave no first-token time to measure from, so the wait for the first token is included. Excludes tool execution and gaps between requests.')
       + (usage.speedTokensEstimated ? ' Token counts are estimated from available output.' : ' Uses provider-reported output counts.')
       + (usage.speedTimeEstimated ? ' Older history uses the source message timestamp as an approximate request start.' : '')
       + ' Provider token totals remain unchanged.'
       + (usage.speedPartial ? ' Only calls with usable timing and output are included.' : '')
-      + (earlier ? ' From an earlier reply of this model: the last one has no usable output or request timing.' : ''),
+      + (earlier ? ' From an earlier reply of this model: the last one has no usable output or timing, or was too short to time.' : ''),
   };
 }
 
@@ -271,15 +328,18 @@ export function turnThoughts(t) {
 // its own. Codex and Antigravity save a turn as one reply listing its requests: each becomes an entry here, with
 // its own tokens where the CLI counts them per request (Codex) and the turn's where it does not (Antigravity).
 export const requestReplies = messages => (messages ?? []).flatMap(m => m.role === 'assistant' && Array.isArray(m.requests) && m.requests.length
-  ? m.requests.map(request => ({ ...m, requests: undefined, __request: request, ...(Number.isFinite(request.input) ? { usage: { ...request, ms: undefined, estimated: undefined } } : {}) }))
+  ? m.requests.map(request => ({ ...m, requests: undefined, __request: request, ...(Number.isFinite(request.input) ? { usage: { ...request, ms: undefined, wait: undefined, lead: undefined, estimated: undefined } } : {}) }))
   : [m]);
-// Short and single-chunk replies have their own request TPS; no decode-window threshold applies.
 export const timedReply = m => usageOf([m]).tps != null;
+// The reply whose speed is shown: the last one when it was timed from its first token; else the last one of
+// the same model that was; else the last with any speed at all (a whole request, wait included).
 export function speedReply(replies) {
   const last = replies.at(-1);
-  if (!last || timedReply(last)) return last;
-  return replies.findLast(m => m.provider === last.provider &&
-    (m.responseModel ?? m.model) === (last.responseModel ?? last.model) && timedReply(m)) ?? last;
+  if (!last) return last;
+  const decoded = m => usageOf([m]).speedBasis === 'decode';
+  if (decoded(last)) return last;
+  const same = m => m.provider === last.provider && (m.responseModel ?? m.model) === (last.responseModel ?? last.model);
+  return replies.findLast(m => same(m) && decoded(m)) ?? (timedReply(last) ? last : replies.findLast(m => same(m) && timedReply(m)) ?? last);
 }
 // Usage per finished turn (user message → the replies that followed), oldest first.
 export function turnUsages(messages) {

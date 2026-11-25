@@ -2,6 +2,33 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.11
+
+**New**
+
+- **Cursor joins as a fifth agent.** It runs on your Cursor plan through Cursor's own CLI (`cursor-agent`), on this Mac and on SSH hosts, with its commands, file reads and edits, task list, agents and questions shown as the other agents' are. **Settings → Subscriptions** installs the CLI (as `cursor-agent` only, leaving an `agent` command of another tool alone) and signs it in: Iris opens Cursor's page in your browser. Conversations you start in Iris stay in Iris's own Cursor directory, apart from your own Cursor CLI.
+- **Settings → Cursor** chooses which of Cursor's models its model menu lists (it offers dozens). Each model keeps its own settings, effort, context and Fast, as menus beside it, and a long menu can be searched.
+- **Each Cursor conversation keeps its own model.** Cursor holds one model choice for all of its conversations; Iris sets a conversation's own again before each message, so changing it in one conversation does not change another.
+
+**Changed**
+
+- **Speed no longer counts the wait for the first token.** The Usage card shows output tokens over the time from the first token to the last (**Output TPS**), for every agent: Pi, Claude Code, Codex (from when a request begins to write), Antigravity (less a thought that arrives whole) and Cursor. Reasoning the provider did not stream is left out with the time it took. A reply too short to measure that way is timed as a whole request and says so (**Request TPS**). Cursor counts no tokens, so its speed is estimated from what it wrote.
+- **Speed shows while a Codex, Antigravity or Cursor turn is still going**, one model request at a time, instead of only when the turn ends.
+- **Settings → Translation looks like the rest of Settings**: rows with the app's own menus for the language and the model (the same model menu as a conversation's), and no coloured border.
+
+**Fixed**
+
+- **Translating thinking no longer falls behind a fast model.** Paragraphs were translated one after another, so with a model writing thousands of tokens a second the thought on screen waited behind ones long gone. Only the thought on screen is translated now, a few paragraphs at a time; paragraphs of a thought that has left are dropped.
+- Escape closes an open menu in Settings without closing Settings.
+
+**Removed**
+
+- **From Codex** (continuing a conversation of the Codex app or terminal in Iris) is gone.
+
+**Known limits:** Cursor was tried with a signed-in CLI on a Mac; on SSH hosts and for its questions (its ask-question tool, which the models tried did not use) it was tested with a stand-in for Cursor.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.10
 
 **Fixed**

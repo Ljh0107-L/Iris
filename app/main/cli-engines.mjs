@@ -1,6 +1,6 @@
 // Antigravity remains the owner of its credentials, tools and quota.
 import { execFile, spawn } from 'node:child_process';
-import { accessSync, constants, statSync } from 'node:fs';
+import { accessSync, constants, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ const agentFile = name => fileURLToPath(new URL(`../../agent/${name}`, import.me
 // Engines that are someone else's CLI, signed in with the user's own account there (a subscription, not
 // an API key from Settings). Each keeps its credentials; the desktop only starts it and talks to it.
 export const CODEX_ENGINE = 'codex';
+export const CURSOR_ENGINE = 'cursor';
 export const CLI_ENGINES = {
   // Its sign-in goes into the data directory Iris's conversations use (`home`). On a Mac that makes no
   // difference (the sign-in is in the keychain); on a host without one the CLI keeps it in that directory,
@@ -23,8 +24,12 @@ export const CLI_ENGINES = {
     install: 'Install it from Settings → Subscriptions, then try again.' },
   // accounts: more than one sign-in per machine, each in its own CODEX_HOME. (Antigravity keeps one
   // sign-in per machine, so it has no such choice.)
-  codex: { id: 'codex', label: 'Codex', bin: 'codex', adapter: 'iris-codex.mjs', accounts: true, login: env => env.kind === 'local' ? ['login'] : ['login', '--device-auth'],
+  codex: { id: 'codex', label: 'Codex', bin: 'codex', adapter: 'iris-codex.mjs', accounts: true, signInPage: true, login: env => env.kind === 'local' ? ['login'] : ['login', '--device-auth'],
     install: 'Install it with npm install -g @openai/codex (or brew install codex), then try again.' },
+  // Cursor's CLI is `cursor-agent` (its installer also names it `agent`, a name other tools use as well). Its
+  // sign-in is the user's own Cursor account, kept by the CLI; Iris opens the page its login names (signInPage).
+  cursor: { id: 'cursor', label: 'Cursor', bin: 'cursor-agent', adapter: 'iris-cursor.mjs', signInPage: true, login: () => ['login'],
+    install: 'Install it from Settings → Subscriptions, then try again.' },
 };
 export const isCliEngineId = id => typeof id === 'string' && Object.hasOwn(CLI_ENGINES, id);
 export const cliEngine = id => CLI_ENGINES[isCliEngineId(id) ? id : 'antigravity'];
@@ -47,8 +52,6 @@ export function antigravityInstallMessage(env, engine) {
 
 export function cliBoot(bin, record, sessionsDir, remote = false, bypassPermissions = true, home = null) {
   return { [cliEngine(record.engine).id]: { bin, sessionsDir, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, recordId: record.id, remote, bypassPermissions, ...(home ? { home } : {}),
-    // A conversation brought in from the CLI's own history: where it comes from, until this one has its own.
-    ...(record.cliImport ? { importThread: record.cliImport } : {}),
     ...(record.spare ? { standby: true } : {}), clientVersion: app.version } };
 }
 
@@ -75,23 +78,6 @@ export async function cliAccountStatus(env, { bin, local, facts, login = false, 
     ...(typeof identity === 'string' ? { identity: identity.slice(0, 200) } : {}), ...(typeof plan === 'string' ? { plan: plan.slice(0, 60) } : {}),
     ...(Array.isArray(options) && options.length ? { options } : {}),
     ...(Array.isArray(limits) ? { limits: limits.slice(0, 4).filter(l => Number.isFinite(l?.usedPercent)).map(l => ({ usedPercent: l.usedPercent, windowMinutes: l.windowMinutes, resetsAt: l.resetsAt })) } : {}) };
-}
-
-// The conversations a CLI keeps for itself (Codex: those of the Codex app, the terminal and editors, in Codex's
-// own home, not the one Iris gives it), newest first, so one can be brought into Iris and continued there.
-export async function cliThreads(env, { bin, local, facts, engine, run = runSsh, invoke = exec }) {
-  const args = ['--threads', bin, app.version];
-  let out;
-  if (env.kind === 'local') ({ stdout: out } = await invoke(local.node, [cliAdapterPath(engine), ...args], { cwd: homedir(), env: { ...process.env, ...local.extraEnv }, timeout: 70000, maxBuffer: 16 * 1024 * 1024 }));
-  else out = await run(env, `cd "$HOME" && exec ${[facts.node, remoteCliAdapter(facts, engine), ...args].map(shellQuote).join(' ')}`, { timeout: 70000 });
-  let result;
-  try { result = JSON.parse(out.trim().split('\n').at(-1)); } catch { throw new Error(`${cliEngine(engine).label} did not list its conversations.`); }
-  if (!Array.isArray(result?.cliThreads)) throw new Error(result?.cliThreadsError ?? `${cliEngine(engine).label} did not list its conversations.`);
-  const text = (value, max) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
-  return result.cliThreads.flatMap(thread => {
-    const id = text(thread?.id, 200), title = text(thread?.title, 160), cwd = text(thread?.cwd, 2000);
-    return id && title && cwd?.startsWith('/') ? [{ id, title, cwd, updatedAt: Number.isFinite(thread.updatedAt) ? thread.updatedAt : null, ...(text(thread.path, 4000)?.startsWith('/') ? { path: thread.path } : {}) }] : [];
-  });
 }
 
 // A sign-in the CLI itself carries out, on this Mac: the adapter names the page to open (onUrl), then
@@ -133,6 +119,36 @@ export function findCli({ home = homedir(), path = process.env.PATH ?? '', name 
   }
   return null;
 }
+
+// Cursor's installer keeps each version in ~/.local/share/cursor-agent/versions/<version>; the newest one is
+// used when no cursor-agent is on the PATH (an install that did not link it, or a link removed since).
+export function newestCursorCli(home = homedir()) {
+  const dir = join(home, '.local', 'share', 'cursor-agent', 'versions');
+  let names = [];
+  try { names = readdirSync(dir).filter(name => /^\d{4}\.\d{2}\.\d{2}-[\w]+$/.test(name)).sort().reverse(); } catch { return null; }
+  for (const name of names) {
+    const bin = join(dir, name, 'cursor-agent');
+    try { if (statSync(bin).isFile()) { accessSync(bin, constants.X_OK); return bin; } } catch { /* an unfinished version */ }
+  }
+  return null;
+}
+// Installs Cursor's CLI the way its own installer does (the version it names, into the same folders), except
+// that only `cursor-agent` is linked: its installer also points `agent` at it, which may be another tool's.
+// Run in a terminal the person watches, on this Mac or a host.
+export const CURSOR_INSTALL = String.raw`set -e
+case "$(uname -s)" in Darwin) os=darwin;; Linux) os=linux;; *) echo "Cursor CLI does not run on $(uname -s)."; exit 1;; esac
+case "$(uname -m)" in x86_64|amd64) arch=x64;; arm64|aarch64) arch=arm64;; *) echo "Cursor CLI does not run on $(uname -m)."; exit 1;; esac
+ver=$(curl -fsSL https://cursor.com/install | sed -n 's|.*downloads\.cursor\.com/lab/\([0-9][^/"]*\)/.*|\1|p' | head -n 1)
+[ -n "$ver" ] || { echo "Could not find the current version of the Cursor CLI."; exit 1; }
+dir="$HOME/.local/share/cursor-agent/versions/$ver"
+if [ ! -x "$dir/cursor-agent" ]; then
+  tmp="$dir.tmp-$$"; rm -rf "$tmp"; mkdir -p "$tmp"
+  echo "Downloading Cursor CLI $ver…"
+  curl -fSL --progress-bar "https://downloads.cursor.com/lab/$ver/$os/$arch/agent-cli-package.tar.gz" | tar --strip-components=1 -xzf - -C "$tmp"
+  rm -rf "$dir"; mv "$tmp" "$dir"
+fi
+mkdir -p "$HOME/.local/bin"; ln -sfn "$dir/cursor-agent" "$HOME/.local/bin/cursor-agent"
+echo "Cursor CLI $ver is installed as ~/.local/bin/cursor-agent."`;
 
 // Run only presence checks in the remote account. Never execute agy or ask for credentials here.
 export async function findRemoteCli(env, { run = runSsh, name = 'agy' } = {}) {

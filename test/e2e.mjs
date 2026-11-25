@@ -249,10 +249,12 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const usageText = await page.locator('.usage').innerText();
   check('right panel Usage card shows tok/s and input / cached / output', /tok\/s/.test(usageText) && /Input/.test(usageText) && /Cached/.test(usageText) && /Output/.test(usageText), usageText.replace(/\s+/g, ' '));
-  // Even a single-chunk reply has a full request duration, including the first-token wait.
+  // Speed is measured from the first token to the last; a reply too short for that is timed as a whole request,
+  // and the card says which it shows.
   const shortSpeed = await page.locator('.usage-speed-value b').innerText(), shortKind = await page.locator('.usage-speed-kind').innerText();
-  check('a short reply shows its own request TPS', /^~\d/.test(shortSpeed) && shortKind === 'Request TPS', `${shortSpeed} · ${shortKind}`);
-  check('TPS includes the first-token wait', /including time to first token/.test(await page.locator('.usage-speed-metric').getAttribute('title')));
+  check('a reply shows a speed, and what it was measured over', /^~\d/.test(shortSpeed) && /^(Output|Request) TPS$/.test(shortKind), `${shortSpeed} · ${shortKind}`);
+  const speedTitle = await page.locator('.usage-speed-metric').getAttribute('title');
+  check('the speed says whether the first-token wait is in it', shortKind === 'Output TPS' ? /wait for the first token \(TTFT\) is not counted/.test(speedTitle) : /wait for the first token is included/.test(speedTitle), speedTitle);
   check('nothing under the composer but model controls', !(await page.locator('.session-meter').count()));
   // a model that reasons privately: a "Thought for" row with its reasoning tokens, and an estimated speed
   await waitNew('.markdown', 'echo:', () => send('[[hidden-think]] ponder this'));
@@ -260,8 +262,8 @@ try {
   const hiddenRow = await page.locator('.thinking', { hasText: 'Thought for' }).last().innerText();
   const tpsAfter = await page.locator('.usage-speed-value b').innerText();
   const hiddenSpeedKind = await page.locator('.usage-speed-kind').innerText();
-  check('hidden reasoning shown as "Thought for…", with its speed estimated over the whole response', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim())
-    && /^~\d/.test(tpsAfter) && hiddenSpeedKind === 'Request TPS', `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
+  check('hidden reasoning shown as "Thought for…", and a speed that does not count it over the answer\'s time', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim())
+    && /^~\d/.test(tpsAfter) && /^(Output|Request) TPS$/.test(hiddenSpeedKind), `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
   await S('04b-usage-card');
   await page.locator('.send-button.stop').waitFor({ state: 'detached' });
   const readingSession = (await page.evaluate(() => window.iris.invoke('listSessions'))).find(s => s.title.includes('hello from the desktop'));

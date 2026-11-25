@@ -322,7 +322,7 @@ export async function bootstrap() {
   const boot = await api('bootstrap');
   showFullscreen(boot.fullscreen);
   const d = boot.settings.defaults;
-  const engine = ['claude-code', 'antigravity', 'codex'].includes(d.engine) ? d.engine : 'pi';
+  const engine = ['claude-code', 'antigravity', 'codex', 'cursor'].includes(d.engine) ? d.engine : 'pi';
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     sessionUpdate: state.sessionUpdate ?? boot.sessionUpdate,
@@ -672,6 +672,14 @@ export function cliDraftMenus(options, chosen = {}) {
   if (!picked) return options;
   return [model, ...(Array.isArray(picked.sub) ? picked.sub : [])];
 }
+// Cursor offers dozens of models: Settings → Cursor chooses which of them its model menu lists (every one, until
+// a choice is made there). The model a conversation has is listed all the same.
+export function shownCliOptions(engine, options, settings = state.settings) {
+  const shown = engine === 'cursor' ? settings?.defaults?.cursorModels : null;
+  if (!Array.isArray(shown)) return options;
+  const keep = new Set(shown);
+  return options.map(o => o.category !== 'model' ? o : { ...o, options: o.options.filter(choice => keep.has(choice.value) || choice.value === o.currentValue) });
+}
 export function refreshCliReadiness(environmentId, engine = 'antigravity') {
   const key = readinessKey(engine, environmentId);
   if (cliChecks.has(key)) return cliChecks.get(key);
@@ -904,13 +912,6 @@ function warnIfNoImages(model, attachments) {
   if (!model || !attachments.some(a => a.kind === 'image')) return;
   const info = state.catalog?.find(m => m.provider === model.provider && m.id === model.id);
   if (info && !(info.input ?? ['text']).includes('image')) notify(`${info.name ?? model.id} doesn’t accept images, so they won’t be sent`, 'error');
-}
-
-// A conversation from a CLI's own history, brought in: it joins the list and opens.
-export async function importCliThread(environmentId, engine, thread) {
-  const session = await api('importCliThread', environmentId, engine, thread);
-  set(s => ({ sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
-  openSession(session.id);
 }
 
 export async function forkSession(id) {

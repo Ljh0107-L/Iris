@@ -6,6 +6,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { Icon } from './Icons.jsx';
 import { api, set as setStore, useStore } from './store.js';
+import { engineLabel } from './engines.js';
 
 // Shell prompts (Powerlevel10k, Starship, oh-my-posh) draw icons from Nerd Fonts: after the usual monospace
 // fonts come the Nerd Font families people install, so those icons show instead of empty boxes.
@@ -122,7 +123,7 @@ export function CliTerminal({ environmentId, action, engine = 'antigravity', acc
       id = termId;
       let printed = '', linked = false;
       byTermId.set(id, { term, onExit: code => {
-        term.write(`\r\n\x1b[2m[${engine === 'codex' ? 'Codex' : 'Antigravity'} exited${code ? ` with code ${code}` : ''}]\x1b[0m\r\n`);
+        term.write(`\r\n\x1b[2m[${engineLabel(engine)} exited${code ? ` with code ${code}` : ''}]\x1b[0m\r\n`);
         onExit?.(code);
       }, onData: data => {
         if (linked || !onLink) return;

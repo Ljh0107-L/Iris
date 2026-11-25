@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CodexAdapter, account, editsOfDiff, shellCommand, threads } from '../agent/iris-codex.mjs';
+import { requestReplies, speedDisplay, usageOf } from '../app/renderer/src/transcript.js';
+import { CodexAdapter, account, editsOfDiff, shellCommand } from '../agent/iris-codex.mjs';
 import { FAKE_CODEX as FAKE } from './fake-codex.mjs';
 
 
@@ -121,6 +122,25 @@ test('speed is measured per model request: a turn lists its requests, and the ti
   assert.equal(reply.usage.output, 20, 'the turn: both requests');
   assert.deepEqual(reply.requests.map(r => [r.input, r.cacheRead, r.output, r.reasoning]), [[30, 20, 10, 4], [30, 20, 10, 4]]);
   assert.ok(reply.requests.every(r => r.ms > 0 && r.ms < 250), `neither request includes the command's 400 ms (${reply.requests.map(r => r.ms)})`);
+  assert.equal(reply.requests[0].wait, undefined, 'a tool call alone: nothing was seen being written, so there is no first token to measure from');
+  // A request is known as soon as it ends: the state names the turn's requests so far while the command still runs,
+  // and no longer once the turn is saved with them.
+  const states = a.events.filter(e => e.type === 'cli_state').map(e => e.cli.turnRequests?.length ?? 0);
+  assert.ok(states.includes(1), `the first request is reported before the turn ends (${states})`);
+  assert.equal(states.at(-1), 0, 'the saved reply has them now');
+});
+
+test('the wait for a request’s first token is told apart from the time it was written in', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('prompt', { message: 'slow start' });
+  await a.next(settled);
+  const [request] = lastReply(a.events).requests;
+  // 150 ms before the reasoning item began, 120 ms of writing after it.
+  assert.ok(request.wait >= 140 && request.wait < 260, `the wait (${request.wait} ms)`);
+  assert.ok(request.ms - request.wait >= 100 && request.ms - request.wait < 220, `the writing (${request.ms - request.wait} ms of ${request.ms})`);
+  const speed = usageOf([requestReplies([lastReply(a.events)])[0]]);
+  assert.equal(speed.speedBasis, 'decode'); assert.equal(speed.genMs, request.ms - request.wait);
+  assert.equal(speedDisplay(speed).label, 'Output TPS');
 });
 
 test('an agent Codex starts is a task with the agent’s brief, steps and answer; its plan is a Tasks card kept current', { timeout: 20000 }, async t => {
@@ -335,35 +355,3 @@ test('editing an earlier message takes the Codex thread and the conversation bac
   assert.equal(f.calls('thread/revert').length, 1);
 });
 
-test('Codex’s own conversations are listed, and one is brought in with what was said in it and continued', { timeout: 20000 }, async t => {
-  const f = fixture(t);
-  const listed = await threads({ bin: f.bin, cwd: f.dir, env: f.env, version: '1.0.0' });
-  assert.deepEqual(listed, [
-    { id: 'old-1', title: 'Fix the parser', cwd: '/w/app', updatedAt: 1764000300000, model: 'gpt-a', path: '/codex-home/sessions/rollout-old-1.jsonl' },
-    { id: 'old-2', title: 'what does this repo do?', cwd: '/w/lib', updatedAt: 1764000100000 }], 'not an agent’s thread, nor one in which nothing was said');
-  // Listing is the stable API; bringing one in names its file, which only the experimental API takes.
-  assert.equal(f.calls('initialize')[0].params.capabilities, null);
-  const a = f.start(undefined, { importThread: { id: listed[0].id, path: listed[0].path } });
-  const state = (await a.rpc('get_state')).data;
-  assert.equal(f.calls('initialize').at(-1).params.capabilities.experimentalApi, true);
-  assert.deepEqual(f.calls('thread/fork').map(c => [c.params.threadId, c.params.path]), [['old-1', '/codex-home/sessions/rollout-old-1.jsonl']], 'forked into this home: the original is left as it is');
-  assert.equal(f.calls('thread/start').length + f.calls('thread/resume').length, 0);
-  const { messages } = (await a.rpc('get_messages')).data;
-  assert.deepEqual(messages.map(m => m.role), ['user', 'assistant', 'toolResult', 'toolResult', 'user', 'assistant']);
-  assert.equal(messages[0].content[0].text, 'please fix the parser');
-  assert.deepEqual(messages[1].content.map(block => block.type === 'toolCall' ? block.name : block.type), ['thinking', 'read', 'bash', 'text']);
-  assert.deepEqual([messages[1].stopReason, messages[1].durationMs, messages[1].content.at(-1).text], ['stop', 4200, 'Fixed the parser.']);
-  assert.deepEqual(messages.slice(2, 4).map(m => [m.toolName, m.isError, m.content[0].text]), [['read', false, 'parse()'], ['bash', true, '1 failing']]);
-  assert.deepEqual([messages[4].content[0].text, messages[5].stopReason], ['and the tests', 'aborted']);
-  assert.equal(a.events.filter(e => e.type === 'message_end' || e.type === 'agent_start').length, 0, 'read from the transcript when it opens, not replayed as events');
-  // Continued here like any conversation; reopened, it is this conversation's own thread, on the stable API.
-  await a.rpc('prompt', { message: 'carry on' });
-  await a.next(settled);
-  assert.equal(f.calls('turn/start').find(c => c.params.input[0].text === 'carry on').params.threadId, 'thread-1');
-  const again = f.start(state.sessionFile, { importThread: { id: listed[0].id, path: listed[0].path } });
-  await again.rpc('get_state');
-  assert.equal(f.calls('thread/fork').length, 1, 'brought in once');
-  assert.deepEqual(f.calls('thread/resume').map(c => c.params.threadId), ['thread-1']);
-  assert.equal(f.calls('initialize').at(-1).params.capabilities, null);
-  assert.equal((await again.rpc('get_messages')).data.messages.filter(m => m.role === 'user').length, 3);
-});

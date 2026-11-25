@@ -25,10 +25,16 @@ function Card({ title, children, open: initial = true, aside, collapsible = true
 // Speed and token usage per turn, where a turn is one model call, with every agent: the last turn's
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
-export function UsageMetrics({ transcript, antigravity }) {
+export function UsageMetrics({ transcript, antigravity, turnRequests }) {
+  // Codex and Antigravity save a turn as one reply when it ends. The model requests that have ended in the turn
+  // being written are counted as they end (the CLI's state names them), so a long first turn shows its speed too.
+  // Codex counts each request's tokens; Antigravity counts a turn's at its end, so until then only speed is shown.
+  const live = transcript?.live && Array.isArray(turnRequests) ? turnRequests.filter(r => Number.isFinite(r?.ms)).map(request => ({
+    role: 'assistant', provider: transcript.live.provider, model: transcript.live.model, stopReason: 'stop', __request: request,
+    ...(Number.isFinite(request.input) ? { usage: { ...request, ms: undefined, wait: undefined, lead: undefined, estimated: undefined } } : { usage: { output: request.output }, __speedOnly: true }) })) : [];
   // Antigravity: token counts when the CLI reported them (then it is shown as the others are); from an older
   // CLI, or a turn without counts, only an estimate of the turn's speed.
-  if (antigravity && !(transcript?.messages ?? []).some(m => m.role === 'assistant' && m.usage)) {
+  if (antigravity && !live.length && !(transcript?.messages ?? []).some(m => m.role === 'assistant' && (m.usage || m.requests?.length))) {
     const reply = (transcript?.messages ?? []).findLast(m => antigravityTurnSpeed(m));
     const speed = antigravityTurnSpeed(reply);
     if (!speed) return null;
@@ -42,27 +48,30 @@ export function UsageMetrics({ transcript, antigravity }) {
       </div>
     </div>;
   }
-  // One entry per model request, with every agent (see requestReplies).
-  const messages = requestReplies(transcript?.messages).filter(m => m.role === 'assistant' && m.usage && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason));
+  // One entry per model request, with every agent (see requestReplies). A CLI that counts no tokens (Cursor)
+  // lists its requests with what each wrote, estimated: their speed is shown, the token table is not.
+  const saved = requestReplies(transcript?.messages).filter(m => m.role === 'assistant' && (m.usage || m.__request) && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason))
+    .map(m => m.usage ? m : { ...m, usage: { output: m.__request.output }, __speedOnly: true });
+  const messages = [...saved, ...live], counted = messages.filter(m => !m.__speedOnly);
   if (!messages.length) return null;
-  const lastMessage = messages.at(-1);
-  const last = usageOf([lastMessage]);
-  const total = usageOf(transcript.messages);
-  // Show each completed reply's request TPS, including short and single-chunk replies.
+  const lastMessage = counted.at(-1);
+  const last = lastMessage ? usageOf([lastMessage]) : null;
+  const total = usageOf([...(transcript.messages ?? []), ...live.filter(m => !m.__speedOnly)]);
+  // The speed of the last reply that could be timed from its first token (see speedReply).
   const speedMessage = speedReply(messages);
   const timed = speedMessage === lastMessage ? last : usageOf([speedMessage]);
-  // Compare one provider/model and matching token/timing provenance, all over the full request.
+  // Compare one provider/model and matching token/timing provenance.
   const recent = messages.slice(-14).filter(m => m.provider === speedMessage.provider && (m.responseModel ?? m.model) === (speedMessage.responseModel ?? speedMessage.model))
     .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === timed.speedBasis && u.speedTokensEstimated === timed.speedTokensEstimated && u.speedTimeEstimated === timed.speedTimeEstimated).map(u => u.tps);
-  const speed = speedDisplay(timed, { earlier: speedMessage !== lastMessage });
+  const speed = speedDisplay(timed, { earlier: speedMessage !== messages.at(-1) });
   const tier = speedTier(speedMessage);
   const peak = Math.max(...recent, 1);
-  const rows = [
+  const rows = last ? [
     ['Input', last.input + last.cacheWrite, total.input + total.cacheWrite],
     ['Cached', last.cacheRead, total.cacheRead],
     ['Output', last.output, total.output],
     ...(total.reasoningReported ? [['Reasoning', last.reasoningReported ? last.reasoning : null, total.reasoning]] : []),
-  ];
+  ] : null;
   return (
     <div className="usage">
       <div className="usage-speed">
@@ -72,17 +81,17 @@ export function UsageMetrics({ transcript, antigravity }) {
         </div>
         {recent.length > 1 && <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>}
       </div>
-      <div className="usage-table" title="Provider-reported counts. Reasoning is already included in output.">
+      {rows && <div className="usage-table" title="Provider-reported counts. Reasoning is already included in output.">
         <span /><span className="th">Last turn</span><span className="th">Total</span>
         {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{formatTokens(a)}</span>, <span key={label + 'b'}>{formatTokens(b)}</span>])}
         <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
-      </div>
+      </div>}
     </div>
   );
 }
 
-function UsageCard({ transcript, antigravity }) {
-  const body = UsageMetrics({ transcript, antigravity });
+function UsageCard({ transcript, antigravity, turnRequests }) {
+  const body = UsageMetrics({ transcript, antigravity, turnRequests });
   if (!body) return null;
   return <Card title="Usage">{body}</Card>;
 }
@@ -214,28 +223,51 @@ function EngineAgents({ transcript }) {
 // the one still being written once it has stood still for a moment (Antigravity sends a whole thought at
 // once, and it is then "the last thing written" until the next step begins). A paragraph is never sent twice.
 const LANGUAGE_NAMES = { 'Simplified Chinese': '简体中文', 'Traditional Chinese': '繁體中文', English: 'English', Japanese: '日本語', Korean: '한국어', Spanish: 'Español', French: 'Français', German: 'Deutsch' };
-const translations = new Map(); // "provider\nmodel\nlanguage\nparagraph" -> { text } | { error } | { pending }
+const translations = new Map(); // "provider\nmodel\nlanguage\nparagraph" -> { pending } | { text } | { error, at }
 const translationWatchers = new Set();
-let translating = Promise.resolve();
+// Only what the card shows is worth translating. A fast model goes through a thought a second: paragraphs still
+// waiting when their thought has left the card are dropped, not translated one after another while the thought
+// on show waits behind them. A few go out at a time, in the order they are read.
+const TRANSLATE_AT_ONCE = 3, TRANSLATE_LIMIT = 6, RETRY_MS = 20000;
+const translationQueue = []; // { key, paragraph }, not yet asked for
+const translationsOut = new Set(); // keys asked for and not yet answered
+let translationsWanted = new Map(); // what the card shows now: key -> paragraph
+// Requests already sent for a thought that has since left are not waited for (up to a limit on all of them):
+// the thought on show starts at once.
+function pumpTranslations() {
+  const shown = () => { let n = 0; for (const key of translationsOut) if (translationsWanted.has(key)) n++; return n; };
+  while (translationQueue.length && translationsOut.size < TRANSLATE_LIMIT && shown() < TRANSLATE_AT_ONCE) {
+    const { key, paragraph } = translationQueue.shift();
+    translationsOut.add(key);
+    api('translate', paragraph).then(text => { translations.set(key, { text }); },
+      error => { translations.set(key, { error: error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), at: Date.now() }); })
+      .then(() => { translationsOut.delete(key); for (const watch of translationWatchers) watch(); pumpTranslations(); });
+  }
+}
 function useTranslation(paragraphs, choice) {
   const [, redraw] = useState(0);
   const scope = choice?.on && choice.provider && choice.model ? [choice.provider, choice.model, choice.language].join('\n') : null;
   useEffect(() => { const watch = () => redraw(n => n + 1); translationWatchers.add(watch); return () => { translationWatchers.delete(watch); }; }, []);
   useEffect(() => {
-    if (!scope) return;
-    for (const paragraph of paragraphs) {
-      const key = `${scope}\n${paragraph}`;
-      if (translations.has(key)) continue;
+    const wanted = new Map(scope ? paragraphs.map(paragraph => [`${scope}\n${paragraph}`, paragraph]) : []);
+    translationsWanted = wanted;
+    for (let i = translationQueue.length - 1; i >= 0; i--) {
+      if (wanted.has(translationQueue[i].key)) continue;
+      translations.delete(translationQueue[i].key); translationQueue.splice(i, 1);
+    }
+    for (const [key, paragraph] of wanted) {
+      const known = translations.get(key);
+      if (known && !(known.error && Date.now() - known.at > RETRY_MS)) continue; // a failure is tried again after a while
       if (translations.size > 400) translations.delete(translations.keys().next().value);
       translations.set(key, { pending: true });
-      translating = translating.then(() => api('translate', paragraph)).then(text => { translations.set(key, { text }); },
-        error => { translations.set(key, { error: error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') }); })
-        .then(() => { for (const watch of translationWatchers) watch(); });
+      translationQueue.push({ key, paragraph });
     }
+    pumpTranslations();
   }, [scope, paragraphs.join('\u0000')]);
   return paragraph => scope ? translations.get(`${scope}\n${paragraph}`) ?? null : null;
 }
 const SETTLED_MS = 700; // a paragraph that has not grown for this long is translated although it may yet grow
+const SHOWN_MS = 500;   // a thought is translated once it has been on the card this long: one that is gone sooner was never read
 
 // What the agent is thinking right now: the thought being written, or the last one it had on this turn. One
 // at a time: when the next thought begins, the one before it leaves (the conversation keeps them all, folded).
@@ -247,7 +279,9 @@ function ThinkingCard({ transcript, working }) {
   const paragraphs = useMemo(() => (thought?.text ?? '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean), [thought?.text]);
   const [settled, setSettled] = useState(null); // the text that has stood still
   useEffect(() => { const text = thought?.text ?? null; const timer = setTimeout(() => setSettled(text), SETTLED_MS); return () => clearTimeout(timer); }, [thought?.key, thought?.text]);
-  const finished = live && settled !== thought?.text ? paragraphs.slice(0, -1) : paragraphs;
+  const [shown, setShown] = useState(null); // the thought that has been on the card long enough to be read
+  useEffect(() => { const key = thought?.key ?? null; const timer = setTimeout(() => setShown(key), SHOWN_MS); return () => clearTimeout(timer); }, [thought?.key]);
+  const finished = shown !== (thought?.key ?? null) ? [] : live && settled !== thought?.text ? paragraphs.slice(0, -1) : paragraphs;
   const translated = useTranslation(finished, choice);
   const [original, setOriginal] = useState(false);
   useEffect(() => { setOriginal(false); }, [thought?.key]);
@@ -312,7 +346,7 @@ export function RightPanel({ session }) {
   const batch = batches.find(b => b.callId === selection?.callId);
   const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
   const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
-  const antigravity = session.engine === 'antigravity';
+  const antigravity = session.engine === 'antigravity' || session.engine === 'cursor'; // CLIs whose token counts may be missing
   const context = isCliEngine(session.engine) ? session.cli?.contextUsage : stats?.contextUsage;
   const percent = Number.isFinite(context?.percent) ? context.percent : null;
   const contextLabel = Number.isFinite(context?.tokens)
@@ -328,7 +362,7 @@ export function RightPanel({ session }) {
       {shows('context') && (!antigravity || context) && <Card title="Context" collapsible={false} aside={<span title="Context usage reported by the agent">{contextLabel}{percent != null && Number.isFinite(context?.tokens) ? ` · ${Math.round(percent)}%` : ''}</span>}>
         {percent != null && <div className={`context-bar ${percent > 100 ? 'over' : percent >= 80 ? 'high' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(Math.min(100, percent))} aria-label="Context window used"><span style={{ width: `${Math.max(1, Math.min(100, percent))}%` }} /></div>}
       </Card>}
-      {shows('usage') && <UsageCard transcript={transcript} antigravity={antigravity} />}
+      {shows('usage') && <UsageCard transcript={transcript} antigravity={antigravity} turnRequests={session.cli?.turnRequests} />}
       {shows('usage') && antigravity && !context && !transcript?.messages.some(m => antigravityTurnSpeed(m)) && <div className="panel-note">No usage yet</div>}
       {shows('thinking') && <ThinkingCard transcript={transcript} working={!!session.streaming} />}
       {shows('jobs') && <BackgroundJobs key={session.id} sessionId={session.id} />}

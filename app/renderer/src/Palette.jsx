@@ -76,7 +76,7 @@ export function Palette() {
     if (kind === 'All') {
       const actions = [
         { key: 'new', icon: 'plus', label: 'New conversation', run: () => { newSession(); setDraft({ engine: 'pi' }); } },
-        ...['claude-code', 'codex', 'antigravity'].map(engine => ({ key: `new-${engine}`, logo: engine, label: `New ${engineLabel(engine)} conversation`, run: () => { newSession(); setDraft({ engine }); } })),
+        ...['claude-code', 'codex', 'antigravity', 'cursor'].map(engine => ({ key: `new-${engine}`, logo: engine, label: `New ${engineLabel(engine)} conversation`, run: () => { newSession(); setDraft({ engine }); } })),
         { key: 'models', icon: 'key', label: 'Models & API keys', run: () => openSettings(true, 'providers') },
         { key: 'accounts', icon: 'key', label: 'Subscriptions: Codex and Antigravity sign-in', run: () => openSettings(true, 'subscriptions') },
         { key: 'envs', icon: 'server', label: 'SSH connections', run: () => openSettings(true, 'connections') },

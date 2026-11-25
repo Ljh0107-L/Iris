@@ -388,7 +388,7 @@ try {
   // Claude Code: the agent is chosen beside folder and machine; the model menu below then lists its models
   // only (Anthropic Messages), with 5-level effort, Ultracode, upload progress, tool & question cards.
   await page.getByRole('button', { name: 'Agent', exact: true }).click();
-  assert.deepEqual(await page.locator('.harness-row .harness-title').allTextContents(), ['Codex', 'Antigravity', 'Claude Code', 'Pi']);
+  assert.deepEqual(await page.locator('.harness-row .harness-title').allTextContents(), ['Codex', 'Antigravity', 'Cursor', 'Claude Code', 'Pi']);
   await page.locator('.harness-row', { hasText: 'Claude Code' }).click();
   assert.equal(await page.evaluate(() => window.__irisState().draft.engine), 'claude-code');
   assert.equal(await page.locator('.composer-tray-head .harness-trigger').innerText(), 'Claude Code');
@@ -426,8 +426,9 @@ try {
   const panel = page.locator('.right-panel');
   const card = title => panel.locator('.panel-card', { has: page.locator('.panel-card-head', { hasText: title }) });
   // Claude Code: request speed from its own timing, its Task agents, and (above) its background task.
-  assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~?40(\.0)?\s*tok\/s$/, 'Claude Code: 40 output tokens over a one-second request');
-  assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Request TPS');
+  assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~?57\.1\s*tok\/s$/, 'Claude Code: 40 output tokens in the 0.7 s from its first token to its last, not the 0.3 s before it');
+  assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Output TPS');
+  assert.match(await card('Usage').locator('.usage-speed-metric').getAttribute('title'), /wait for the first token \(TTFT\) is not counted/);
   assert.deepEqual(await card('Subagents').locator('.subagent-task-name').allInnerTexts(), ['Inspect parser module']);
   assert.match(await card('Subagents').locator('.subagent-task-caption').innerText(), /^Explore · Completed · 2 steps · 480 tok$/);
   await page.screenshot({ path: join(screenshots, 'right-panel-claude-code.png') });
@@ -442,11 +443,21 @@ try {
   await page.locator('.title-button img.title-engine-logo[alt="Codex"]').waitFor();
   await card('Usage').locator('.usage-speed-value').waitFor();
   assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~?50(\.0)?\s*tok\/s$/, 'Codex: 200 output tokens over a four-second turn');
+  assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Request TPS', 'a turn saved without its first-token time: the request as a whole, and it says so');
   assert.match(await card('Context').locator('.panel-card-aside').innerText(), /52K \/ 400K · 13%/);
   assert.equal(await card('Context').locator('.context-bar > span').evaluate(bar => bar.style.width), '13%');
   assert.deepEqual(await card('Subagents').locator('.subagent-task-name').allInnerTexts(), ['Check the parser']);
   assert.equal(await card('Background tasks').count(), 0, 'Codex reports no background tasks');
   await page.screenshot({ path: join(screenshots, 'right-panel-codex.png') });
+  // A Codex turn under way: a model request that has ended is counted at once (the turn is saved only when it
+  // ends), and timed from its first output: 300 tokens in the 2 s after a 1 s wait.
+  await page.evaluate(() => window.fixtureEvent({ channel: 'event', payload: { id: 'codex-ui', event: { type: 'message_start', message: { role: 'assistant', provider: 'codex', model: 'gpt-a', content: [], timestamp: 9000 } } } }));
+  sessions[0] = { ...codexSession, streaming: true, cli: { ...codexSession.cli, turnRequests: [{ ms: 3000, wait: 1000, input: 900, cacheRead: 0, cacheWrite: 0, output: 300, reasoning: 0 }] } };
+  await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
+  await page.waitForFunction(() => /^~?150\s*tok\/s$/.test(document.querySelector('.right-panel .usage-speed-value')?.innerText ?? ''), undefined, { timeout: 5000 });
+  assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Output TPS');
+  sessions[0] = codexSession;
+  await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
   // Antigravity: its protocol gives neither token counts nor agents, so the panel shows an estimated speed only.
   await page.getByRole('button', { name: 'Summarise with Antigravity' }).click();
   await page.locator('.title-button img.title-engine-logo[alt="Antigravity"]').waitFor();

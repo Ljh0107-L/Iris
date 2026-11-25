@@ -30,7 +30,7 @@ const frozen = value => {
   return value;
 };
 
-test('agent timing retains bounded chunk counters while request TPS includes all output', () => {
+test('agent timing retains bounded chunk counters; speed is measured from the first token to the last', () => {
   const f = fixture(), message = frozen(msg());
   f.emit('turn_start'); f.emit('message_start', { message });
   for (const event of [{ type: 'text_delta', delta: '' }, { type: 'text_start', delta: 'not output' },
@@ -45,15 +45,17 @@ test('agent timing retains bounded chunk counters while request TPS includes all
     answer: { first: 1000, last: 2000, chars: 400, deltas: 2, weight: 100, firstWeight: 50 },
     thinkingChars: 0, think: null });
   const usage = usageOf([result]);
-  assert.equal(usage.tps, 100 / 3); assert.equal(usage.genOut, 100); assert.equal(usage.output, 100);
-  assert.equal(usage.genMs, 3000); assert.equal(usage.speedBasis, 'request');
+  // The first chunk (half of the output) was written before anything was seen: the other half took a second.
+  assert.equal(usage.tps, 50); assert.equal(usage.genOut, 50); assert.equal(usage.output, 100);
+  assert.equal(usage.genMs, 1000); assert.equal(usage.speedBasis, 'decode');
   assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedEstimated, true);
-  assert.equal(speedDisplay(usage).label, 'Request TPS');
+  assert.equal(speedDisplay(usage).label, 'Output TPS');
+  assert.match(speedDisplay(usage).title, /wait for the first token \(TTFT\) is not counted/);
   assert.equal(message.__timing, undefined, 'do not mutate input messages');
   assert.equal(f.emit('message_end', { message }), undefined, 'no duplicate or previous-call timing');
 });
 
-test('request TPS includes huge TTFT and delayed usage/end trailers', () => {
+test('a huge wait for the first token and delayed usage/end trailers are not in the speed', () => {
   for (const ttft of [1000, 600000]) {
     for (const trailer of [100, 600000]) {
       const f = fixture(), message = { ...msg(), durationMs: ttft + 1000 + trailer };
@@ -64,13 +66,13 @@ test('request TPS includes huge TTFT and delayed usage/end trailers', () => {
       raw(f, message, { type: 'response.completed', response: { usage: { output_tokens: 100 } } });
       const result = finish(f, message, ttft + 1000 + trailer), usage = usageOf([result]);
       assert.equal(result.__timing.first, ttft); assert.equal(result.__timing.last, ttft + 1000);
-      assert.equal(usage.tps, 100 / (message.durationMs / 1000)); assert.equal(usage.genOut, 100); assert.equal(usage.genMs, message.durationMs);
+      assert.equal(usage.tps, 50); assert.equal(usage.genOut, 50); assert.equal(usage.genMs, 1000);
       assert.equal(usage.output, 100);
     }
   }
 });
 
-test('coalesced first-timestamp deltas stay in the request TPS numerator', () => {
+test('coalesced first-timestamp deltas are all the first chunk, written before the window', () => {
   const f = fixture(), message = msg();
   f.emit('message_start', { message });
   delta(f, message, 1000, 'x'.repeat(100));
@@ -79,7 +81,7 @@ test('coalesced first-timestamp deltas stay in the request TPS numerator', () =>
   const result = finish(f, message, 2100);
   assert.equal(result.__timing.deltas, 3); assert.equal(result.__timing.firstWeight, 50);
   assert.equal(result.__timing.answer.firstWeight, 50);
-  assert.equal(usageOf([result]).tps, 100 / 3); assert.equal(usageOf([result]).genOut, 100);
+  assert.equal(usageOf([result]).tps, 50); assert.equal(usageOf([result]).genOut, 50);
 });
 
 test('weighting matches renderer CJK estimates without keeping generated content', () => {
@@ -93,8 +95,8 @@ test('weighting matches renderer CJK estimates without keeping generated content
   assert.equal(result.__timing.weight, estimateTokens(first + last));
   assert.equal(result.__timing.firstWeight, estimateTokens(first));
   assert.equal(result.__timing.answer.weight, result.__timing.weight);
-  assert.ok(Math.abs(usageOf([result]).genOut - estimateTokens(first + last)) < 1e-9);
-  assert.ok(Math.abs(usageOf([result]).tps - estimateTokens(first + last) / 3) < 1e-9);
+  assert.ok(Math.abs(usageOf([result]).genOut - estimateTokens(last)) < 1e-9, 'what came after the first chunk');
+  assert.ok(Math.abs(usageOf([result]).tps - estimateTokens(last)) < 1e-9, 'over the second it took');
   assert.ok(!JSON.stringify(result.__timing).includes(first));
 });
 
@@ -114,7 +116,7 @@ test('OpenAI Responses summary events identify summary reasoning', () => {
   }
 });
 
-test('native Anthropic summarized or omitted thinking keeps reported full-request output', () => {
+test('native Anthropic summarized or omitted thinking: from the first block when it is announced, else the answer alone', () => {
   for (const display of ['summarized', 'omitted']) {
     for (const reasoning of [80, undefined]) {
       const f = fixture(), message = frozen({ ...nativeAnthropic(), durationMs: 600000,
@@ -133,10 +135,16 @@ test('native Anthropic summarized or omitted thinking keeps reported full-reques
       assert.deepEqual(result.__usageProvenance, { provider: message.provider, model: message.model,
         thinking: 'summary', thinkingSource: 'request', thinkingDisplay: display });
       assert.equal(result.__timing.answer.interrupted, undefined);
-      assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 600000);
-      assert.equal(usage.genOut, message.usage.output); assert.equal(usage.tps, message.usage.output / 600);
+      assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedBasis, 'decode');
+      if (display === 'summarized') {
+        // The thinking block began at 0 and the last token came at 11 s: all of the output was written in between.
+        assert.equal(usage.genMs, 11000); assert.equal(usage.genOut, message.usage.output); assert.equal(usage.speedTokensEstimated, false);
+      } else {
+        // Nothing says when the hidden thinking began: the answer (1000 tokens, half of them in its first chunk) over its second.
+        assert.equal(usage.genMs, 1000); assert.equal(usage.genOut, 500); assert.equal(usage.tps, 500);
+        assert.equal(usage.speedTokensEstimated, reasoning === undefined, 'estimated from the stream when the provider does not count reasoning apart');
+      }
       assert.equal(usage.output, message.usage.output); assert.equal(usage.reasoning, reasoning ?? 0);
-      assert.equal(usage.speedTokensEstimated, false);
       assert.equal(message.__usageProvenance, undefined);
     }
   }
@@ -215,7 +223,7 @@ test('raw Anthropic thinking conservatively marks unavailable request provenance
   }
 });
 
-test('native Anthropic raw thinking without request metadata retains all reported output', () => {
+test('native Anthropic raw thinking without request metadata is timed from its thinking block', () => {
   const f = fixture(), message = { ...nativeAnthropic(), durationMs: 600000, content: [
     { type: 'thinking', thinking: 'x'.repeat(320) }, { type: 'text', text: 'x'.repeat(4000) },
   ], usage: { output: 1800 } };
@@ -227,7 +235,7 @@ test('native Anthropic raw thinking without request metadata retains all reporte
   assert.deepEqual(result.__usageProvenance, { provider: message.provider, model: message.model,
     thinking: 'summary', thinkingSource: 'anthropic-block' });
   assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedTokensEstimated, false);
-  assert.equal(usage.tps, 3); assert.equal(usage.genMs, 600000); assert.equal(usage.output, 1800);
+  assert.equal(usage.tps, 1800 / 11); assert.equal(usage.genMs, 11000); assert.equal(usage.output, 1800);
 });
 
 test('raw Anthropic fallback requires a matching API and a thinking block', () => {
@@ -240,7 +248,7 @@ test('raw Anthropic fallback requires a matching API and a thinking block', () =
   }
 });
 
-test('summary, hidden and redacted reasoning share the complete request duration', () => {
+test('summary, hidden and redacted reasoning: the answer alone is timed, without the reasoning tokens', () => {
   for (const kind of ['summary', 'hidden', 'redacted']) {
     const f = fixture(), message = { ...msg(), durationMs: 11100,
       content: [
@@ -262,10 +270,10 @@ test('summary, hidden and redacted reasoning share the complete request duration
       assert.equal(result.__timing.weight, 100); assert.equal(result.__timing.firstWeight, 40);
       assert.equal(result.__timing.thinkingChars, 320); assert.equal(result.__timing.think, 9000);
     }
-    assert.equal(usage.tps, 100 / 11.1); assert.equal(usage.genOut, 100); assert.equal(usage.genMs, 11100);
+    assert.equal(usage.tps, 10); assert.equal(usage.genOut, 10); assert.equal(usage.genMs, 1000);
     assert.equal(usage.output, 100); assert.equal(usage.reasoning, 80);
-    assert.equal(usage.speedBasis, 'request'); assert.equal(usage.speedScope, 'all');
-    assert.equal(speedDisplay(usage).label, 'Request TPS');
+    assert.equal(usage.speedBasis, 'decode'); assert.equal(usage.speedScope, 'all');
+    assert.equal(speedDisplay(usage).label, 'Output TPS');
   }
 });
 
@@ -279,12 +287,12 @@ test('fully streamed reasoning uses the root window and includes reasoning only 
   delta(f, message, 10000, 'x'.repeat(40)); delta(f, message, 11000, 'x'.repeat(40));
   const result = finish(f, message, 11100), usage = usageOf([result]);
   assert.equal(result.__usageProvenance, undefined);
-  assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 11100);
-  assert.equal(usage.genOut, 100); assert.equal(usage.tps, 100 / 11.1);
+  assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 10000);
+  assert.equal(usage.genOut, 60); assert.equal(usage.tps, 6); // the first chunk (40 of 100) came before the window
   assert.equal(usage.output, 100); assert.equal(usage.reasoning, 80);
 });
 
-test('summary reasoning with unknown reasoning usage keeps the reported output total', () => {
+test('summary reasoning with unknown reasoning usage: the answer, estimated from what was streamed', () => {
   const f = fixture(), message = { ...msg(), content: [
     { type: 'thinking', thinking: 'x'.repeat(320) }, { type: 'text', text: 'x'.repeat(80) },
   ], usage: { output: 100 } };
@@ -293,11 +301,12 @@ test('summary reasoning with unknown reasoning usage keeps the reported output t
   delta(f, message, 1000, 'x'.repeat(320), 'thinking_delta');
   delta(f, message, 2000, 'x'.repeat(40)); delta(f, message, 3000, 'x'.repeat(40));
   const usage = usageOf([finish(f, message, 3100)]);
-  assert.equal(usage.tps, 100 / 3); assert.equal(usage.genOut, 100); assert.equal(usage.output, 100);
-  assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedTokensEstimated, false);
+  assert.equal(usage.tps, 10); assert.equal(usage.genOut, 10); assert.equal(usage.output, 100);
+  assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedTokensEstimated, true);
+  assert.equal(speedDisplay(usage).label, 'Output TPS (estimated)');
 });
 
-test('answer output resumed after summarized or redacted thinking retains full request TPS', () => {
+test('answer output resumed after summarized or redacted thinking is not timed as an answer alone', () => {
   for (const kind of ['summary', 'native-summary', 'redacted']) {
     for (const resumedType of ['text_delta', 'toolcall_delta']) {
       const f = fixture(), message = { ...(kind === 'native-summary' ? nativeAnthropic() : msg()), durationMs: 600000, content: [
@@ -321,11 +330,12 @@ test('answer output resumed after summarized or redacted thinking retains full r
       assert.equal(result.__timing.answer.interrupted, true);
       assert.equal(result.__timing.answer.last - result.__timing.answer.first, 200000);
       assert.equal(result.__timing.interrupted, undefined, 'the root stream is not an answer-only sample');
-      // Interleaved reasoning does not change the full-request denominator.
-      const basis = 'request';
-      assert.equal(usage.speedBasis, basis); assert.equal(usage.genMs, 600000);
+      // A summary was seen arriving: the whole stream, first token to last. Redacted thinking in the middle
+      // leaves no window that holds only what was counted: the request as a whole, wait included.
+      const basis = kind === 'redacted' ? 'request' : 'decode';
+      assert.equal(usage.speedBasis, basis); assert.equal(usage.genMs, kind === 'redacted' ? 600000 : 200000);
       assert.equal(usage.output, 180); assert.equal(usage.reasoning, 80);
-      assert.equal(speedDisplay(usage).label, 'Request TPS');
+      assert.equal(speedDisplay(usage).label, kind === 'redacted' ? 'Request TPS' : 'Output TPS');
       const persisted = JSON.parse(JSON.stringify(result));
       assert.equal(persisted.__timing.answer.interrupted, true);
       assert.equal(usageOf(fromHistory([persisted]).messages).speedBasis, basis);
@@ -355,8 +365,8 @@ test('thinking before the answer or after its last delta does not interrupt the 
       f.emit('message_update', { message, assistantMessageEvent: { type: 'text_end', content: 'not a delta' } });
       const result = finish(f, message, 600000), usage = usageOf([result]);
       assert.equal(result.__timing.answer.interrupted, undefined, 'omit false to preserve stored window shape');
-      assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 600000);
-      assert.equal(usage.genOut, 180); assert.equal(usage.tps, 0.3);
+      assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 1000);
+      assert.equal(usage.genOut, 50); assert.equal(usage.tps, 50); // the answer's 100 tokens, less its first chunk
     }
   }
 });
@@ -373,7 +383,7 @@ test('interleaved fully streamed reasoning can still use the uninterrupted root 
   const result = finish(f, message, 600000), usage = usageOf([result]);
   assert.equal(result.__timing.answer.interrupted, true); assert.equal(result.__timing.interrupted, undefined);
   assert.equal(result.__usageProvenance, undefined); assert.equal(usage.speedScope, 'all');
-  assert.equal(usage.genMs, 600000); assert.equal(usage.genOut, 180); assert.equal(usage.tps, 0.3);
+  assert.equal(usage.genMs, 200000); assert.equal(usage.genOut, 130); assert.equal(usage.tps, 0.65);
 });
 
 test('text and tool argument deltas share an answer window; thinking stays in the root only', () => {
@@ -403,7 +413,7 @@ test('source timing and provenance survive JSON history and delayed relay replay
     assert.deepEqual(messages[0].__timing, result.__timing);
     assert.deepEqual(messages[0].__usageProvenance, result.__usageProvenance);
     assert.deepEqual(usageOf(messages), usageOf([result]));
-    assert.equal(usageOf(messages).tps, 100 / 3);
+    assert.equal(usageOf(messages).tps, 50);
   }
 });
 
@@ -505,9 +515,10 @@ test('the bridge records when the provider began its output: the first output it
     delta(f, message, 3000, 'x'.repeat(200)); delta(f, message, 5400, 'x'.repeat(200));
     const result = finish(f, message, 5500);
     assert.equal(result.__timing.genStart, 400, api);
-    // The output marker is retained, but TPS uses the complete call rather than answer timing.
+    // Hidden reasoning began at the marker: all 500 tokens were written from then to the last delta.
     const usage = usageOf([result]);
-    assert.equal(usage.speedBasis, 'request', api); assert.equal(usage.speedScope, 'all', api);
+    assert.equal(usage.speedBasis, 'decode', api); assert.equal(usage.speedScope, 'all', api);
+    assert.equal(usage.genMs, 5000, api); assert.equal(usage.tps, 100, api);
   }
   // Chat Completions streams reasoning visibly: no marker, the visible window as before.
   const f = fixture(), message = msg();

@@ -46,10 +46,11 @@ export function Popover({ anchor, open, onClose, children, placement = 'top-star
     if (!open) return;
     // Clicks inside another popover (a flyout submenu) do not dismiss this one.
     const onDown = e => { if (!ref.current?.contains(e.target) && !anchor.current?.contains(e.target) && !e.target.closest?.('.popover')) onClose(); };
-    const onKey = e => { if (e.key === 'Escape') onClose(); };
+    // Escape closes this menu and nothing behind it (Settings, say): taken before anything else hears the key.
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
     document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+    document.addEventListener('keydown', onKey, true);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey, true); };
   }, [open, onClose, anchor]);
   if (!open) return null;
   return createPortal(

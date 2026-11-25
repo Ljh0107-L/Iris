@@ -29,7 +29,8 @@ const RELAY_FILE = 'iris-relay.mjs';
 const ANTIGRAVITY_ADAPTER = 'iris-antigravity.mjs';
 const HISTORY_FILE = 'iris-history.mjs';
 const CODEX_ADAPTER = 'iris-codex.mjs';
-const CLI_FILES = [RELAY_FILE, ANTIGRAVITY_ADAPTER, CODEX_ADAPTER, HISTORY_FILE];
+const CURSOR_ADAPTER = 'iris-cursor.mjs'; // Cursor's entry: it runs the Antigravity adapter (ACP) with Cursor's profile
+const CLI_FILES = [RELAY_FILE, ANTIGRAVITY_ADAPTER, CODEX_ADAPTER, CURSOR_ADAPTER, HISTORY_FILE];
 const SCRATCH = ['/opt/tmp', '/data', '/data00', '/data0', '/mnt/data', '/scratch', '/var/tmp', '/tmp'];
 const NODE_MIRRORS = ['https://nodejs.org/dist/latest-v22.x', 'https://npmmirror.com/mirrors/node/latest-v22.x'];
 
@@ -422,6 +423,7 @@ export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, 
     relay,
     [ANTIGRAVITY_ADAPTER, readFileSync(antigravityAdapterPath ?? new URL(`../../agent/${ANTIGRAVITY_ADAPTER}`, import.meta.url))],
     [CODEX_ADAPTER, readFileSync(new URL(`../../agent/${CODEX_ADAPTER}`, import.meta.url))],
+    [CURSOR_ADAPTER, readFileSync(new URL(`../../agent/${CURSOR_ADAPTER}`, import.meta.url))],
     [HISTORY_FILE, readFileSync(new URL(`../../agent/${HISTORY_FILE}`, import.meta.url))],
   ] : [
     ...EXTENSION_FILES.map(name => [name, readFileSync(name === 'iris-bridge.js' ? bridgePath : join(dirname(bridgePath), name))]),

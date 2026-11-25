@@ -155,14 +155,14 @@ try {
 
   // ---- Settings → Subscriptions: a card per plan says what is true on the chosen machine; machines come from the app's own menu
   await page.keyboard.press('Meta+,');
-  assert.deepEqual((await page.locator('.settings-sidebar-nav button').allInnerTexts()).map(t => t.trim()), ['Subscriptions', 'Models', 'Connections', 'Translation', 'Usage'], 'sign-ins have a page of their own');
+  assert.deepEqual((await page.locator('.settings-sidebar-nav button').allInnerTexts()).map(t => t.trim()), ['Subscriptions', 'Cursor', 'Models', 'Connections', 'Translation', 'Usage'], 'sign-ins have a page of their own');
   await page.locator('.settings-sidebar-nav button', { hasText: 'Models' }).click();
   await page.locator('section[aria-label="API keys"]').waitFor();
   assert.equal(await page.locator('.cli-settings').count(), 0, 'API keys are apart from the subscriptions');
   await page.locator('.settings-sidebar-nav button', { hasText: 'Subscriptions' }).click();
   const agy = page.locator('.cli-settings');
   await agy.locator('.sub-state', { hasText: 'Not installed' }).first().waitFor();
-  assert.deepEqual(await agy.locator('.sub-card-title').allInnerTexts(), ['Codex', 'Antigravity']);
+  assert.deepEqual(await agy.locator('.sub-card-title').allInnerTexts(), ['Codex', 'Antigravity', 'Cursor']);
   assert.equal(await agy.locator('select').count(), 0, 'no system pop-up menus');
   await agy.locator('.cli-machine').click();
   await page.locator('.menu-item', { hasText: 'Lab host' }).click();

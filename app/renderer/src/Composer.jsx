@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { hasAccounts, isCliEngine, readinessKey } from './engines.js';
 import { Icon } from './Icons.jsx';
-import { SessionCliOptions, CliHistory, CliSetup, DraftCliAccount, DraftCliOptions } from './CliEngines.jsx';
+import { SessionCliOptions, CliSetup, DraftCliAccount, DraftCliOptions } from './CliEngines.jsx';
 import { HarnessPicker } from './HarnessPicker.jsx';
 import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, fileBadgeKind, shortPath } from './ui.jsx';
 import { effectiveSpeed } from '../../../agent/iris-speed.mjs';
@@ -711,7 +711,6 @@ export function ComposerBar({ session }) {
   if (isCliEngine(engine)) return <div className="composer-bar"><div className="composer-bar-left">
     {session ? <SessionCliOptions session={session} /> : <>
       <DraftCliOptions environmentId={environmentId} engine={engine} /><DraftCliAccount engine={engine} /><CliSetup key={`${engine}:${environmentId}`} environmentId={environmentId} engine={engine} />
-      <CliHistory environmentId={environmentId} engine={engine} />
     </>}{branchChip}
   </div></div>;
 

@@ -25,13 +25,13 @@ assert.equal(usageOf([message, { ...message, usage: { output: 400 }, durationMs:
 const generated = { ...message, usage: { output: 200 }, content: [{ type: 'text', text: 'x'.repeat(400) }] };
 const sourceTiming = { source: 'agent', complete: true, requestStart: 0, start: 900, first: 1000, last: 2000, end: 2500, chars: 400, deltas: 3, weight: 100, firstWeight: 10, thinkingChars: 0 };
 const generatedUsage = usageOf([{ ...generated, __timing: sourceTiming }]);
-assert.equal(generatedUsage.tps, 80, 'include pre-header wait, TTFT, first chunk and trailers');
+assert.equal(generatedUsage.tps, 180, 'from the first token to the last, less the first chunk: not the wait before it or the trailers');
 assert.equal(generatedUsage.output, 200, 'TPS never changes provider usage');
-assert.equal(generatedUsage.genMs, 2500);
-assert.equal(generatedUsage.genOut, 200);
-assert.equal(generatedUsage.speedBasis, 'request');
-assert.equal(speedDisplay(generatedUsage).label, 'Request TPS');
-assert.equal(usageOf(fromHistory([generated], { 1000: sourceTiming }).messages).tps, 80);
+assert.equal(generatedUsage.genMs, 1000);
+assert.equal(generatedUsage.genOut, 180);
+assert.equal(generatedUsage.speedBasis, 'decode');
+assert.equal(speedDisplay(generatedUsage).label, 'Output TPS');
+assert.equal(usageOf(fromHistory([generated], { 1000: sourceTiming }).messages).tps, 180);
 let t = applyEvent(emptyTranscript(), { type: 'message_start', message });
 t = applyEvent(t, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'buffered output' } });
 t = applyEvent(t, { type: 'message_end', message });
@@ -56,7 +56,7 @@ assert.equal(streamingFooter.key, footer.key);
 assert.equal(displayBlocks({ ...editing, messages: [...editing.messages, { ...user, timestamp: 3000 }] }).find(b => b.kind === 'usage').key, footer.key, 'new user prompt must not remount the old footer');
 assert.equal(usageOf([{ ...message, usage: { output: 12, reasoning: 0 } }]).reasoningReported, true, 'reported zero differs from missing reasoning');
 assert.equal(usageOf([{ ...message, usage: { output: 12 } }]).reasoningReported, false);
-console.log('PASS  transcript regressions: request TPS includes TTFT, replay, missing timing, stable groups/footers, reasoning');
+console.log('PASS  transcript regressions: speed from the first token, replay, missing timing, stable groups/footers, reasoning');
 
 // Character heuristics cannot replace a positive provider count, even for compressible text.
 const longGreeting = { ...message, timestamp: 5000, durationMs: 5886, usage: { output: 16 }, content: [{ type: 'text', text: 'x'.repeat(662) }] };
@@ -68,10 +68,11 @@ const receiptTiming = { start: 0, first: 1000, last: 3190, end: 3300, chars: 662
 assert.equal(usageOf([{ ...longGreeting, __timing: receiptTiming }]).tps, reportedSpeed.tps, 'receipt windows do not override request duration');
 const hidden = { ...message, timestamp: 7000, usage: { output: 500, reasoning: 400 }, content: [{ type: 'text', text: 'x'.repeat(400) }] };
 const hiddenUsage = usageOf([{ ...hidden, __timing: { ...sourceTiming, answer: { first: 1000, last: 2000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 } } }]);
-assert.equal(hiddenUsage.tps, 200); assert.equal(hiddenUsage.genOut, 500);
+// Hidden reasoning was not seen being written: the answer's 100 tokens (less its first chunk) over its second.
+assert.equal(hiddenUsage.tps, 90); assert.equal(hiddenUsage.genOut, 90);
 assert.equal(hiddenUsage.output, 500); assert.equal(hiddenUsage.reasoning, 400);
-assert.equal(hiddenUsage.speedScope, 'all'); assert.equal(speedDisplay(hiddenUsage).label, 'Request TPS');
-console.log('PASS  request speed provenance: authoritative counts, hidden reasoning included once, no receipt-window substitute');
+assert.equal(hiddenUsage.speedScope, 'all'); assert.equal(speedDisplay(hiddenUsage).label, 'Output TPS');
+console.log('PASS  speed provenance: authoritative counts, hidden reasoning left out with its time, no receipt-window substitute');
 
 // A user stop can arrive as an ordinary error message; it must not look like a provider failure.
 for (const text of ['This operation was aborted', 'Request was aborted', 'AbortError: The operation was aborted', 'Error: request was aborted']) {
@@ -90,8 +91,8 @@ console.log('PASS  aborted turns render as interruption notices, not errors');
 const writeCall = { ...message, timestamp: 10000, usage: { output: 100 }, content: [{ type: 'toolCall', name: 'write', arguments: { path: 'a.txt', content: 'x'.repeat(10000) } }], __timing: sourceTiming };
 const writeUsage = usageOf([writeCall]);
 assert.equal(writeUsage.speedTokensEstimated, false);
-assert.equal(writeUsage.output, 100); assert.equal(writeUsage.genOut, 100); assert.equal(writeUsage.tps, 40);
-console.log('PASS  tool-call TPS: complete request output without inflating reported counts');
+assert.equal(writeUsage.output, 100); assert.equal(writeUsage.genOut, 90); assert.equal(writeUsage.tps, 90);
+console.log('PASS  tool-call TPS: reported output over its window, without inflating reported counts');
 
 // A thought is still being thought only while nothing follows it in the reply being written.
 {

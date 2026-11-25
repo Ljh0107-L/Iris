@@ -183,35 +183,3 @@ test('Codex is started for the new-conversation screen, and the first message ta
   assert.equal(homes.filter(home => home === join(dir, 'cli-accounts', 'codex', work.id)).length, 1, 'started once, with that account’s home');
 });
 
-test('Codex’s own conversations are listed from Codex’s own home, and one becomes a conversation here that continues it', { timeout: 60000 }, async t => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pdx-hist-')));
-  const bin = join(dir, 'bin'), log = join(dir, 'calls.jsonl'), app = join(dir, 'app');
-  for (const d of [bin, app]) mkdirSync(d);
-  writeFileSync(join(bin, 'codex'), FAKE_CODEX); chmodSync(join(bin, 'codex'), 0o755); writeFileSync(log, '');
-  const calls = method => readFileSync(log, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(c => c.method === method);
-  const root = resolve('.');
-  const store = new Store(join(dir, 'data'), null, { insecureTestStorage: true });
-  const manager = new SessionManager({ store, environments: () => listEnvironments({ sshConfig: '/dev/null' }), piVersion: '0', bridgePath: join(root, 'agent/iris-bridge.js'), relayPath: join(root, 'agent/iris-relay.mjs'), cacheDir: join(dir, 'cache'),
-    local: { node: process.execPath, piCli: join(dir, 'no-pi.js'), agentDir: join(dir, 'agent'), runDir: join(dir, 'run'), uploadDir: join(dir, 'uploads'),
-      extraEnv: { PATH: `${bin}${delimiter}${process.env.PATH}`, FAKE_CODEX_LOG: log, FAKE_CODEX_SIGNED_OUT: join(dir, 'signed-out'), FAKE_CODEX_THREAD_CWD: app } } });
-  t.after(async () => { await manager.shutdown?.().catch(() => {}); rmSync(dir, { recursive: true, force: true }); });
-  mkdirSync(join(dir, 'cli-accounts', 'codex', 'default'), { recursive: true }); writeFileSync(join(dir, 'cli-accounts', 'codex', 'default', 'auth.json'), '{}');
-  const listed = await manager.cliThreads('local', 'codex');
-  assert.deepEqual(listed.map(thread => [thread.id, thread.title, thread.cwd]), [['old-1', 'Fix the parser', app], ['old-2', 'what does this repo do?', '/w/lib']]);
-  // A conversation whose folder is gone is not brought in: it would have nowhere to work.
-  await assert.rejects(manager.importCliThread('local', 'codex', listed[1]), /no longer on this Mac: \/w\/lib/);
-  // Listed with Codex's own home (where the Codex app and the terminal keep theirs), not the home Iris gives its Codex.
-  assert.equal(calls('home').at(-1).params, null);
-  const session = await manager.importCliThread('local', 'codex', listed[0]);
-  assert.deepEqual([session.title, session.cwd, session.engine, session.project], ['Fix the parser', app, 'codex', 'app']);
-  assert.deepEqual(store.sessions[0].cliImport, { id: 'old-1', path: '/codex-home/sessions/rollout-old-1.jsonl' });
-  assert.equal((await manager.importCliThread('local', 'codex', listed[0])).id, session.id, 'brought in once: asking again opens the same conversation');
-  assert.deepEqual((await manager.cliThreads('local', 'codex')).map(thread => thread.id), ['old-2'], 'and it is no longer offered');
-  // Opened, it has what was said in it, on a thread forked into Iris's own Codex home.
-  const opened = await manager.ensureStarted(session.id);
-  const { messages } = await opened.request('get_messages');
-  assert.deepEqual(messages.filter(m => m.role === 'user').map(m => m.content[0].text), ['please fix the parser', 'and the tests']);
-  assert.deepEqual(calls('thread/fork').map(c => c.params.path), ['/codex-home/sessions/rollout-old-1.jsonl']);
-  assert.match(String(calls('home').at(-1).params), /cli-accounts\/codex\/default$/);
-  await assert.rejects(manager.importCliThread('local', 'codex', { id: 'x', cwd: 'relative/path' }), /cannot be brought in/);
-});

@@ -1,8 +1,9 @@
 // Full-window Settings, modelled on DSH's settings sections and Codex's Connections page.
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Icon } from './Icons.jsx';
-import { SubscriptionSettings } from './CliEngines.jsx';
-import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
+import { EngineLogo, Icon } from './Icons.jsx';
+import { CursorSettings, SubscriptionSettings } from './CliEngines.jsx';
+import { MenuItem, MenuSection, Modal, Popover, Spinner, Trigger } from './ui.jsx';
+import { ModelMenu } from './Composer.jsx';
 import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
 import { toRow, fromRow, pickedRows } from './model-settings.js';
@@ -470,20 +471,19 @@ function UsagePage() {
 
 // ---------------------------------------------------------------- page
 // Translation of the agent's thinking in the right panel: off or on, into which language, by which of the models
-// already set up in Settings → Models. Every change is saved as it is made and says so; "Try it" sends one
-// sentence through the chosen model and shows what came back, or why nothing did.
+// already set up in Settings → Models (chosen from the same menu as the model of a conversation). Every change
+// is saved as it is made and says so; "Try it" sends one sentence through the chosen model and shows what came
+// back, or why nothing did.
 export const TRANSLATION_LANGUAGES = [['Simplified Chinese', '简体中文'], ['Traditional Chinese', '繁體中文'], ['English', 'English'], ['Japanese', '日本語'], ['Korean', '한국어'], ['Spanish', 'Español'], ['French', 'Français'], ['German', 'Deutsch']];
 const TRIAL_SENTENCE = 'The tests pass. Next I will read the adapter.';
 function TranslationPage() {
   const saved = useStore(s => s.settings?.translation) ?? { on: false, provider: '', model: '', language: 'Simplified Chinese' };
   const catalog = useStore(s => s.catalog);
   const catalogLoading = useStore(s => s.catalogLoading);
-  const providers = useStore(s => s.settings?.providers ?? []);
   const [confirmed, setConfirmed] = useState(null); // the control whose change was just saved
   const [trial, setTrial] = useState(null);         // { busy } | { text, ms } | { error }
   useEffect(() => { loadCatalog(); }, []);
   const models = useMemo(() => [...new Map((catalog ?? []).map(m => [`${m.provider}\n${m.id}`, m])).values()], [catalog]);
-  const groups = useMemo(() => providers.map(p => ({ provider: p, models: models.filter(m => m.provider === p.id) })).filter(g => g.models.length), [providers, models]);
   const chosen = models.find(m => m.provider === saved.provider && m.id === saved.model);
   const language = TRANSLATION_LANGUAGES.find(([name]) => name === saved.language)?.[1] ?? saved.language;
   const clean = error => error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
@@ -501,63 +501,74 @@ function TranslationPage() {
     catch (error) { setTrial({ error: clean(error) }); }
   };
   const Saved = ({ control }) => confirmed === control ? <span className="saved-tick" role="status"><Icon name="check" size={12} /> Saved</span> : null;
-  const state = !saved.on ? { tone: 'off', text: 'Off. Thinking is shown as the model wrote it.' }
-    : !chosen ? { tone: 'warn', text: 'On, but no model is chosen yet: thinking stays as the model wrote it until you pick one below.' }
-    : { tone: 'on', text: `On. Thinking in the right panel is shown in ${language}, translated by ${chosen.name ?? chosen.id}.` };
-  return (
-    <div className="translation-page">
-      <section className={`translation-card ${state.tone}`}>
-        <div className="translation-head">
-          <div className="translation-head-text">
-            <span className="translation-title">Translate the agent’s thinking <Saved control="on" /></span>
-            <span className={`translation-state ${state.tone}`}>{state.text}</span>
+  const state = !saved.on ? 'Off: thinking is shown as the model wrote it.'
+    : !chosen ? 'On, but no model is chosen yet. Pick one below.'
+    : `On: thinking in the right panel is shown in ${language}.`;
+  const modelLabel = chosen ? chosen.name ?? chosen.id : catalogLoading && !models.length ? 'Reading your models…' : models.length ? 'Choose a model' : 'No models yet';
+  return <>
+    <section className="section" aria-label="Translation">
+      <ul className="rows">
+        <li className="row-card setting-rows">
+          <div className="row-head">
+            <div className="setting-text">
+              <span className="row-name">Translate the agent’s thinking <Saved control="on" /></span>
+              <span className={`row-meta ${saved.on && !chosen ? 'attention' : ''}`} role="status">{state}</span>
+            </div>
+            <div className="row-actions"><Toggle on={saved.on} label="Translate thinking" onChange={on => save({ on }, 'on')} /></div>
           </div>
-          <Toggle on={saved.on} label="Translate thinking" onChange={on => save({ on }, 'on')} />
-        </div>
-        <div className="field-pair">
-          <label className="field"><span className="field-label">Into <Saved control="language" /></span>
-            <select value={saved.language} onChange={e => save({ language: e.target.value }, 'language')}>{TRANSLATION_LANGUAGES.map(([name, label]) => <option key={name} value={name}>{label}</option>)}</select>
-          </label>
-          <label className="field"><span className="field-label">With <Saved control="model" /></span>
-            <select value={chosen ? `${chosen.provider}\n${chosen.id}` : ''} disabled={!models.length}
-              onChange={e => { const [provider, model] = e.target.value.split('\n'); if (model) save({ provider, model }, 'model'); }}>
-              <option value="" disabled>{catalogLoading && !models.length ? 'Reading your models…' : models.length ? 'Choose a model' : 'No models yet'}</option>
-              {groups.map(group => <optgroup key={group.provider.id} label={group.provider.name ?? group.provider.id}>
-                {group.models.map(m => <option key={m.id} value={`${m.provider}\n${m.id}`}>{m.name ?? m.id}</option>)}
-              </optgroup>)}
-            </select>
-          </label>
-        </div>
-        {!models.length && !catalogLoading && <div className="translation-note">
-          <span>Translation uses one of the models in Settings → Models. A small, fast one is enough.</span>
-          <button type="button" className="button small" onClick={() => openSettings(true, 'providers')}>Open Models</button>
-        </div>}
-      </section>
-      <section className="translation-card">
-        <div className="translation-head">
-          <div className="translation-head-text">
-            <span className="translation-title">Try it</span>
-            <span className="translation-state">One sentence through the chosen model, to see that it answers.</span>
+          <div className="row-head">
+            <div className="setting-text"><span className="row-name">Language <Saved control="language" /></span></div>
+            <div className="row-actions">
+              <Trigger className="setting-select" label="Language" width={220} placement="bottom-end"
+                menu={close => <MenuSection>{TRANSLATION_LANGUAGES.map(([name, label]) => <MenuItem key={name} label={label} checked={saved.language === name}
+                  onClick={() => { close(); if (saved.language !== name) save({ language: name }, 'language'); }} />)}</MenuSection>}>
+                <span>{language}</span><Icon name="chevronDown" size={11} />
+              </Trigger>
+            </div>
           </div>
-          <button type="button" className="button small" disabled={!chosen || trial?.busy} onClick={tryIt}>{trial?.busy ? <><Spinner size={12} /> Translating…</> : 'Translate a sentence'}</button>
-        </div>
-        <div className="translation-trial">
+          <div className="row-head">
+            <div className="setting-text">
+              <span className="row-name">Model <Saved control="model" /></span>
+              <span className="row-meta">One of the models in Settings → Models. A small, fast one is enough.</span>
+            </div>
+            <div className="row-actions">
+              <Trigger className={`setting-select ${chosen ? '' : 'unset'}`} label="Translation model" width={320} placement="bottom-end"
+                menu={close => <ModelMenu value={chosen ? { provider: chosen.provider, id: chosen.id } : null} environmentId="local" close={close}
+                  onChange={({ provider, id }) => { if (provider !== saved.provider || id !== saved.model) save({ provider, model: id }, 'model'); }} />}>
+                <span>{modelLabel}</span><Icon name="chevronDown" size={11} />
+              </Trigger>
+            </div>
+          </div>
+        </li>
+      </ul>
+    </section>
+    <section className="section" aria-label="Try it">
+      <div className="section-head"><h2 className="section-title">Try it</h2></div>
+      <ul className="rows">
+        <li className="row-card setting-rows">
+          <div className="row-head">
+            <div className="setting-text"><span className="row-meta">One sentence through the chosen model, to see that it answers.</span></div>
+            <div className="row-actions">
+              <button type="button" className="button small" disabled={!chosen || trial?.busy} onClick={tryIt}>{trial?.busy ? <><Spinner size={12} /> Translating…</> : 'Translate a sentence'}</button>
+            </div>
+          </div>
           <div className="translation-trial-row"><span className="translation-trial-label">English</span><span>{TRIAL_SENTENCE}</span></div>
           <div className={`translation-trial-row ${trial?.error ? 'failed' : trial?.text ? 'done' : ''}`} role="status">
             <span className="translation-trial-label">{language}</span>
             <span>{trial?.busy ? 'Waiting for the model…' : trial?.error ? trial.error : trial?.text ? trial.text : chosen ? 'Not tried yet.' : 'Choose a model first.'}</span>
             {trial?.text && <span className="translation-trial-time">{(trial.ms / 1000).toFixed(1)}s</span>}
           </div>
-        </div>
-      </section>
-    </div>
-  );
+        </li>
+      </ul>
+    </section>
+  </>;
 }
 
 export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
-    { id: 'subscriptions', label: 'Subscriptions', icon: 'key', title: 'Subscriptions' }, // plans used through their own CLIs: Codex, Antigravity
+    { id: 'subscriptions', label: 'Subscriptions', icon: 'key', title: 'Subscriptions' }, // plans used through their own CLIs: Codex, Antigravity, Cursor
+    { id: 'cursor', label: 'Cursor', logo: 'cursor', title: 'Cursor' }, // which of Cursor's many models its menu lists
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' }, // API keys, for Pi and Claude Code
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
     { id: 'translation', label: 'Translation', icon: 'globe', title: 'Translation' },
@@ -574,13 +585,13 @@ export function SettingsPage() {
         <div className="settings-body">
           <aside className="settings-sidebar">
             <nav className="settings-sidebar-nav">
-              {pages.map(p => <button key={p.id} className={`nav-item ${p.id === page.id ? 'active' : ''}`} onClick={() => openSettings(true, p.id)}><Icon name={p.icon} size={18} stroke={1.6} /> {p.label}</button>)}
+              {pages.map(p => <button key={p.id} className={`nav-item ${p.id === page.id ? 'active' : ''}`} onClick={() => openSettings(true, p.id)}>{p.logo ? <EngineLogo engine={p.logo} size={18} className="nav-logo" /> : <Icon name={p.icon} size={18} stroke={1.6} />} {p.label}</button>)}
             </nav>
           </aside>
           <main className="settings-main">
             <div className="settings-content">
               <h1 className="settings-title">{page.title}</h1>
-              {page.id === 'subscriptions' ? <SubscriptionSettings /> : page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'translation' ? <TranslationPage /> : <ConnectionsPage />}
+              {page.id === 'subscriptions' ? <SubscriptionSettings /> : page.id === 'cursor' ? <CursorSettings /> : page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'translation' ? <TranslationPage /> : <ConnectionsPage />}
             </div>
           </main>
         </div>

@@ -11,9 +11,9 @@ Notes for coding agents working in this repository. People should start with [RE
 
 ## Rules
 
-- Tests and manual checks use an isolated profile (`IRIS_USER_DATA`, or `launch()` in `test/harness.mjs`). Never start a real Codex, Antigravity or model session against the user's own accounts to test something.
+- Tests and manual checks use an isolated profile (`IRIS_USER_DATA`, or `launch()` in `test/harness.mjs`). Never start a real Codex, Antigravity, Cursor or model session against the user's own accounts to test something (unless the user asks for it).
 - `agent/` runs on remote hosts with plain Node: no dependencies, and no imports from `app/`.
-- The four agents share one event protocol. A change to events or session state must keep Pi, Claude Code, Codex and Antigravity working; the adapters' tests are `test/claude-code.test.mjs`, `test/codex-*.test.mjs` and `test/antigravity-*.test.mjs`.
+- The five agents share one event protocol. A change to events or session state must keep Pi, Claude Code, Codex, Antigravity and Cursor working; the adapters' tests are `test/claude-code.test.mjs`, `test/codex-*.test.mjs`, `test/antigravity-*.test.mjs` and `test/cursor.test.mjs`. Antigravity and Cursor share one adapter (`agent/iris-antigravity.mjs`, with a profile per CLI).
 - Text shown in the interface is English, plain and specific.
 
 ## Releases

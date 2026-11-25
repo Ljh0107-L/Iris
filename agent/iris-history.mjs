@@ -89,7 +89,7 @@ export function projectEntry(entry, ref, { preview = true, omitted = false } = {
   if (placeholder) {
     state.clipped = true;
     out = { role: message.role, timestamp: message.timestamp, stopReason: message.stopReason, toolName: message.toolName, toolCallId: message.toolCallId,
-      content: [], ...(message.provider === 'antigravity' ? { provider: message.provider } : {}) };
+      content: [], ...(['antigravity', 'cursor'].includes(message.provider) ? { provider: message.provider } : {}) };
   }
   // Usage/timing are compact metadata, not excerpts; never calculate costs from truncated fields.
   for (const key of ['usage', '__timing', '__speed', '__usageProvenance', '__agyTurn']) if (message[key] && bytes(message[key]) < 8192) out[key] = message[key];

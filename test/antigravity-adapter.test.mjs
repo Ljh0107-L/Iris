@@ -322,6 +322,25 @@ test('speed is measured per model request: a turn lists its requests, and the ti
   assert.equal(usageOf([reply]).genMs, reply.requests[0].ms + reply.requests[1].ms);
 });
 
+test('the wait for a request’s first output, and the thought that came whole with it, are not in its speed', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  const seen = [];
+  peer.onEvent?.(e => seen.push(e));
+  await peer.request('prompt', { message: 'slow start' });
+  await peer.next(event('agent_settled'));
+  const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
+  const [request] = reply.requests;
+  // 150 ms before anything came; then a thought (whole) and the answer, written over 120 ms.
+  assert.ok(request.wait >= 140 && request.wait < 260, `the wait (${request.wait} ms)`);
+  assert.ok(request.ms - request.wait >= 100 && request.ms - request.wait < 220, `the writing (${request.ms - request.wait} ms of ${request.ms})`);
+  assert.ok(request.lead > 0.4 && request.lead < 0.6, `the thought is about half of what was written (${request.lead})`);
+  const speed = usageOf([requestReplies([reply])[0]]);
+  assert.equal(speed.speedBasis, 'decode'); assert.equal(speed.genMs, request.ms - request.wait);
+  assert.ok(Math.abs(speed.genOut - 40 * (1 - request.lead)) < 1e-9, 'the turn\'s 40 tokens, less the share that came with the first output');
+});
+
 test('a turn of one model request has its exact tokens, not an estimate', { timeout: 12000 }, async t => {
   const f = fixture(t, {}, true);
   const peer = f.start();

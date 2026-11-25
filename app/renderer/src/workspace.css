@@ -2476,44 +2476,34 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 
 .thinking-feed p.pending { opacity: .72; }
 
-/* Conversations from Codex's own history, on the new-conversation screen. */
-.cli-history { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
-.cli-history-search { width: 100%; height: 30px; padding: 0 10px; border: 1px solid var(--hairline); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: var(--fs-md); }
-.cli-history-list { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
-.cli-history-row { display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border: 0; border-radius: 8px; background: none; text-align: left; color: var(--text); font: inherit; cursor: pointer; }
-.cli-history-row:hover:not(:disabled) { background: var(--row-hover); }
-.cli-history-row:disabled { opacity: .6; cursor: default; }
-.cli-history-title { font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cli-history-meta { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cli-history-note { display: flex; align-items: center; gap: 7px; padding: 8px; font-size: var(--fs-sm); color: var(--muted); }
-
-/* Under the thinking: what the translation is doing (working, done and by which model, or why not). */
 .thinking-foot { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--hairline); font-size: var(--fs-xs); color: var(--faint); }
 .thinking-foot > svg, .thinking-foot > .spinner { flex-shrink: 0; }
 .thinking-foot-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thinking-foot.failed { color: var(--amber); }
 .thinking-foot-action { flex-shrink: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--muted); cursor: pointer; }
 .thinking-foot-action:hover { color: var(--text); }
-/* Settings → Translation: two cards, each a line that says where things stand and the controls under it. */
-.translation-page { display: flex; flex-direction: column; gap: 14px; }
-.translation-card { display: flex; flex-direction: column; gap: 14px; padding: 16px 18px; border: 1px solid var(--hairline); border-radius: 12px; }
-.translation-card.on { border-color: color-mix(in srgb, var(--green, #34c759) 45%, var(--hairline)); }
-.translation-card.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--hairline)); }
-.translation-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.translation-head-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.translation-title { display: flex; align-items: center; gap: 8px; font-size: var(--fs-base); font-weight: 500; color: var(--text); }
-.translation-state { font-size: var(--fs-md); line-height: 1.45; color: var(--muted); }
-.translation-state.on { color: var(--text-2); }
-.translation-state.warn { color: var(--amber); }
-.translation-card .field-label { display: flex; align-items: center; gap: 8px; }
-.translation-card .button.small { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; }
+/* Settings rows that hold a setting each (Translation): a name, a line under it, and its control at the right. */
+.row-card.setting-rows { gap: 0; padding: 0 14px; }
+.setting-rows > * { padding: 12px 0; }
+.setting-rows > * + * { border-top: 1px solid var(--hairline); }
+.setting-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.setting-text .row-name { display: flex; align-items: center; gap: 8px; }
+.setting-text .row-meta { white-space: normal; line-height: 1.45; }
+.setting-text .row-meta.attention { color: var(--amber); }
+.trigger.setting-select { height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); max-width: 280px; }
+.trigger.setting-select.unset { color: var(--muted); }
+.setting-rows .button.small { display: inline-flex; align-items: center; gap: 6px; }
 .saved-tick { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-xs); font-weight: 400; color: var(--green, #34c759); animation: rise .18s var(--ease, ease-out); }
-.translation-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: var(--fs-md); color: var(--muted); }
-.translation-trial { display: flex; flex-direction: column; border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; }
-.translation-trial-row { display: flex; align-items: baseline; gap: 12px; padding: 10px 12px; font-size: var(--fs-md); line-height: 1.5; color: var(--muted); }
-.translation-trial-row + .translation-trial-row { border-top: 1px solid var(--hairline); }
+.setting-rows > .translation-trial-row { display: flex; align-items: baseline; gap: 12px; padding: 10px 0; font-size: var(--fs-md); line-height: 1.5; color: var(--muted); }
 .translation-trial-row.done { color: var(--text); }
 .translation-trial-row.failed { color: var(--red); }
 .translation-trial-label { flex-shrink: 0; width: 76px; font-size: var(--fs-xs); color: var(--faint); }
 .translation-trial-row > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .translation-trial-time { flex-shrink: 0; font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
+
+/* Settings → Cursor: its models, each with a switch, under a search field. */
+.cursor-model-search { width: 100%; height: 32px; margin: 2px 0 0; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raised); color: var(--text); font: inherit; font-size: var(--fs-md); }
+.cursor-model-search:focus-visible { outline: none; border-color: var(--border-strong); }
+.setting-rows.cursor-models > .row-head { padding: 9px 0; }
+.nav-item .engine-logo.nav-logo { border-radius: 4px; }
+.cli-menu-scroll { max-height: min(420px, calc(100vh - 220px)); }

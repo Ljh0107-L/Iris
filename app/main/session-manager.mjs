@@ -18,7 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/iris-speed.mjs';
 import { readHistory } from '../../agent/iris-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, cliThreads, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, CURSOR_ENGINE, CURSOR_INSTALL, newestCursorCli, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -603,7 +603,7 @@ export class SessionManager extends EventEmitter {
   async cliSignIn(environmentId, { engine = ANTIGRAVITY_ENGINE, account = null } = {}) {
     const env = this.env(environmentId);
     if (env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
-    if (engine !== CODEX_ENGINE) return this.cliAccountStatus(environmentId, { login: true, engine, account });
+    if (!cliEngine(engine).signInPage) return this.cliAccountStatus(environmentId, { login: true, engine, account });
     const id = this.#cliAccount(engine, account), key = `${engine}:${env.id}:${id ?? ''}`;
     const running = (this.cliSignIns ??= new Map()).get(key);
     if (running) return running.promise;
@@ -687,6 +687,7 @@ export class SessionManager extends EventEmitter {
     const env = this.env(environmentId);
     // Codex is installed with npm, in the user's own login shell, where they can watch it.
     if (action === 'install' && engine === CODEX_ENGINE) return { env, bin: 'sh', args: ['-c', 'exec "${SHELL:-sh}" -lic "npm install -g @openai/codex"'] };
+    if (action === 'install' && engine === CURSOR_ENGINE) return { env, bin: 'sh', args: ['-c', CURSOR_INSTALL] };
     const bin = await this.#cliBinary(env, engine);
     const args = action === 'login' ? cliEngine(engine).login(env, engine === ANTIGRAVITY_ENGINE ? AGY_DATA_DIR : null) : [];
     // Codex signs in to Iris's own home (one per account); Antigravity signs in to the data directory its
@@ -697,14 +698,19 @@ export class SessionManager extends EventEmitter {
     // directory (where npm and Homebrew put node as well); on a host, that directory comes first.
     const path = env.kind === 'local' ? [dirname(bin), ...(this.local.extraEnv?.PATH ?? process.env.PATH ?? '').split(delimiter)].filter(Boolean) : [dirname(bin)];
     if (home) return { env, path, bin: 'sh', args: ['-c', 'mkdir -p "$1" && chmod 700 "$1" && home=$1 && shift && CODEX_HOME="$home" exec "$@"', 'sh', home, bin, ...args] };
-    if (action === 'login' && engine === ANTIGRAVITY_ENGINE && env.kind === 'ssh') return { env, path, ...remoteLoginCommand(await this.prepare(env.id, { engine }), engine, bin, AGY_DATA_DIR) };
+    // On a host the sign-in runs through the adapter there, with what a conversation's CLI gets (Cursor's then
+    // prints its page instead of opening a browser on the host).
+    if (action === 'login' && engine !== CODEX_ENGINE && env.kind === 'ssh') {
+      const facts = await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE });
+      return { env, path, ...remoteLoginCommand(facts, engine, bin, this.#cliHome(env, facts, engine, account)) };
+    }
     return { env, path, bin, args };
   }
 
   // Codex always runs with full access, as its conversations here are the user's own machine and
   // account. Antigravity keeps its one switch in Settings → Subscriptions (off by default: full access too).
   cliPermissionMode(record) {
-    if (record?.engine === CODEX_ENGINE) return 'bypassPermissions';
+    if (record?.engine === CODEX_ENGINE || record?.engine === CURSOR_ENGINE) return 'bypassPermissions';
     return this.store.settings.defaults?.antigravityBypassPermissions === false ? 'confirm' : 'bypassPermissions';
   }
 
@@ -757,35 +763,6 @@ export class SessionManager extends EventEmitter {
     clearTimeout(this.cliStatusSave);
     this.cliStatusSave = setTimeout(() => { try { this.store.saveSettings(); } catch { /* kept until the next check */ } }, 1500);
     this.cliStatusSave.unref?.();
-  }
-  // Codex's own conversations on a machine (see cliThreads), without those already brought into Iris.
-  async cliThreads(environmentId, engine = CODEX_ENGINE) {
-    if (engine !== CODEX_ENGINE) return [];
-    const env = this.env(environmentId);
-    const bin = await this.#findCli(env, engine);
-    if (!bin) throw new Error(antigravityInstallMessage(env, engine));
-    const facts = env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null;
-    const taken = new Set(this.store.sessions.filter(s => s.engine === engine && s.environmentId === env.id && s.cliImport?.id).map(s => s.cliImport.id));
-    return (await cliThreads(env, { bin, local: this.local, facts, engine, run: this.runRemote })).filter(thread => !taken.has(thread.id));
-  }
-  // One of them becomes a conversation here: in its folder, under its name, with what was said in it (written
-  // into the transcript when it first opens) and continued on a thread of Iris's own. The original is not touched.
-  async importCliThread(environmentId, engine, thread) {
-    if (engine !== CODEX_ENGINE) throw new Error('Only Codex conversations can be brought in.');
-    const env = this.env(environmentId);
-    const text = (value, max) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
-    const id = text(thread?.id, 200), cwd = text(thread?.cwd, 2000), path = text(thread?.path, 4000);
-    if (!id || !cwd?.startsWith('/')) throw new Error('That conversation cannot be brought in.');
-    // It continues in the folder it was in; a folder that is gone cannot be worked in.
-    if (env.kind === 'local' && !existsSync(cwd)) throw new Error(`The folder of that conversation is no longer on this Mac: ${cwd}`);
-    const existing = this.store.sessions.find(s => s.engine === engine && s.environmentId === env.id && s.cliImport?.id === id && !s.archived);
-    if (existing) return this.#view(existing);
-    const now = Date.now();
-    const record = { id: randomUUID(), title: titleFrom(text(thread.title, 160) ?? 'Codex conversation'), environmentId: env.id, environmentLabel: env.label, cwd,
-      project: env.kind === 'local' ? basename(cwd) : remoteBase(cwd), engine, cliImport: { id, ...(path?.startsWith('/') ? { path } : {}) },
-      createdAt: now, updatedAt: now, ...(Number.isFinite(thread.updatedAt) ? { lastMessageAt: thread.updatedAt } : {}) };
-    this.#add(record);
-    return this.#view(record);
   }
   cliAccountLast(environmentId, engine = ANTIGRAVITY_ENGINE, account = null) {
     const key = this.#menuKey(engine, environmentId, account), last = this.store.settings.cliStatus?.[key];
@@ -847,6 +824,10 @@ export class SessionManager extends EventEmitter {
   // Antigravity; on a host without a keychain it lives in this directory, so Iris signs in there.
   #cliHome(env, facts, engine, account) {
     if (engine === ANTIGRAVITY_ENGINE) return AGY_DATA_DIR;
+    // Cursor: a config directory of its own (CURSOR_CONFIG_DIR), for its conversations and its model choice,
+    // which the CLI shares between all the conversations of a directory. On a Mac the sign-in stays in the
+    // keychain, shared with the user's own Cursor; on a host it is kept in this directory.
+    if (engine === CURSOR_ENGINE) return env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-accounts', engine) : `${facts.root}/cli-accounts/${engine}`;
     const id = this.#cliAccount(engine, account) ?? 'default';
     return env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-accounts', engine, id) : `${facts.root}/cli-accounts/${engine}/${id}`;
   }
@@ -945,7 +926,8 @@ export class SessionManager extends EventEmitter {
     if (env.kind === 'local') {
       if (engine === ANTIGRAVITY_ENGINE) return this.locateCli(this.cliSearch ?? undefined);
       await this.local.envReady; // the login shell's PATH: an npm-installed CLI is only on that one
-      return findCli({ name, path: this.local.extraEnv?.PATH ?? process.env.PATH ?? '', ...this.cliSearch });
+      return findCli({ name, path: this.local.extraEnv?.PATH ?? process.env.PATH ?? '', ...this.cliSearch })
+        ?? (engine === CURSOR_ENGINE && this.cliSearch?.system !== false ? newestCursorCli() : null);
     }
     const key = engine === ANTIGRAVITY_ENGINE ? env.id : `${engine}:${env.id}`;
     const cached = this.cliBins.get(key);
@@ -972,7 +954,7 @@ export class SessionManager extends EventEmitter {
   }
   #view(record) {
     const runtime = this.runtimes.get(record.id);
-    const engine = [CLAUDE_ENGINE, ANTIGRAVITY_ENGINE, CODEX_ENGINE].includes(record.engine) ? record.engine : 'pi';
+    const engine = record.engine === CLAUDE_ENGINE || isCliEngineId(record.engine) ? record.engine : 'pi';
     return { ...record, engine, ...(isCliSession(record) ? { cli: runtime?.cli,
       ...(runtime?.status === 'error' && runtime.error ? { statusMessage: runtime.error } : {}) } : {}),
       status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, compacting: isCompacting(runtime), pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
@@ -1975,7 +1957,7 @@ export class SessionManager extends EventEmitter {
 
   async compact(id) {
     const record = this.record(id);
-    if (record.engine === ANTIGRAVITY_ENGINE) throw new Error('Compact is not available in Antigravity conversations.');
+    if (isCliEngineId(record.engine) && record.engine !== CODEX_ENGINE) throw new Error(`Compact is not available in ${cliEngine(record.engine).label} conversations.`);
     if (record.engine === CODEX_ENGINE) {
       const session = await this.ensureStarted(id);
       const runtime = this.runtimes.get(id);

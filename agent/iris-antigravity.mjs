@@ -7,9 +7,25 @@ import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
-const ENGINE = 'antigravity';
-const AUTH_METHOD = 'oauth-personal';
-const BINDING = 'iris-antigravity-session';
+// The agents this adapter runs: each is its vendor's official CLI, spoken to over ACP and signed in with the
+// person's own account there. What differs between them is here.
+export const PROFILES = {
+  antigravity: { engine: 'antigravity', label: 'Antigravity', service: 'Google', authMethod: 'oauth-personal', binding: 'iris-antigravity-session',
+    args: config => ['acp', ...(config.appDataDir ? ['--app-data-dir', config.appDataDir] : []), ...(config.bypassPermissions ? ['--dangerously-skip-permissions'] : [])],
+    loginArgs: dataDir => ['acp', '--login', ...(dataDir ? ['--app-data-dir', dataDir] : [])], homeEnv: () => ({}) },
+  // Cursor signs in with its own command (agent login); over ACP it only takes up that sign-in (authenticate),
+  // which it needs before anything else. It never opens a browser from here (NO_OPEN_BROWSER).
+  // Its model is one choice of the CLI's, shared by its conversations (globalModel): each conversation here
+  // keeps its own and sets it again before it sends. It asks for a model's settings (effort, context, speed)
+  // as menus of their own (parameterizedModelPicker) rather than as one long list of every combination. It
+  // says nothing between a turn's model requests, so a tool call is where one ends (requestsByTools).
+  cursor: { engine: 'cursor', label: 'Cursor', service: 'Cursor', authMethod: 'cursor_login', binding: 'iris-cursor-session', authenticate: true, acpSignIn: false,
+    env: { NO_OPEN_BROWSER: '1' }, clientCapabilities: { _meta: { parameterizedModelPicker: true } }, globalModel: true, listModels: 'cursor/list_available_models', requestsByTools: true,
+    titles: true, // it names a conversation after its first message (session_info_update)
+    args: config => [...(config.bypassPermissions ? ['--force'] : []), 'acp'],
+    loginArgs: () => ['login'], homeEnv: home => text(home) && isAbsolute(home) ? { CURSOR_CONFIG_DIR: home } : {} },
+};
+const profileOf = engine => PROFILES[Object.hasOwn(PROFILES, engine) ? engine : 'antigravity'];
 const CONTROL_MS = 12000;
 // Opening a session can wait on a cold CLI or a slow host. A timeout here is not retried (see
 // Transcript), so it must be generous: only a CLI that is really stuck should reach it. Together with
@@ -58,19 +74,20 @@ const CLI_ENV = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_pro
   'LC_MONETARY', 'LC_NAME', 'LC_NUMERIC', 'LC_PAPER', 'LC_TELEPHONE', 'LC_TIME',
   'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
   'DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS'];
-function cliEnv(env) {
-  return Object.fromEntries(CLI_ENV.filter(key => has(env, key)).map(key => [key, env[key]]));
+function cliEnv(env, profile = PROFILES.antigravity) {
+  return { ...Object.fromEntries(CLI_ENV.filter(key => has(env, key)).map(key => [key, env[key]])), ...profile.env };
 }
 
 // A binding is append-only. An interrupted session/new may have reached the CLI, so never
 // issue another one for that file unless the CLI confirmed it had rejected the first for auth.
 class Transcript {
-  constructor({ cwd, sessionsDir, sessionFile, recordId }) {
+  constructor({ cwd, sessionsDir, sessionFile, recordId, profile = PROFILES.antigravity }) {
+    this.p = profile;
     this.entries = [];
     this.leafId = null;
     this.binding = null;
     const id = randomUUID(), timestamp = new Date().toISOString();
-    const dir = join(sessionsDir, 'antigravity');
+    const dir = join(sessionsDir, this.p.engine);
     this.file = sessionFile ?? join(dir, `${recordId ?? id}.jsonl`);
     let existing = !!sessionFile;
     try {
@@ -89,20 +106,21 @@ class Transcript {
       const stat = fstatSync(this.fd);
       if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error('Not a private session file');
       if (!existing) {
-        this.header = { type: 'session', version: 3, id, timestamp, cwd, engine: ENGINE };
+        this.header = { type: 'session', version: 3, id, timestamp, cwd, engine: this.p.engine };
         this.#write([this.header]);
       } else {
         const records = readFileSync(this.fd, 'utf8');
         if (!records.endsWith('\n')) throw new Error('Incomplete session file');
         const lines = records.split('\n');
         this.header = JSON.parse(lines.shift());
-        if (this.header?.type !== 'session' || this.header.engine !== ENGINE || !text(this.header.id) || this.header.cwd !== cwd) throw new Error('Invalid session header');
+        if (this.header?.type !== 'session' || this.header.engine !== this.p.engine || !text(this.header.id) || this.header.cwd !== cwd) throw new Error('Invalid session header');
         const ids = new Set();
         for (const line of lines) {
           if (!line) continue;
           const entry = JSON.parse(line);
           if (!text(entry?.id) || ids.has(entry.id) || entry.parentId !== this.leafId || entry.type === 'session') throw new Error('Invalid session entry');
-          if (entry.type === 'custom' && entry.customType === BINDING) {
+          if (entry.type === 'custom' && entry.customType === `${this.p.binding}:choices` && object(entry.data)) this.choices = entry.data;
+          if (entry.type === 'custom' && entry.customType === this.p.binding) {
             const binding = entry.data;
             if (this.binding?.sessionId || !object(binding) || !(text(binding.sessionId) || typeof binding.creating === 'boolean')) throw new Error('Invalid session binding');
             this.binding = binding;
@@ -113,7 +131,7 @@ class Transcript {
       }
     } catch {
       this.close();
-      throw new Error(existing ? 'Cannot read the original Antigravity transcript. No replacement was started.' : 'Cannot create a private Antigravity transcript.');
+      throw new Error(existing ? `Cannot read the original ${this.p.label} transcript. No replacement was started.` : `Cannot create a private ${this.p.label} transcript.`);
     }
   }
 
@@ -125,7 +143,7 @@ class Transcript {
     } catch {
       // An append could have partly succeeded. Do not link a new entry across that uncertainty.
       this.writeFailed = true;
-      throw new Error('Cannot save the Antigravity transcript.');
+      throw new Error(`Cannot save the ${this.p.label} transcript.`);
     }
   }
 
@@ -141,12 +159,18 @@ class Transcript {
   }
 
   bind(data) {
-    this.append([{ type: 'custom', customType: BINDING, data }]);
+    this.append([{ type: 'custom', customType: this.p.binding, data }]);
     this.binding = data;
   }
 
+  // What this conversation chose (model and its settings), where the CLI keeps one choice for all of them.
+  choose(data) {
+    this.append([{ type: 'custom', customType: `${this.p.binding}:choices`, data }]);
+    this.choices = data;
+  }
+
   messages() { return this.entries.filter(e => e.type === 'message').map(e => e.message); }
-  publicEntries() { return this.entries.map(e => e.type === 'custom' && e.customType === BINDING ? { ...e, data: undefined } : e); }
+  publicEntries() { return this.entries.map(e => e.type === 'custom' && (e.customType === this.p.binding || e.customType === `${this.p.binding}:choices`) ? { ...e, data: undefined } : e); }
   close() { if (this.fd !== undefined) { closeSync(this.fd); this.fd = undefined; } }
 }
 
@@ -157,10 +181,10 @@ const REQUESTS = {
   'session/set_config_option': 'change session settings', 'session/prompt': 'complete the prompt',
 };
 class AcpError extends Error {
-  constructor(error, method) {
+  constructor(error, method, label = 'Antigravity') {
     const code = Number.isInteger(error?.code) ? error.code : null;
     const what = REQUESTS[method];
-    super(`Antigravity could not ${what}${code == null ? '' : ` (ACP error ${code})`}.`);
+    super(`${label} could not ${what}${code == null ? '' : ` (ACP error ${code})`}.`);
     this.code = code;
     // -32000 is also used as a generic server error by JSON-RPC implementations.
     this.authRequired = code === -32000 && typeof error?.message === 'string' &&
@@ -170,15 +194,16 @@ class AcpError extends Error {
 
 class AcpPeer {
   constructor(config, env, onRecord, onDisconnect) {
-    const args = ['acp', ...(config.appDataDir ? ['--app-data-dir', config.appDataDir] : []), ...(config.bypassPermissions ? ['--dangerously-skip-permissions'] : [])];
-    try { this.child = spawn(config.bin, args, { cwd: config.cwd, env: cliEnv(env), stdio: ['pipe', 'pipe', 'ignore'] }); }
-    catch { throw new Error('Could not start the configured Antigravity CLI.'); }
+    this.p = config.profile ?? PROFILES.antigravity;
+    if (config.home) try { mkdirSync(config.home, { recursive: true, mode: 0o700 }); } catch { /* the CLI says what is wrong */ }
+    try { this.child = spawn(config.bin, this.p.args(config), { cwd: config.cwd, env: { ...cliEnv(env, this.p), ...this.p.homeEnv(config.home) }, stdio: ['pipe', 'pipe', 'ignore'] }); }
+    catch { throw new Error(`Could not start the configured ${this.p.label} CLI.`); }
     this.pending = new Map();
     this.nextId = 0;
     this.seq = 0;
     this.closed = false;
     this.onDisconnect = onDisconnect;
-    const broken = () => this.close(new Error('The Antigravity CLI connection closed.'));
+    const broken = () => this.close(new Error(`The ${this.p.label} CLI connection closed.`));
     this.exited = new Promise(resolve => {
       this.child.once('exit', () => {
         resolve(true);
@@ -187,7 +212,7 @@ class AcpPeer {
       });
       this.child.on('error', () => {
         if (!this.child.pid) resolve(true);
-        this.close(new Error('Could not start or communicate with the configured Antigravity CLI.'));
+        this.close(new Error(`Could not start or communicate with the configured ${this.p.label} CLI.`));
       });
     });
     this.child.once('close', broken);
@@ -204,12 +229,12 @@ class AcpPeer {
         else if (this.pending.has(record.id)) {
           const p = this.pending.get(record.id);
           this.pending.delete(record.id); clearTimeout(p.timer);
-          if (has(record, 'error')) p.reject(new AcpError(record.error, p.method));
+          if (has(record, 'error')) p.reject(new AcpError(record.error, p.method, this.p.label));
           else if (has(record, 'result')) p.resolve({ result: record.result, seq });
-          else p.reject(new Error('Invalid response from the Antigravity CLI.'));
+          else p.reject(new Error(`Invalid response from the ${this.p.label} CLI.`));
         }
-      } catch { this.close(new Error('The Antigravity CLI sent an invalid ACP record.')); }
-    }, () => this.close(new Error('An Antigravity CLI ACP record exceeded the size limit.')));
+      } catch { this.close(new Error(`The ${this.p.label} CLI sent an invalid ACP record.`)); }
+    }, () => this.close(new Error(`An ${this.p.label} CLI ACP record exceeded the size limit.`)));
   }
 
   send(fields) {
@@ -218,11 +243,11 @@ class AcpPeer {
   }
 
   request(method, params, timeout = CONTROL_MS) {
-    if (this.closed) return Promise.reject(new Error('The Antigravity CLI connection closed.'));
+    if (this.closed) return Promise.reject(new Error(`The ${this.p.label} CLI connection closed.`));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       // No answer usually means the CLI is waiting on the network: it asks Google before it replies.
-      const timer = timeout ? setTimeout(() => this.close(new Error(`Antigravity did not answer in time (asked to ${REQUESTS[method] ?? method}). It may not be reaching Google from this machine.`)), timeout) : null;
+      const timer = timeout ? setTimeout(() => this.close(new Error(`${this.p.label} did not answer in time (asked to ${REQUESTS[method] ?? method}). It may not be reaching ${this.p.service} from this machine.`)), timeout) : null;
       this.pending.set(id, { method, resolve, reject, timer });
       this.send({ id, method, params });
     });
@@ -248,11 +273,11 @@ class AcpPeer {
   }
 }
 
-const initParams = version => ({ protocolVersion: 1, clientCapabilities: {},
+const initParams = (version, P = PROFILES.antigravity) => ({ protocolVersion: 1, clientCapabilities: P.clientCapabilities ?? {},
   clientInfo: { name: 'iris', title: 'Iris', version: version ?? '0.0.0' } });
 // The CLI takes a plain name for its data directory, which it keeps under ~/.gemini beside its own.
 const dataDirName = home => text(home) && /^[\w.-]+$/.test(home) && !home.startsWith('.') ? home : undefined;
-const personalAuth = init => Array.isArray(init?.authMethods) && init.authMethods.some(m => m?.id === AUTH_METHOD && (m.type == null || m.type === 'agent'));
+const personalAuth = (init, P = PROFILES.antigravity) => P.acpSignIn !== false && Array.isArray(init?.authMethods) && init.authMethods.some(m => m?.id === P.authMethod && (m.type == null || m.type === 'agent'));
 
 // Settings can probe or authenticate without opening a chat. session/list is read-only;
 // its result (including the user's conversation metadata) never leaves this process.
@@ -262,22 +287,24 @@ const personalAuth = init => Array.isArray(init?.authMethods) && init.authMethod
 // menus: { dir } asks, once signed in, what a new conversation can choose from. ACP only says that in the
 // reply to session/new, so one is opened in `dir` (an empty folder of Iris's) and closed again; no message
 // is sent.
-async function account({ bin, cwd, login, version, home = null, menus = null }) {
-  if (!isAbsolute(bin ?? '')) throw new Error('Missing Antigravity CLI.');
+async function account({ bin, cwd, login, version, home = null, menus = null, profile: P = PROFILES.antigravity }) {
+  if (!isAbsolute(bin ?? '')) throw new Error(`Missing ${P.label} CLI.`);
   const appDataDir = dataDirName(home);
   const probe = menus && isAbsolute(menus.dir ?? '') && appDataDir ? menus : null;
-  const peer = new AcpPeer({ bin, cwd, ...(appDataDir ? { appDataDir } : {}) }, process.env, (p, r) => {
+  const peer = new AcpPeer({ bin, cwd, profile: P, ...(appDataDir ? { appDataDir } : {}) }, process.env, (p, r) => {
     if (rpcId(r.id)) p.send({ id: r.id, error: { code: -32601, message: 'Method not supported' } });
   }, () => {});
   let canSignIn = false;
   try {
-    const { result: init } = await peer.request('initialize', initParams(version));
-    if (init?.protocolVersion !== 1) throw new Error('The Antigravity CLI did not negotiate ACP version 1.');
-    canSignIn = personalAuth(init);
+    const { result: init } = await peer.request('initialize', initParams(version, P));
+    if (init?.protocolVersion !== 1) throw new Error(`The ${P.label} CLI did not negotiate ACP version 1.`);
+    canSignIn = personalAuth(init, P);
+    // Cursor takes up its own sign-in first; without one it says so (authRequired, below).
+    if (P.authenticate) await peer.request('authenticate', { methodId: P.authMethod });
     const canCheck = object(init.agentCapabilities?.sessionCapabilities?.list);
     if (login) {
       if (!canSignIn) return { signedIn: null, canSignIn };
-      await peer.request('authenticate', { methodId: AUTH_METHOD }, LOGIN_MS);
+      await peer.request('authenticate', { methodId: P.authMethod }, LOGIN_MS);
     }
     if (canCheck) await peer.request('session/list', {});
     const signedIn = canCheck || login ? true : null;
@@ -299,29 +326,38 @@ async function account({ bin, cwd, login, version, home = null, menus = null }) 
   } finally { await peer.close(new Error('Account check finished.')); }
 }
 
-function selectConfig(options) {
+// A name as shown: some CLIs pad theirs with invisible characters (Cursor's "Fast\u200b\u200b").
+const shownName = name => name.replace(/[\u200b-\u200d\u2060\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+export function selectConfig(options) {
   const seen = new Set();
   return (Array.isArray(options) ? options : []).flatMap(o => {
-    if (!text(o?.id) || seen.has(o.id) || o.type !== 'select' || !text(o.name) || typeof o.currentValue !== 'string') return [];
-    // Only model and reasoning controls belong in the desktop MVP, not CLI permission modes.
+    if (!text(o?.id) || seen.has(o.id) || o.type !== 'select' || !text(o.name) || !shownName(o.name) || typeof o.currentValue !== 'string') return [];
+    // The model, its reasoning and its other settings (Cursor's context, speed), not CLI permission modes.
     const category = o.category ?? (o.id === 'model' ? 'model' : ['effort', 'thinking', 'thinking_level', 'thought_level'].includes(o.id) ? 'thought_level' : null);
-    if (category !== 'model' && category !== 'thought_level') return [];
+    if (category !== 'model' && category !== 'thought_level' && category !== 'model_config') return [];
     seen.add(o.id);
     const values = new Set();
     const choices = (Array.isArray(o.options) ? o.options : []).flatMap(choice =>
       text(choice?.group) && Array.isArray(choice.options) ? choice.options : [choice]);
-    return [{ id: o.id, name: o.name, category, currentValue: o.currentValue,
+    return [{ id: o.id, name: shownName(o.name), category, currentValue: o.currentValue,
       options: choices.flatMap(choice => {
-        if (typeof choice?.value !== 'string' || values.has(choice.value) || !text(choice.name)) return [];
+        if (typeof choice?.value !== 'string' || values.has(choice.value) || !text(choice.name) || !shownName(choice.name)) return [];
         values.add(choice.value);
-        return [{ value: choice.value, name: choice.name }];
+        return [{ value: choice.value, name: shownName(choice.name) }];
       }) }];
   });
 }
 
 // Antigravity's own tools, by what the CLI sends for them: `update_steps` carries the whole task list,
 // `invoke_subagent` the role and the brief of an agent it starts.
+// Cursor's task list (its updateTodos tool) and the agents it starts (task) come as a tool's input, named in
+// `_toolName`; a status may be a word or an enum name ("TODO_STATUS_IN_PROGRESS").
+const todoStatus = status => /complete|done/i.test(String(status ?? '')) ? 'completed' : /progress/i.test(String(status ?? '')) ? 'in_progress' : 'pending';
 function stepsOf(update) {
+  const todos = update?.rawInput?.todos;
+  if (update?.rawInput?._toolName === 'updateTodos' && Array.isArray(todos)) {
+    return todos.filter(todo => text(todo?.content)).slice(0, 50).map(todo => ({ content: todo.content.slice(0, 300), status: todoStatus(todo.status) }));
+  }
   const steps = update?.rawInput?.steps;
   if (!/update_steps/i.test(update?.title ?? '') || !Array.isArray(steps)) return null;
   return steps.filter(step => text(step?.title)).slice(0, 50).map(step => ({ content: step.title.slice(0, 300),
@@ -340,6 +376,11 @@ function asksOf(tool) {
 }
 function agentOf(tool) {
   const raw = tool.raw;
+  if (raw?._toolName === 'task' && (text(raw.prompt) || text(raw.description))) {
+    const type = typeof raw.subagentType === 'string' ? raw.subagentType : text(raw.subagentType?.custom) ? raw.subagentType.custom : null;
+    return { name: 'Task', arguments: { description: (text(raw.description) ? raw.description : raw.prompt.split('\n')[0]).slice(0, 120), prompt: String(raw.prompt ?? '').slice(0, 4000),
+      subagent_type: type && !/^(unspecified|SUBAGENT_TYPE_UNSPECIFIED)$/i.test(type) ? type.replace(/^SUBAGENT_TYPE_/, '').toLowerCase().slice(0, 40) : 'Agent' } };
+  }
   if (!/invoke_subagent/i.test(tool.title ?? '') || !text(raw?.Prompt)) return null;
   return { name: 'Task', arguments: { description: (text(raw.Role) ? raw.Role : raw.Prompt.split('\n')[0]).slice(0, 120), prompt: raw.Prompt.slice(0, 4000),
     subagent_type: text(raw.TypeName) && raw.TypeName !== 'self' ? raw.TypeName.slice(0, 40) : 'Agent', ...(text(raw.Model) ? { model: raw.Model.slice(0, 60) } : {}) } };
@@ -357,11 +398,15 @@ const toolTime = runs => {
 const EDIT_SHOWN = 200000; // characters of a written or changed file kept for the conversation
 // The file before and after a change, as the CLI reports it once the change is made.
 const shownDiff = content => { const diff = (Array.isArray(content) ? content : []).find(block => block?.type === 'diff' && typeof block.newText === 'string'); return diff ? { oldText: typeof diff.oldText === 'string' ? diff.oldText : null, newText: diff.newText } : null; };
+// (Cursor names a command `command`, a file `path`, a code search `pattern`, a web search `searchTerm`.)
 function toolOf(tool) {
   const raw = tool.raw ?? {};
-  const path = tool.paths[0] ?? (text(raw.Path) && isAbsolute(raw.Path) ? raw.Path : null);
+  const named = [raw.Path, raw.path].find(value => text(value) && isAbsolute(value));
+  const path = tool.paths[0] ?? named ?? null;
+  if (raw._toolName === 'askQuestion' && Array.isArray(raw.questions)) return { name: 'AskUserQuestion', arguments: { questions: raw.questions.filter(q => text(q?.prompt)).slice(0, 8)
+    .map(q => ({ question: q.prompt.slice(0, 2000), options: (Array.isArray(q.options) ? q.options : []).filter(o => text(o?.label)).slice(0, 24).map(o => ({ label: o.label.slice(0, 300) })), ...(q.allowMultiple ? { multiSelect: true } : {}) })) } };
   if (tool.kind === 'execute') {
-    const command = text(raw.CommandLine) ? raw.CommandLine : tool.title;
+    const command = text(raw.CommandLine) ? raw.CommandLine : text(raw.command) ? raw.command : tool.title;
     return text(command) ? { name: 'bash', arguments: { command: command.slice(0, 20000), ...(text(raw.toolSummary) ? { description: raw.toolSummary.slice(0, 200) } : {}) } } : null;
   }
   if (tool.kind === 'read' && path) return { name: 'read', arguments: { path } };
@@ -375,11 +420,30 @@ function toolOf(tool) {
     if (diff && diff.oldText.length <= EDIT_SHOWN && diff.newText.length <= EDIT_SHOWN) return { name: 'edit', arguments: { path, edits: [{ oldText: diff.oldText, newText: diff.newText }] } };
     return { name: 'edit', arguments: { path } };
   }
-  if (tool.kind === 'search' && text(raw.query)) return { name: 'WebSearch', arguments: { query: raw.query.slice(0, 500) } };
+  if (tool.kind === 'search' && text(raw.searchTerm)) return { name: 'WebSearch', arguments: { query: raw.searchTerm.slice(0, 500) } };
+  if (tool.kind === 'search' && text(raw.pattern)) return text(raw.path) || !/[*?{]/.test(raw.pattern)
+    ? { name: 'grep', arguments: { pattern: raw.pattern.slice(0, 2000), ...(text(raw.path) ? { path: raw.path.slice(0, 4000) } : {}) } }
+    : { name: 'find', arguments: { pattern: raw.pattern.slice(0, 2000) } };
+  if (tool.kind === 'search' && Object.keys(raw).length === 1 && text(raw.path)) return { name: 'ls', arguments: { path: raw.path.slice(0, 4000) } };
+  if (tool.kind === 'search' && text(raw.query) && !tool.codebase) return { name: 'WebSearch', arguments: { query: raw.query.slice(0, 500) } };
   // The CLI's own housekeeping for commands it left running: it lists them, or asks how one is doing.
   if (tool.cliName === 'manage_task' || /^Run manage_task$/.test(tool.title ?? '')) return { name: 'manage_task', arguments: { ...(text(raw.Action) ? { action: raw.Action.slice(0, 40) } : {}) } };
   if (tool.kind === 'fetch' && text(raw.Url ?? raw.url)) return { name: 'WebFetch', arguments: { url: String(raw.Url ?? raw.url).slice(0, 2000) } };
   return null;
+}
+// What a tool returned, where the CLI gives it as data (Cursor's rawOutput) rather than as content.
+function outputOf(raw) {
+  if (!object(raw)) return [];
+  const shown = value => typeof value === 'string' ? value : '';
+  if ('stdout' in raw || 'stderr' in raw) {
+    const printed = [shown(raw.stdout), shown(raw.stderr)].filter(Boolean).join(shown(raw.stdout).endsWith('\n') || !raw.stdout ? '' : '\n');
+    return [{ type: 'text', text: commandOutput(printed || (Number.isInteger(raw.exitCode) && raw.exitCode ? `Exit code ${raw.exitCode}` : '(no output)')) }];
+  }
+  if (typeof raw.content === 'string') return [{ type: 'text', text: commandOutput(raw.content) }];
+  if (text(raw.error)) return [{ type: 'text', text: raw.error.slice(0, 2000) }];
+  const counts = [['totalMatches', 'match', 'matches'], ['totalFiles', 'file', 'files'], ['resultCount', 'result', 'results'], ['totalDiagnostics', 'problem', 'problems']]
+    .flatMap(([key, one, many]) => Number.isFinite(raw[key]) ? [`${raw[key]} ${raw[key] === 1 ? one : many}${raw.truncated ? ' (more were left out)' : ''}`] : []);
+  return counts.length ? [{ type: 'text', text: counts.join(', ') }] : [];
 }
 // What the CLI reports for a finished turn: tokens read, read from cache (counted apart: its total is the sum of
 // input, cached and output), written, and of those written, thought.
@@ -406,8 +470,8 @@ const shownContent = content => (Array.isArray(content) ? content : []).flatMap(
   block?.type === 'content' && block.content?.type === 'text' && typeof block.content.text === 'string' ? [{ type: 'text', text: commandOutput(block.content.text) }] : []);
 const shownPaths = locations => (Array.isArray(locations) ? locations : []).flatMap(location => text(location?.path) ? [location.path] : []);
 const image = block => block?.type === 'image' && /^image\/(?:png|jpeg|gif|webp)$/.test(block.mimeType) && text(block.data);
-const slashCommands = list => (Array.isArray(list) ? list : []).slice(0, 256).flatMap(c =>
-  /^[\w:.-]{1,120}$/.test(c?.name ?? '') ? [{ name: c.name, description: typeof c.description === 'string' ? c.description.slice(0, 400) : '', source: ENGINE,
+const slashCommands = (list, engine = 'antigravity') => (Array.isArray(list) ? list : []).slice(0, 256).flatMap(c =>
+  /^[\w:.-]{1,120}$/.test(c?.name ?? '') ? [{ name: c.name, description: typeof c.description === 'string' ? c.description.slice(0, 400) : '', source: engine,
     ...(text(c.input?.hint) ? { argumentHint: c.input.hint.slice(0, 200) } : {}) }] : []);
 const contextOf = ({ used, size }) => Number.isSafeInteger(used) && used >= 0 && Number.isSafeInteger(size) && size > 0
   ? { tokens: used, contextWindow: size, percent: 100 * used / size } : null;
@@ -422,9 +486,15 @@ function requestsOf(requests, usage) {
   const thought = Math.min(usage.reasoning ?? 0, usage.output), written = usage.output - thought;
   const said = requests.reduce((n, r) => n + r.text + r.tools, 0), mused = requests.reduce((n, r) => n + r.thinking, 0);
   const share = (part, whole) => whole > 0 ? part / whole : 1 / requests.length;
-  return requests.map(r => ({ ms: r.ms, output: Math.round(written * share(r.text + r.tools, said) + thought * (mused > 0 ? r.thinking / mused : share(r.text + r.tools, said))),
+  return requests.map(r => ({ ms: r.ms, ...waitOf(r), output: Math.round(written * share(r.text + r.tools, said) + thought * (mused > 0 ? r.thinking / mused : share(r.text + r.tools, said))),
     ...(requests.length > 1 ? { estimated: true } : {}) }));
 }
+// How long a request waited for its first output (wait), and the share of its output that came with it (lead:
+// a thought arrives whole, written before anyone saw it). Speed is measured over the rest.
+const waitOf = r => Number.isFinite(r.wait) ? { wait: r.wait, lead: r.text + r.thinking + r.tools > 0 ? Math.min(1, r.firstSize / (r.text + r.thinking + r.tools)) : 0 } : {};
+// The requests that have ended in a turn still under way, before the CLI has counted the turn's tokens: their
+// output is what was written, measured (an estimate).
+const openRequests = requests => requests.flatMap(r => r.text + r.thinking + r.tools >= 1 ? [{ ms: r.ms, ...waitOf(r), output: Math.round(r.text + r.thinking + r.tools), estimated: true }] : []);
 const estimateOutput = blocks => Math.max(0, Math.round(blocks.reduce((n, block) => {
   const printed = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking : '';
   const cjk = (printed.match(/[\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g) ?? []).length;
@@ -432,13 +502,14 @@ const estimateOutput = blocks => Math.max(0, Math.round(blocks.reduce((n, block)
 }, 0)));
 
 export class AntigravityAdapter {
-  constructor({ boot, write, env = process.env }) {
-    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, standby, home } = boot?.antigravity ?? {};
-    // home: Iris's own Antigravity data directory, so its conversations stay out of the user's own
+  constructor({ boot, write, env = process.env, engine = 'antigravity' }) {
+    this.p = profileOf(engine);
+    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, standby, home } = boot?.[this.p.engine] ?? {};
+    // home: Iris`s own ${this.p.label} data directory, so its conversations stay out of the user`s own
     // Antigravity. On a Mac the Google sign-in is in the keychain and shared with it; on a machine without
     // one it is kept in this directory, which is why Iris signs in with the same directory (account()).
     this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true,
-      appDataDir: dataDirName(home) };
+      appDataDir: this.p.engine === 'antigravity' ? dataDirName(home) : undefined, home: this.p.engine !== 'antigravity' && text(home) && isAbsolute(home) ? home : undefined, profile: this.p };
     this.standby = standby === true && sessionFile == null;
     this.write = write;
     this.env = env;
@@ -464,7 +535,7 @@ export class AntigravityAdapter {
 
   #serial(fn) {
     const run = this.controls.then(() => {
-      if (this.closed) throw new Error('The Antigravity adapter stopped.');
+      if (this.closed) throw new Error(`The ${this.p.label} adapter stopped.`);
       return fn();
     });
     this.controls = run.catch(() => {});
@@ -493,8 +564,8 @@ export class AntigravityAdapter {
       case 'cli_set_config': return this.#serial(() => this.#setConfig(r.configId, r.value));
       case 'prompt': {
         const images = r.images ?? [];
-        if (!Array.isArray(images) || !images.every(image)) throw new Error('Choose a PNG, JPEG, GIF, or WebP image for Antigravity.');
-        if (!(text(r.message) && r.message.trim()) && !images.length) throw new Error('Enter a message for Antigravity.');
+        if (!Array.isArray(images) || !images.every(image)) throw new Error(`Choose a PNG, JPEG, GIF, or WebP image for ${this.p.label}.`);
+        if (!(text(r.message) && r.message.trim()) && !images.length) throw new Error(`Enter a message for ${this.p.label}.`);
         const epoch = this.cancelEpoch;
         this.#askClosed();
         return this.#serial(() => this.#prompt(r.message ?? '', images, epoch));
@@ -508,7 +579,7 @@ export class AntigravityAdapter {
       }
       case 'get_session_stats': return this.contextUsage ? { contextUsage: this.contextUsage } : null;
       case 'get_commands': return { commands: this.commands };
-      default: throw new Error('This command is not supported by the Antigravity adapter.');
+      default: throw new Error(`This command is not supported by the ${this.p.label} adapter.`);
     }
   }
 
@@ -516,10 +587,10 @@ export class AntigravityAdapter {
     if (!this.transcript && (create || this.config.sessionFile != null)) {
       const { cwd, sessionsDir, sessionFile, recordId } = this.config;
       if (recordId != null && (typeof recordId !== 'string' || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(recordId))) {
-        throw new Error('Invalid Antigravity conversation ID.');
+        throw new Error(`Invalid ${this.p.label} conversation ID.`);
       }
       if (![cwd, sessionsDir, ...(sessionFile == null ? [] : [sessionFile])].every(v => text(v) && isAbsolute(v))) {
-        throw new Error('Antigravity requires absolute local working directory and transcript paths.');
+        throw new Error(`${this.p.label} requires absolute local working directory and transcript paths.`);
       }
       this.transcript = new Transcript(this.config);
     }
@@ -530,15 +601,16 @@ export class AntigravityAdapter {
     return { authRequired: this.authRequired, canSignIn: this.canSignIn, options: this.options,
       image: this.capabilities?.promptCapabilities?.image === true,
       permissionMode: this.config.bypassPermissions ? 'bypassPermissions' : 'confirm', commands: this.commands, contextUsage: this.contextUsage,
+      ...(this.turn?.requests.length ? { turnRequests: openRequests(this.turn.requests) } : {}),
       ...(this.standby ? { standby: true } : {}) };
   }
   #model() {
     const id = this.options.find(o => o.category === 'model')?.currentValue;
-    return id ? { provider: ENGINE, id } : null;
+    return id ? { provider: this.p.engine, id } : null;
   }
   #state() {
     const model = this.#model();
-    return { engine: ENGINE, sessionId: this.transcript?.header.id ?? null, sessionFile: this.transcript?.file ?? null,
+    return { engine: this.p.engine, sessionId: this.transcript?.header.id ?? null, sessionFile: this.transcript?.file ?? null,
       isStreaming: !!this.turn, isCompacting: false, pendingMessageCount: 0, cli: this.#cliState(), ...(model ? { model } : {}) };
   }
   #updateState() { this.write({ type: 'cli_state', cli: this.#cliState() }); }
@@ -553,32 +625,77 @@ export class AntigravityAdapter {
   #replaceOptions(options, seq) {
     if (!Array.isArray(options) || seq < this.configSeq) return;
     this.configSeq = seq;
-    this.options = selectConfig(options);
+    this.rawOptions = options;
+    this.options = this.#withSettings(selectConfig(options));
     this.#updateState();
+  }
+  // Each model with the settings it has of its own (Cursor's effort, context, speed), so that picking another
+  // model shows its menus at once (`sub`, as Codex's models carry theirs).
+  #withSettings(options) {
+    if (!this.modelSettings) return options;
+    return options.map(o => o.category !== 'model' ? o : { ...o, options: o.options.map(choice => this.modelSettings.has(choice.value) ? { ...choice, sub: this.modelSettings.get(choice.value) } : choice) });
+  }
+  async #loadModelSettings(peer) {
+    if (!this.p.listModels || this.modelSettings || this.loadingSettings) return;
+    this.loadingSettings = true;
+    try {
+      const { result } = await peer.request(this.p.listModels, {}, MENUS_MS);
+      if (peer !== this.peer || !Array.isArray(result?.models)) return;
+      this.modelSettings = new Map(result.models.filter(m => text(m?.value)).slice(0, 200).map(m => [m.value, selectConfig(m.configOptions)]));
+      if (this.rawOptions) { this.options = this.#withSettings(selectConfig(this.rawOptions)); this.#updateState(); }
+    } catch { /* the model menu works without them */ }
+    finally { this.loadingSettings = false; }
+  }
+  // Before a message goes: this conversation's own model and settings, where the CLI keeps one choice for all of
+  // its conversations (another may have changed it since, and what this process last heard may be out of date:
+  // so it is set each time). The model first, since it decides which settings exist. A conversation that never
+  // chose keeps the model it started with.
+  async #applyChoices() {
+    if (!this.p.globalModel || !this.sessionId) return;
+    if (!object(this.transcript.choices)) {
+      const started = Object.fromEntries(this.options.filter(o => o.category !== 'model' || o.options.some(choice => choice.value === o.currentValue)).map(o => [o.id, o.currentValue]));
+      if (Object.keys(started).length) this.transcript.choose(started);
+      return;
+    }
+    const want = this.transcript.choices;
+    const model = this.options.find(o => o.category === 'model');
+    for (const id of Object.keys(want).sort((a, b) => (b === model?.id) - (a === model?.id))) {
+      const option = this.options.find(o => o.id === id);
+      if (!option || !option.options.some(choice => choice.value === want[id])) continue;
+      const peer = this.peer;
+      const { result, seq } = await peer.request('session/set_config_option', { sessionId: this.sessionId, configId: id, value: want[id] });
+      if (peer.closed) throw new Error(`The ${this.p.label} CLI connection closed.`);
+      this.#replaceOptions(result?.configOptions, seq);
+    }
   }
 
   async #initialize() {
     if (this.peer && !this.peer.closed) return this.capabilities;
-    if (this.peer && !await this.peer.stopped) throw new Error('The previous Antigravity CLI process did not stop.');
-    if (this.closed) throw new Error('The Antigravity adapter stopped.');
-    if (!text(this.config.bin) || !isAbsolute(this.config.bin)) throw new Error('An explicit path to the official Antigravity CLI is required.');
+    if (this.peer && !await this.peer.stopped) throw new Error(`The previous ${this.p.label} CLI process did not stop.`);
+    if (this.closed) throw new Error(`The ${this.p.label} adapter stopped.`);
+    if (!text(this.config.bin) || !isAbsolute(this.config.bin)) throw new Error(`An explicit path to the official ${this.p.label} CLI is required.`);
     const peer = new AcpPeer(this.config, this.env, (p, r, seq) => this.#onRecord(p, r, seq), p => this.#disconnected(p));
     this.peer = peer;
     this.capabilities = {};
     this.configSeq = 0;
     let init;
     try {
-      ({ result: init } = await peer.request('initialize', initParams(this.config.clientVersion)));
+      ({ result: init } = await peer.request('initialize', initParams(this.config.clientVersion, this.p)));
     } catch (error) {
       if (!error.authRequired) peer.close(error);
       throw error;
     }
     if (init?.protocolVersion !== 1 || peer.closed) {
-      const error = new Error('The Antigravity CLI did not negotiate ACP version 1.');
+      const error = new Error(`The ${this.p.label} CLI did not negotiate ACP version 1.`);
       peer.close(error); throw error;
     }
     this.capabilities = init.agentCapabilities ?? {};
-    this.canSignIn = !this.config.remote && personalAuth(init);
+    this.canSignIn = !this.config.remote && personalAuth(init, this.p);
+    // Cursor: the sign-in made with its own command is taken up before anything else can be asked.
+    if (this.p.authenticate) {
+      try { await peer.request('authenticate', { methodId: this.p.authMethod }); }
+      catch (error) { if (!error.authRequired) peer.close(error); throw error; }
+    }
     return this.capabilities;
   }
 
@@ -594,7 +711,7 @@ export class AntigravityAdapter {
   }
 
   async #activate(cwd) {
-    if (!text(cwd) || !isAbsolute(cwd) || (!this.standby && cwd !== this.config.cwd)) throw new Error('Invalid Antigravity workspace.');
+    if (!text(cwd) || !isAbsolute(cwd) || (!this.standby && cwd !== this.config.cwd)) throw new Error(`Invalid ${this.p.label} workspace.`);
     // ACP's session/new takes the session's own working directory. A No-folder
     // spare can run in the shared root until the first message names its folder.
     this.config.cwd = cwd;
@@ -604,7 +721,7 @@ export class AntigravityAdapter {
   }
 
   async #ensureReady() {
-    if (this.standby) throw new Error('Open the Antigravity conversation first.');
+    if (this.standby) throw new Error(`Open the ${this.p.label} conversation first.`);
     const tr = this.#transcript();
     if (this.peer && !this.peer.closed && (this.sessionId || this.authRequired)) return;
     // An earlier session/new never reported its ID (the CLI timed out, crashed or was stopped mid-start).
@@ -612,7 +729,7 @@ export class AntigravityAdapter {
     // empty: trying again loses nothing, while refusing at once left the conversation unusable for good.
     // Bounded, so a CLI that keeps creating sessions without answering cannot fill the account with them.
     if (tr.binding?.creating && (tr.binding.attempts ?? 1) >= NEW_SESSION_ATTEMPTS) {
-      throw new Error('Antigravity did not confirm a new session after several attempts. No further session was started; start a new conversation to continue.');
+      throw new Error(`${this.p.label} did not confirm a new session after several attempts. No further session was started; start a new conversation to continue.`);
     }
     try { await this.#initialize(); }
     catch (error) { if (error.authRequired) { this.#authNeeded(); return; } throw error; }
@@ -622,10 +739,10 @@ export class AntigravityAdapter {
   async #open() {
     const tr = this.transcript, saved = tr.binding?.sessionId;
     const peer = this.peer;
-    if (this.closed || peer.closed) throw new Error('The Antigravity CLI connection closed.');
+    if (this.closed || peer.closed) throw new Error(`The ${this.p.label} CLI connection closed.`);
     const method = !saved ? 'session/new' : object(this.capabilities.sessionCapabilities?.resume) ? 'session/resume' :
       this.capabilities.loadSession === true ? 'session/load' : null;
-    if (!method) throw new Error('The Antigravity CLI cannot resume this session. No replacement was started.');
+    if (!method) throw new Error(`The ${this.p.label} CLI cannot resume this session. No replacement was started.`);
     const opening = { saved, latest: null, metadata: new Map() };
     this.opening = opening;
     try {
@@ -633,10 +750,10 @@ export class AntigravityAdapter {
       if (!saved) tr.bind({ creating: true, attempts: (tr.binding?.creating ? tr.binding.attempts ?? 1 : 0) + 1 });
       const { result, seq } = await peer.request(method, { cwd: this.config.cwd, mcpServers: [], ...(saved ? { sessionId: saved } : {}) }, OPEN_MS);
       const sessionId = saved ?? result?.sessionId;
-      if (!text(sessionId) || (saved && result?.sessionId != null && result.sessionId !== saved)) throw new Error('Antigravity did not return the expected session ID.');
+      if (!text(sessionId) || (saved && result?.sessionId != null && result.sessionId !== saved)) throw new Error(`${this.p.label} did not return the expected session ID.`);
       // Record a successful new session even if the pipe closes immediately after the reply.
       if (!saved) tr.bind({ sessionId });
-      if (this.closed || peer.closed) throw new Error('The Antigravity CLI connection closed.');
+      if (this.closed || peer.closed) throw new Error(`The ${this.p.label} CLI connection closed.`);
       this.sessionId = sessionId;
       this.authRequired = false;
       this.options = [];
@@ -647,6 +764,7 @@ export class AntigravityAdapter {
       if (early && (early.seq > seq || !Array.isArray(result?.configOptions))) this.#replaceOptions(early.options, early.seq);
       else if (Array.isArray(result?.configOptions)) this.#replaceOptions(result.configOptions, seq);
       else this.#updateState();
+      void this.#loadModelSettings(peer);
     } catch (error) {
       // The CLI answered that it created nothing (an ACP error, sign-in needed): the next attempt starts clean.
       // A timeout or a closed pipe stays recorded as an unconfirmed attempt (see #ensureReady).
@@ -655,7 +773,7 @@ export class AntigravityAdapter {
         this.#authNeeded();
         return;
       }
-      if (saved && error instanceof AcpError && error.code === -32002) throw new Error('The original Antigravity session was not found. No replacement was started.');
+      if (saved && error instanceof AcpError && error.code === -32002) throw new Error(`The original ${this.p.label} session was not found. No replacement was started.`);
       throw error;
     } finally { this.opening = null; }
   }
@@ -664,42 +782,49 @@ export class AntigravityAdapter {
     await this.#ensureReady();
     if (this.sessionId) return this.#state();
     if (!this.authRequired || !this.canSignIn) throw new Error(this.config.remote
-      ? 'Sign in to Antigravity on this host in Settings → Subscriptions, then reconnect.' : 'Sign in using the official Antigravity CLI, then reconnect.');
-    try { await this.peer.request('authenticate', { methodId: AUTH_METHOD }, LOGIN_MS); }
+      ? `Sign in to ${this.p.label} on this host in Settings → Subscriptions, then reconnect.` : `Sign in using the official ${this.p.label} CLI, then reconnect.`);
+    try { await this.peer.request('authenticate', { methodId: this.p.authMethod }, LOGIN_MS); }
     catch (error) { if (error.authRequired) { this.#authNeeded(); return this.#state(); } throw error; }
     await this.#open();
     return this.#state();
   }
 
   async #setConfig(configId, value) {
-    if (this.turn) throw new Error('Wait for the current Antigravity turn to finish.');
+    if (this.turn) throw new Error(`Wait for the current ${this.p.label} turn to finish.`);
     await this.#ensureReady();
-    if (!this.sessionId) throw new Error('Sign in to Antigravity before changing session settings.');
-    if (!this.options.find(o => o.id === configId)?.options.some(choice => choice.value === value)) throw new Error('That Antigravity setting is not an advertised option.');
+    if (!this.sessionId) throw new Error(`Sign in to ${this.p.label} before changing session settings.`);
+    if (!this.options.find(o => o.id === configId)?.options.some(choice => choice.value === value)) throw new Error(`That ${this.p.label} setting is not an advertised option.`);
     const peer = this.peer;
     try {
       const { result, seq } = await peer.request('session/set_config_option', { sessionId: this.sessionId, configId, value });
-      if (peer.closed) throw new Error('The Antigravity CLI connection closed.');
+      if (peer.closed) throw new Error(`The ${this.p.label} CLI connection closed.`);
+      const model = this.options.find(o => o.id === configId)?.category === 'model';
       this.#replaceOptions(result?.configOptions, seq);
+      // Another model has settings of its own: what was chosen for the one before does not carry over.
+      if (this.p.globalModel) this.transcript.choose({ ...(model ? {} : this.transcript.choices), [configId]: value });
     } catch (error) { if (error.authRequired) this.#authNeeded(); else throw error; }
     return this.#state();
   }
 
   async #prompt(message, images, epoch) {
-    if (this.turn) throw new Error('Antigravity is already responding; stop this turn before sending another prompt.');
-    if (this.cancelEpoch !== epoch) throw new Error('The Antigravity prompt was cancelled before it started.');
+    if (this.turn) throw new Error(`${this.p.label} is already responding; stop this turn before sending another prompt.`);
+    if (this.cancelEpoch !== epoch) throw new Error(`The ${this.p.label} prompt was cancelled before it started.`);
     await this.#ensureReady();
-    if (this.closed || this.cancelEpoch !== epoch) throw new Error('The Antigravity prompt was cancelled before it started.');
-    if (!this.sessionId) throw new Error('Sign in to Antigravity before sending a prompt.');
-    if (images.length && this.capabilities?.promptCapabilities?.image !== true) throw new Error('This Antigravity CLI does not accept image prompts.');
+    if (this.closed || this.cancelEpoch !== epoch) throw new Error(`The ${this.p.label} prompt was cancelled before it started.`);
+    if (!this.sessionId) throw new Error(`Sign in to ${this.p.label} before sending a prompt.`);
+    try { await this.#applyChoices(); }
+    catch (error) { if (error.authRequired) { this.#authNeeded(); throw new Error(`Sign in to ${this.p.label} before sending a prompt.`); } throw error; }
+    if (this.closed || this.cancelEpoch !== epoch) throw new Error(`The ${this.p.label} prompt was cancelled before it started.`);
+    if (images.length && this.capabilities?.promptCapabilities?.image !== true) throw new Error(`This ${this.p.label} CLI does not accept image prompts.`);
     const prompt = [...(message ? [{ type: 'text', text: message }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', mimeType, data }))];
     // The ACP line reader and the relay both have finite record sizes.
-    if (Buffer.byteLength(JSON.stringify(prompt)) > 6 * 1024 * 1024) throw new Error('Antigravity prompts must be smaller than 6 MB after encoding.');
+    if (Buffer.byteLength(JSON.stringify(prompt)) > 6 * 1024 * 1024) throw new Error(`${this.p.label} prompts must be smaller than 6 MB after encoding.`);
     const user = { role: 'user', content: prompt, timestamp: Date.now() };
     this.transcript.append([{ type: 'message', message: user }]);
     const turn = { sessionId: this.sessionId, startedAt: Math.max(Date.now(), user.timestamp + 1), tools: new Map(), content: [], model: this.#model()?.id,
       // The model requests of the turn (see requestsOf): those that ended, and what the one being answered has written.
       requests: [], open: { text: 0, thinking: 0, tools: 0 }, from: Date.now() };
+    // (open.first: when the request under way first wrote something; open.firstSize: how much that was.)
     this.turn = turn;
     this.write({ type: 'agent_start' });
     this.#message(user);
@@ -709,11 +834,11 @@ export class AntigravityAdapter {
       ({ result }) => {
         const reason = STOP.get(result?.stopReason);
         turn.usage = turnUsage(result?.usage);
-        this.#finishTurn(turn, reason ?? 'error', reason ? null : 'Antigravity returned an unrecognized stop reason.');
+        this.#finishTurn(turn, reason ?? 'error', reason ? null : `${this.p.label} returned an unrecognized stop reason.`);
         return !!reason;
       }, error => {
         const aborted = turn.cancelled || error.code === -32800;
-        this.#finishTurn(turn, aborted ? 'aborted' : 'error', aborted ? null : error.authRequired ? 'Sign in to Antigravity to continue.' : error.message);
+        this.#finishTurn(turn, aborted ? 'aborted' : 'error', aborted ? null : error.authRequired ? `Sign in to ${this.p.label} to continue.` : error.message);
         if (!this.closed && error.authRequired) this.#authNeeded();
         return error instanceof AcpError;
       });
@@ -721,7 +846,8 @@ export class AntigravityAdapter {
   }
 
   #assistant(turn, content) {
-    return { role: 'assistant', content, provider: ENGINE, api: 'antigravity-acp', ...(turn.model ? { model: turn.model } : {}), timestamp: turn.startedAt };
+    return { role: 'assistant', content, provider: this.p.engine, api: `${this.p.engine}-acp`, ...(turn.model ? { model: turn.model } : {}),
+      ...(turn.responseModel ? { responseModel: turn.responseModel } : {}), timestamp: turn.startedAt };
   }
   #message(message) { this.write({ type: 'message_start', message }); this.write({ type: 'message_end', message }); }
   #delta(fields) { this.write({ type: 'message_update', assistantMessageEvent: fields }); }
@@ -733,6 +859,10 @@ export class AntigravityAdapter {
   }
   #chunk(turn, type, content) {
     if (content?.type !== 'text' || !text(content.text)) return;
+    // Cursor's Auto says which model answers, as the reply's first line: it is the reply's model, not its text.
+    const routed = type === 'text' && !turn.content.some(block => block.type === 'text') ? /^> Auto routed to ([^\n]{1,80})\n*$/.exec(content.text) : null;
+    if (routed) { turn.responseModel = routed[1].trim(); return; }
+    if (turn.open.first == null) { turn.open.first = Date.now(); turn.open.firstSize = sizeOf(content.text); }
     turn.open[type] += sizeOf(content.text);
     if (turn.blockIndex == null || turn.content[turn.blockIndex].type !== type) {
       this.#endBlock(turn);
@@ -754,7 +884,9 @@ export class AntigravityAdapter {
     if (!tool && steps && turn.plan) { tool = turn.plan; turn.tools.set(update.toolCallId, tool); }
     if (!tool) {
       this.#endBlock(turn);
-      tool = { id: randomUUID(), index: turn.content.length, start: Date.now(), paths: [], result: [] };
+      // A CLI that says nothing between its model requests (Cursor): the request that wrote this call ends here.
+      if (this.p.requestsByTools && turn.open.text + turn.open.thinking > 0) this.#requestEnded(turn);
+      tool = { id: randomUUID(), index: turn.content.length, start: Date.now(), paths: [], result: [], codebase: this.p.engine === 'cursor' };
       turn.tools.set(update.toolCallId, tool);
       // The CLI names a request's tool calls right after it says the request ended: they are that request's.
       try { (turn.requests.at(-1) ?? turn.open).tools += sizeOf(JSON.stringify(update.rawInput ?? {}).slice(0, 400000)); } catch { /* an input that cannot be measured weighs nothing */ }
@@ -766,16 +898,17 @@ export class AntigravityAdapter {
     if (update.rawInput && typeof update.rawInput === 'object') tool.raw = update.rawInput;
     if (Array.isArray(update.locations)) tool.paths = shownPaths(update.locations);
     if (Array.isArray(update.content)) { tool.result = shownContent(update.content); tool.diff = shownDiff(update.content) ?? tool.diff; }
+    if (object(update.rawOutput) && !tool.result.length) tool.result = outputOf(update.rawOutput);
     // Its task list and the agents it starts are shown as Claude Code's are: a Tasks card, and a task with its brief.
     const asks = asksOf(tool);
     if (asks) tool.asks = asks;
     const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } }
       : asks ? { name: 'AskUserQuestion', arguments: { questions: asks.map(ask => ({ question: ask.question, options: ask.options.map(label => ({ label })), ...(ask.multi ? { multiSelect: true } : {}) })) } }
       : agentOf(tool) ?? toolOf(tool);
-    const call = known ? { type: 'toolCall', id: tool.id, ...known } : { type: 'toolCall', id: tool.id, name: tool.title ?? tool.kind ?? 'Antigravity tool',
+    const call = known ? { type: 'toolCall', id: tool.id, ...known } : { type: 'toolCall', id: tool.id, name: tool.title ?? tool.kind ?? `${this.p.label} tool`,
       arguments: tool.paths.length ? { path: tool.paths[0], ...(tool.paths.length > 1 ? { paths: tool.paths } : {}) } : {} };
     if (known?.name === 'TodoWrite') tool.fallback = 'Tasks updated.';
-    else if (known?.name === 'Task') tool.fallback = 'The agent was started; it reports back to Antigravity.';
+    else if (known?.name === 'Task') tool.fallback = `The agent was started; it reports back to ${this.p.label}.`;
     turn.content[tool.index] = call;
     if (!tool.call) this.#delta({ type: 'toolcall_start', contentIndex: tool.index, id: call.id, toolName: call.name });
     this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: call });
@@ -787,7 +920,7 @@ export class AntigravityAdapter {
       this.#toolEnd(tool, update.status === 'failed', update.status === 'failed' ? 'Tool failed.' : tool.fallback ?? 'Tool completed.');
     } else if (!tool.finished && !turn.cancelled && tool.result.length) {
       this.write({ type: 'tool_execution_update', toolCallId: call.id, toolName: call.name, args: call.arguments,
-        partialResult: { content: tool.result, details: { engine: ENGINE } } });
+        partialResult: { content: tool.result, details: { engine: this.p.engine } } });
     } else if (turn.cancelled && !tool.finished && !tool.interrupted) {
       tool.interrupted = true;
       this.#toolEnd(tool, true, 'Interrupted.');
@@ -796,7 +929,7 @@ export class AntigravityAdapter {
   #toolEnd(tool, isError, fallback) {
     const content = tool.result.length ? tool.result : [{ type: 'text', text: fallback }];
     // Stopped by the person (Stop, or a message sent while it worked) is not the tool failing.
-    const details = { engine: ENGINE, ...(fallback === 'Interrupted.' ? { interrupted: true } : {}) };
+    const details = { engine: this.p.engine, ...(fallback === 'Interrupted.' ? { interrupted: true } : {}) };
     tool.end = Date.now();
     if (this.turn) this.turn.from = tool.end; // the next model request begins once the tools before it are done
     const durationMs = tool.end - tool.start;
@@ -806,19 +939,22 @@ export class AntigravityAdapter {
 
   #requestEnded(turn) {
     const now = Date.now();
-    turn.requests.push({ ms: Math.max(1, now - turn.from), ...turn.open });
+    const { first, ...written } = turn.open;
+    turn.requests.push({ ms: Math.max(1, now - turn.from), ...(first != null && first >= turn.from ? { wait: first - turn.from } : {}), ...written });
     turn.open = { text: 0, thinking: 0, tools: 0 }; turn.from = now;
+    if (this.turn === turn) this.#updateState(); // its speed is shown while the turn goes on
   }
 
   #finishTurn(turn, stopReason, errorMessage) {
     if (this.turn !== turn) return;
+    this.#askRpcEnd({ outcome: 'cancelled' }); // a question still open when the turn ends (Cursor) is not answered
     if (turn.open.text + turn.open.thinking + turn.open.tools > 0) this.#requestEnded(turn); // a last request the CLI did not close
     this.#cancelPermissions();
     this.#endBlock(turn);
     // A question left open is the turn asking for an answer, not a tool that failed.
     const asked = stopReason === 'stop' ? [...turn.tools.entries()].find(([, tool]) => tool.asks && !tool.message) : null;
     if (asked) this.#toolEnd(asked[1], false, 'Asked.');
-    for (const tool of turn.tools.values()) if (!tool.message) this.#toolEnd(tool, true, stopReason === 'aborted' ? 'Interrupted.' : 'Antigravity did not report tool completion.');
+    for (const tool of turn.tools.values()) if (!tool.message) this.#toolEnd(tool, true, stopReason === 'aborted' ? 'Interrupted.' : `${this.p.label} did not report tool completion.`);
     // ACP does not expose individual model request timestamps or token counts.
     // Keep elapsed turn time separate from the provider metering used by Pi.
     // The CLI also writes its question out as text ("Which colour? [1] red [2] green"). The card asks it, with
@@ -830,18 +966,40 @@ export class AntigravityAdapter {
     // The model's own time: the turn's length less the time its tools ran. The turn's speed is measured over it.
     const ended = Date.now();
     const modelMs = Math.max(1, __agyTurn.durationMs - toolTime([...new Set(turn.tools.values())].map(tool => [tool.start, tool.end ?? ended])));
-    let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs, modelMs, ...(requestsOf(turn.requests, turn.usage) ? { requests: requestsOf(turn.requests, turn.usage) } : {}) } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
+    let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs, modelMs, ...(requestsOf(turn.requests, turn.usage) ? { requests: requestsOf(turn.requests, turn.usage) } : {}) }
+        // A CLI that counts no tokens at all (Cursor): each request's speed, from what it wrote (an estimate).
+        : this.p.requestsByTools && openRequests(turn.requests).length ? { durationMs: __agyTurn.durationMs, modelMs, requests: openRequests(turn.requests) } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
     const results = [...turn.tools.values()].map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
-    catch { message = { ...message, stopReason: 'error', errorMessage: 'Could not save this turn to the Antigravity transcript.' }; }
+    catch { message = { ...message, stopReason: 'error', errorMessage: `Could not save this turn to the ${this.p.label} transcript.` }; }
     this.turn = null;
     this.write({ type: 'message_end', message });
     for (const result of results) this.#message(result);
     this.write({ type: 'agent_end' });
     this.write({ type: 'agent_settled' });
+    if (turn.requests.length && !this.closed) this.#updateState(); // the turn's requests are in the saved reply now
     if (asked && !this.closed) { this.ask = { toolCallId: asked[0], questions: asked[1].asks, answers: [], open: null }; this.#askNext(); }
   }
 
+  // Questions Cursor's model asks while it works (cursor/ask_question): the turn waits for the answers. They are
+  // the same cards; each answer goes back as the ids of the options chosen.
+  #askRpc(peer, id, params) {
+    const questions = (Array.isArray(params?.questions) ? params.questions : []).filter(q => text(q?.id) && text(q.prompt)).slice(0, 8).map(q => {
+      const choices = (Array.isArray(q.options) ? q.options : []).filter(o => text(o?.id) && text(o.label)).slice(0, 24);
+      return { id: q.id, question: q.prompt.slice(0, 2000), choices, options: [...new Set(choices.map(o => o.label.slice(0, 300)))], multi: q.allowMultiple === true };
+    });
+    if (!this.turn || !questions.length || this.ask) { peer.send({ id, result: { outcome: { outcome: 'cancelled' } } }); return; }
+    this.ask = { rpc: { peer, id }, questions, answers: [], picked: [] };
+    this.#askNext();
+  }
+  #askRpcEnd(outcome) {
+    const ask = this.ask;
+    if (!ask?.rpc) return false;
+    this.ask = null;
+    if (ask.open) this.write({ type: 'extension_ui_dismiss', id: ask.open });
+    ask.rpc.peer.send({ id: ask.rpc.id, result: { outcome } });
+    return true;
+  }
   // The question card for the next unanswered question (one at a time when the model asked several).
   #askNext() {
     const ask = this.ask;
@@ -858,6 +1016,16 @@ export class AntigravityAdapter {
     const ask = this.ask;
     this.write({ type: 'extension_ui_dismiss', id: r.id });
     ask.open = null;
+    if (ask.rpc) {
+      const labels = (Array.isArray(r.value) ? r.value : [r.value]).filter(text);
+      const question = ask.questions[ask.answers.length];
+      const ids = question.choices.filter(o => labels.includes(o.label.slice(0, 300))).map(o => o.id);
+      if (r.cancelled || !ids.length) { this.#askRpcEnd({ outcome: 'skipped', reason: 'The person did not answer.' }); return; }
+      ask.answers.push({ questionId: question.id, selectedOptionIds: ids });
+      if (ask.answers.length < ask.questions.length) { this.#askNext(); return; }
+      this.#askRpcEnd({ outcome: 'answered', answers: ask.answers });
+      return;
+    }
     const value = Array.isArray(r.value) ? r.value.filter(text).join(', ') : text(r.value) ? r.value : '';
     if (r.cancelled || !value.trim()) { this.ask = null; this.askedId = ask.toolCallId; return; }
     ask.answers.push(value);
@@ -871,6 +1039,7 @@ export class AntigravityAdapter {
   #askClosed() {
     const ask = this.ask;
     if (!ask) return;
+    if (this.#askRpcEnd({ outcome: 'skipped', reason: 'The person wrote a message instead.' })) return;
     this.ask = null; this.askedId = ask.toolCallId;
     if (ask.open) this.write({ type: 'extension_ui_dismiss', id: ask.open });
   }
@@ -878,6 +1047,7 @@ export class AntigravityAdapter {
   #cancelTurn(turn) {
     if (turn.cancelled) return;
     turn.cancelled = true;
+    this.#askRpcEnd({ outcome: 'cancelled' });
     this.peer.send({ method: 'session/cancel', params: { sessionId: turn.sessionId } });
     this.#cancelPermissions();
     for (const tool of turn.tools.values()) if (!tool.finished && !tool.interrupted) {
@@ -891,7 +1061,7 @@ export class AntigravityAdapter {
     if (turn) {
       this.#cancelTurn(turn);
       // Never claim a successful Stop until the original prompt really settled.
-      if (await within(turn.done, ABORT_MS, TIMED_OUT) === TIMED_OUT) throw new Error('Antigravity did not confirm the cancellation.');
+      if (await within(turn.done, ABORT_MS, TIMED_OUT) === TIMED_OUT) throw new Error(`${this.p.label} did not confirm the cancellation.`);
     }
     return {};
   }
@@ -902,6 +1072,9 @@ export class AntigravityAdapter {
     if (has(record, 'id')) {
       if (!rpcId(id)) return;
       if (method === 'session/request_permission') this.#permission(peer, id, params);
+      else if (method === 'cursor/ask_question') this.#askRpc(peer, id, params);
+      // A plan to approve comes only in Cursor's plan mode, which Iris does not start: carry on.
+      else if (method === 'cursor/create_plan') peer.send({ id, result: { outcome: { outcome: 'accepted' } } });
       else peer.send({ id, error: { code: -32601, message: 'Method not supported by Iris' } });
     } else if (method === 'session/update') {
       const update = params?.update;
@@ -913,7 +1086,7 @@ export class AntigravityAdapter {
       }
       if (update.sessionUpdate === 'available_commands_update' || update.sessionUpdate === 'usage_update') {
         const patch = update.sessionUpdate === 'usage_update' ? { contextUsage: contextOf(update) }
-          : { commands: slashCommands(update.availableCommands) };
+          : { commands: slashCommands(update.availableCommands, this.p.engine) };
         if (this.opening && (!this.opening.saved || this.opening.saved === params.sessionId) &&
           (this.opening.metadata.has(params.sessionId) || this.opening.metadata.size < 8)) {
           this.opening.metadata.set(params.sessionId, { ...this.opening.metadata.get(params.sessionId), ...patch });
@@ -936,6 +1109,7 @@ export class AntigravityAdapter {
         case 'agent_message_chunk': this.#chunk(turn, 'text', update.content); break;
         case 'agent_thought_chunk': this.#chunk(turn, 'thinking', update.content); break;
         case 'tool_call': case 'tool_call_update': this.#tool(turn, update); break;
+        case 'session_info_update': if (this.p.titles && text(update.title)) this.write({ type: 'extension_ui_request', id: randomUUID(), method: 'setStatus', statusKey: 'iris-title', statusText: update.title.trim().slice(0, 120) }); break;
       }
     }
   }
@@ -959,8 +1133,8 @@ export class AntigravityAdapter {
     const tool = turn.tools.get(call.toolCallId);
     const kind = text(call.kind) ? call.kind : tool?.kind;
     const paths = Array.isArray(call.locations) ? shownPaths(call.locations) : tool?.paths ?? [];
-    this.write({ type: 'extension_ui_request', id: uiId, method: 'select', header: 'Antigravity tool permission',
-      title: (text(call.title) ? call.title : tool?.title) ?? 'Approve this Antigravity tool call?',
+    this.write({ type: 'extension_ui_request', id: uiId, method: 'select', header: `${this.p.label} tool permission`,
+      title: (text(call.title) ? call.title : tool?.title) ?? `Approve this ${this.p.label} tool call?`,
       message: [kind, ...paths, ...shownContent(call.content).map(block => block.text)].filter(Boolean).join('\n'),
       options: [...options.keys()], optionDetails: details });
   }
@@ -990,7 +1164,7 @@ export class AntigravityAdapter {
     const turn = this.turn;
     if (turn) this.#cancelTurn(turn);
     this.#cancelPermissions();
-    const stopping = this.peer?.close(new Error('The Antigravity adapter stopped.'));
+    const stopping = this.peer?.close(new Error(`The ${this.p.label} adapter stopped.`));
     await turn?.done;
     await this.controls;
     this.transcript?.close();
@@ -1013,29 +1187,35 @@ function takeBoot() {
   return raw;
 }
 
-let isMain = false;
-try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { /* imported */ }
-if (isMain && ['--account-check', '--account-login'].includes(process.argv[2])) {
-  try {
-    const result = await account({ bin: process.argv[3], cwd: process.cwd(), login: process.argv[2] === '--account-login', version: process.argv[4],
-      home: process.argv[5], menus: process.env.IRIS_CLI_MENUS_DIR ? { dir: process.env.IRIS_CLI_MENUS_DIR } : null });
-    output(process.stdout, { cliAccountStatus: result });
-  } catch (error) { output(process.stdout, { cliAccountError: error.message }); }
-} else if (isMain && process.argv[2] === '--account-login-terminal') {
-  // The CLI's own terminal sign-in (a link, then the code its page shows), started with exactly what a
-  // conversation's CLI is started with: the same variables and the same data directory. Whatever the CLI
-  // decides from those (where it keeps the sign-in, how it reaches Google) is then the same for both; a
-  // sign-in made in a person's own shell could succeed there and still not be one for Iris's conversations.
-  const dataDir = dataDirName(process.argv[5]);
-  if (!isAbsolute(process.argv[3] ?? '')) { process.stdout.write('couldn\'t log in: the Antigravity CLI was not found\n'); process.exit(1); }
-  const child = spawn(process.argv[3], ['acp', '--login', ...(dataDir ? ['--app-data-dir', dataDir] : [])],
-    { cwd: process.cwd(), env: { ...cliEnv(process.env), ...(process.env.TERM ? { TERM: process.env.TERM } : {}) }, stdio: 'inherit' });
-  child.on('error', error => { process.stdout.write(`couldn't log in: ${error.message}\n`); process.exit(1); });
-  child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
-} else if (isMain) {
+// What runs when this file (or iris-cursor.mjs, for Cursor) is started: an account check or sign-in for
+// Settings, or the adapter of a conversation.
+export async function main(engine = 'antigravity') {
+  const P = profileOf(engine);
+  if (['--account-check', '--account-login'].includes(process.argv[2])) {
+    try {
+      const result = await account({ bin: process.argv[3], cwd: process.cwd(), login: process.argv[2] === '--account-login', version: process.argv[4],
+        home: P.engine === 'antigravity' ? process.argv[5] : null, profile: P, menus: process.env.IRIS_CLI_MENUS_DIR ? { dir: process.env.IRIS_CLI_MENUS_DIR } : null });
+      output(process.stdout, { cliAccountStatus: result });
+    } catch (error) { output(process.stdout, { cliAccountError: error.message }); }
+    return;
+  }
+  if (process.argv[2] === '--account-login-terminal') {
+    // The CLI's own terminal sign-in (a link, then the code its page shows), started with exactly what a
+    // conversation's CLI is started with: the same variables and the same data directory. Whatever the CLI
+    // decides from those (where it keeps the sign-in, how it reaches the service) is then the same for both; a
+    // sign-in made in a person's own shell could succeed there and still not be one for Iris's conversations.
+    const dataDir = dataDirName(process.argv[5]);
+    if (!isAbsolute(process.argv[3] ?? '')) { process.stdout.write(`couldn't log in: the ${P.label} CLI was not found\n`); process.exit(1); }
+    if (P.engine !== 'antigravity' && isAbsolute(process.argv[5] ?? '')) try { mkdirSync(process.argv[5], { recursive: true, mode: 0o700 }); } catch { /* the CLI says what is wrong */ }
+    const child = spawn(process.argv[3], P.loginArgs(dataDir),
+      { cwd: process.cwd(), env: { ...cliEnv(process.env, P), ...P.homeEnv(process.argv[5]), ...(process.env.TERM ? { TERM: process.env.TERM } : {}) }, stdio: 'inherit' });
+    child.on('error', error => { process.stdout.write(`couldn't log in: ${error.message}\n`); process.exit(1); });
+    child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+    return;
+  }
   let boot;
   try { boot = JSON.parse(takeBoot() ?? '{}'); } catch { boot = {}; }
-  const adapter = new AntigravityAdapter({ boot, write: value => { if (!process.stdout.destroyed) output(process.stdout, value); } });
+  const adapter = new AntigravityAdapter({ engine: P.engine, boot, write: value => { if (!process.stdout.destroyed) output(process.stdout, value); } });
   let stopping = false;
   const shutdown = () => {
     if (stopping) return;
@@ -1053,3 +1233,7 @@ if (isMain && ['--account-check', '--account-login'].includes(process.argv[2])) 
   process.stdout.on('error', shutdown);
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, shutdown);
 }
+
+let isMain = false;
+try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { /* imported */ }
+if (isMain) await main('antigravity');

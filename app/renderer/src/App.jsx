@@ -263,7 +263,7 @@ function HeaderTelemetry({ session }) {
   const gitReviewOpen = useStore(s => s.gitReviewOpen);
   const runningJobs = useMemo(() => sortedBackgroundJobs(jobsSnapshot?.jobs).filter(j => j.status === 'running').length, [jobsSnapshot]);
   // Both CLIs report context themselves; only Antigravity lacks token counts (its speed is an estimate).
-  const antigravity = session.engine === 'antigravity';
+  const antigravity = session.engine === 'antigravity' || session.engine === 'cursor'; // CLIs whose token counts may be missing
   const context = isCliEngine(session.engine) ? session.cli?.contextUsage : stats?.contextUsage;
   const percent = Number.isFinite(context?.percent) ? Math.round(context.percent) : null;
   const contextLabel = Number.isFinite(context?.tokens)
@@ -291,7 +291,7 @@ function HeaderTelemetry({ session }) {
                 </span>
               </div>
             )}
-            <UsageMetrics transcript={transcript} antigravity={antigravity} />
+            <UsageMetrics transcript={transcript} antigravity={antigravity} turnRequests={session.cli?.turnRequests} />
           </div>
         )}>
         {percent != null ? <>

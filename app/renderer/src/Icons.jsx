@@ -13,6 +13,7 @@ import piIcon from './assets/engines/pi.png';
 import claudeCodeIcon from './assets/engines/claude-code.png';
 import codexIcon from './assets/engines/codex.png';
 import antigravityIcon from './assets/engines/antigravity.png';
+import cursorIcon from './assets/engines/cursor.png';
 
 const LUCIDE = {
   sun: Sun, moon: Moon, book: BookOpen, customize: BriefcaseBusiness,
@@ -47,10 +48,10 @@ export function Icon({ name, size = 16, stroke = 1.75, className, style }) {
   return <Component className={className} style={style} size={size} strokeWidth={stroke} absoluteStrokeWidth={false} aria-hidden="true" />;
 }
 
-// Each engine is shown with its own icon: Claude's (for Claude Code), the Codex app's and the Antigravity app's
-// (taken from those apps, cropped to the icon) — the vendors' marks, used only to say which engine a
+// Each engine is shown with its own icon: Claude's (for Claude Code), the Codex app's, the Antigravity app's and
+// the Cursor app's (taken from those apps, cropped to the icon) — the vendors' marks, used only to say which engine a
 // conversation runs on — and Pi's, a glossy π in Pi's three brand colours made to sit beside them.
-const ENGINE_ICONS = { pi: piIcon, 'claude-code': claudeCodeIcon, codex: codexIcon, antigravity: antigravityIcon };
+const ENGINE_ICONS = { pi: piIcon, 'claude-code': claudeCodeIcon, codex: codexIcon, antigravity: antigravityIcon, cursor: cursorIcon };
 export function EngineLogo({ engine = 'pi', size = 16, className = '', title }) {
   return <img className={`engine-logo ${className}`} src={ENGINE_ICONS[engine] ?? piIcon} width={size} height={size} alt={title ?? ''} aria-hidden={title ? undefined : 'true'} draggable={false} />;
 }

@@ -1,5 +1,5 @@
-// Which agent a new conversation runs on, chosen beside its folder and machine: Pi, Claude Code, Codex or
-// Antigravity. The model and the modes under the message box are then that agent's own.
+// Which agent a new conversation runs on, chosen beside its folder and machine: Pi, Claude Code, Codex,
+// Antigravity or Cursor. The model and the modes under the message box are then that agent's own.
 import { useEffect } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
 import { MenuItem, Spinner, Trigger } from './ui.jsx';
@@ -7,10 +7,11 @@ import { isCliEngine, readinessKey } from './engines.js';
 import { modelsForEnvironment } from './model-catalog.js';
 import { loadCliOptions, openSettings, refreshCliReadiness, setDraft, useStore } from './store.js';
 
-// In the order of the menu: the two that sign in with a plan, then the two that take API keys.
+// In the order of the menu: the three that sign in with a plan, then the two that take API keys.
 export const HARNESSES = [
   { id: 'codex', title: 'Codex', detail: 'Your ChatGPT plan' },
   { id: 'antigravity', title: 'Antigravity', detail: 'Your Google account' },
+  { id: 'cursor', title: 'Cursor', detail: 'Your Cursor plan' },
   { id: 'claude-code', title: 'Claude Code', detail: 'Anthropic models · API key' },
   { id: 'pi', title: 'Pi', detail: 'Any model · API key' },
 ];
