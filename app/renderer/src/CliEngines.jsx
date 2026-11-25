@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
-import { MenuItem, MenuSection, Spinner, Trigger, envIcon } from './ui.jsx';
+import { MenuItem, MenuSection, Spinner, Trigger, envIcon, shortPath } from './ui.jsx';
 import { CliTerminal, watchTerminal } from './TerminalPanel.jsx';
 import { readSignInOutput } from './sign-in-output.js';
-import { api, askConfirm, cliDraftMenus, cliOptionsKey, draftCliAccount, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
+import { api, askConfirm, cliDraftMenus, cliOptionsKey, draftCliAccount, importCliThread, loadCliAccounts, loadCliOptions, notify, openSettings, refreshCliReadiness, reportCliAccount, setCliAccounts, setDraft, setSettings, useStore } from './store.js';
 import { CLI_ENGINES, engineLabel, hasAccounts, readinessKey } from './engines.js';
 import './cli-engines.css';
 
@@ -35,6 +35,47 @@ export function CliSetup({ environmentId, engine = 'antigravity' }) {
     onClick={() => openSubscriptions(environmentId)} title={`${label} on ${machine}`}>
     <Icon name="key" size={14} /><span>{label}</span>
   </button>;
+}
+
+// Conversations Codex keeps for itself (the Codex app, the terminal, an editor): pick one and it continues here,
+// with what was said in it. The list is read when the menu opens; the original conversation is left as it is.
+const ago = at => { const s = Math.max(0, (Date.now() - at) / 1000); return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : s < 86400 * 30 ? `${Math.round(s / 86400)}d ago` : new Date(at).toLocaleDateString(); };
+function CliHistoryMenu({ environmentId, engine, close }) {
+  const [threads, setThreads] = useState(null);
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState('');
+  const [opening, setOpening] = useState(null);
+  const home = useStore(s => s.home);
+  useEffect(() => {
+    let alive = true;
+    api('cliThreads', environmentId, engine).then(list => { if (alive) setThreads(list); }, e => { if (alive) setError(cleanError(e)); });
+    return () => { alive = false; };
+  }, [environmentId, engine]);
+  const open = async thread => {
+    setOpening(thread.id); setError(null);
+    try { await importCliThread(environmentId, engine, thread); close(); }
+    catch (e) { setError(cleanError(e)); setOpening(null); }
+  };
+  const shown = (threads ?? []).filter(thread => !query.trim() || `${thread.title}\n${thread.cwd}`.toLowerCase().includes(query.trim().toLowerCase()));
+  return <div className="cli-history">
+    <input className="cli-history-search" value={query} onChange={e => setQuery(e.target.value)} placeholder={`Search ${engineLabel(engine)} conversations`} autoFocus spellCheck={false} />
+    {error && <p className="cli-settings-error" role="alert">{error}</p>}
+    {!threads && !error && <div className="cli-history-note"><Spinner size={12} /> Reading {engineLabel(engine)}’s conversations…</div>}
+    {threads && !shown.length && <div className="cli-history-note">{threads.length ? 'None match.' : `${engineLabel(engine)} has no conversations of its own on this machine.`}</div>}
+    <div className="cli-history-list">
+      {shown.slice(0, 200).map(thread => <button key={thread.id} type="button" className="cli-history-row" disabled={!!opening} onClick={() => open(thread)} title={thread.cwd}>
+        <span className="cli-history-title">{thread.title}</span>
+        <span className="cli-history-meta">{opening === thread.id ? <Spinner size={11} /> : null}{shortPath(thread.cwd, home)}{thread.updatedAt ? ` · ${ago(thread.updatedAt)}` : ''}</span>
+      </button>)}
+    </div>
+  </div>;
+}
+export function CliHistory({ environmentId, engine }) {
+  if (engine !== 'codex') return null;
+  return <Trigger label="Conversations from Codex" title="Continue a conversation from the Codex app or the terminal" width={380} placement="top-start"
+    menu={close => <CliHistoryMenu environmentId={environmentId} engine={engine} close={close} />}>
+    <Icon name="clock" size={13} /><span>From Codex</span>
+  </Trigger>;
 }
 
 // An account by who it is (its e-mail address, once it has been checked), else by its name in Iris.

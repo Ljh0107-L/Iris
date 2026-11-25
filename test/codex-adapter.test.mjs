@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CodexAdapter, account, editsOfDiff, shellCommand } from '../agent/iris-codex.mjs';
+import { CodexAdapter, account, editsOfDiff, shellCommand, threads } from '../agent/iris-codex.mjs';
 import { FAKE_CODEX as FAKE } from './fake-codex.mjs';
 
 
@@ -15,9 +15,9 @@ function fixture(t, { bypassPermissions = false } = {}) {
   writeFileSync(bin, FAKE); chmodSync(bin, 0o755); writeFileSync(log, ''); mkdirSync(join(dir, 'work'));
   const env = { ...process.env, FAKE_CODEX_LOG: log, FAKE_CODEX_SIGNED_OUT: signedOut };
   const calls = method => readFileSync(log, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(c => !method || c.method === method);
-  const start = (sessionFile) => {
+  const start = (sessionFile, more = {}) => {
     const events = [], waiting = new Map(), watchers = new Set();
-    const adapter = new CodexAdapter({ env, boot: { codex: { bin, cwd: join(dir, 'work'), sessionsDir: join(dir, 'sessions'), sessionFile, clientVersion: '1.0.0', bypassPermissions } },
+    const adapter = new CodexAdapter({ env, boot: { codex: { bin, cwd: join(dir, 'work'), sessionsDir: join(dir, 'sessions'), sessionFile, clientVersion: '1.0.0', bypassPermissions, ...more } },
       write: e => { if (e.type === 'response') { waiting.get(e.id)?.(e); return; } events.push(e); for (const w of [...watchers]) w(e); } });
     t.after(() => adapter.close());
     let n = 0;
@@ -63,7 +63,7 @@ test('a conversation opens with the account, the models and their efforts, and a
   assert.deepEqual((await a.rpc('get_session_stats')).data.contextUsage, { tokens: 60, contextWindow: 400000, percent: 0.015 });
   assert.deepEqual((await a.rpc('get_messages')).data.messages.map(m => m.role), ['user', 'assistant', 'user', 'assistant']);
   // /compact: Codex summarizes its own thread; the conversation marks where.
-  assert.deepEqual((await a.rpc('get_commands')).data.commands.map(c => c.name), ['compact']);
+  assert.deepEqual((await a.rpc('get_commands')).data.commands.map(c => c.name), ['compact', 'goal']);
   assert.equal((await a.rpc('compact')).success, true);
   assert.deepEqual(a.events.filter(e => e.type.startsWith('compaction_')).map(e => [e.type, e.errorMessage]), [['compaction_start', undefined], ['compaction_end', undefined]]);
   const entries = (await a.rpc('get_entries')).data.entries;
@@ -247,4 +247,123 @@ test('a title is read out of what Codex replies', async () => {
   assert.equal(titleOf('"Fix the login bug"'), 'Fix the login bug');
   assert.equal(titleOf('Plain words\nsecond line'), 'Plain words');
   assert.equal(titleOf(''), '');
+});
+
+// ---- /goal, editing an earlier message, and conversations from Codex's own history
+const goalsOf = events => events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-goal').map(e => e.statusText ? JSON.parse(e.statusText) : null);
+const until = async (check, what) => { for (let i = 0; i < 400; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); } assert.fail(`Timed out waiting for ${what}`); };
+const roles = async a => (await a.rpc('get_messages')).data.messages.map(m => m.role);
+
+test('/goal sets Codex’s own goal: Codex starts on it itself, the turn is a reply like any other, and the goal reads as achieved', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  const state = (await a.rpc('get_state')).data;
+  assert.ok(state.cli.commands.some(c => c.name === 'goal'), 'offered in the slash menu');
+  const sent = await a.rpc('prompt', { message: '/goal ship the parser' });
+  assert.deepEqual([sent.success, sent.data], [true, { disposition: 'handled' }]);
+  await a.next(settled);
+  assert.deepEqual(f.calls('thread/goal/set')[0].params, { threadId: 'thread-1', origin: 'user', objective: 'ship the parser', status: 'active' });
+  assert.equal(f.calls('turn/start').filter(c => c.params.threadId === 'thread-1').length, 0, 'Codex began the turn; it was not asked to');
+  assert.deepEqual(goalsOf(a.events), [{ objective: 'ship the parser', status: 'active' }, { objective: 'ship the parser', status: 'complete' }]);
+  const reply = lastReply(a.events);
+  assert.deepEqual([reply.content, reply.stopReason], [[{ type: 'text', text: 'Working toward: ship the parser' }], 'stop']);
+  assert.deepEqual(await roles(a), ['assistant'], 'the command is not a message of the conversation');
+  // Reopened, the conversation shows the goal Codex still keeps for it.
+  const again = f.start(state.sessionFile);
+  await again.rpc('get_state');
+  await until(() => goalsOf(again.events).length, 'the goal to be read on reopening');
+  assert.deepEqual(goalsOf(again.events), [{ objective: 'ship the parser', status: 'complete' }]);
+});
+
+test('stopping a goal’s work pauses the goal, and /goal resume and /goal clear do what they say', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  f.env.FAKE_CODEX_GOAL = 'long';
+  const a = f.start();
+  await a.rpc('prompt', { message: '/goal keep the build green' });
+  await a.next(e => e.type === 'message_update' && e.assistantMessageEvent.type === 'text_delta');
+  await a.rpc('abort');
+  await a.next(settled);
+  const order = f.calls().filter(c => ['thread/goal/set', 'turn/interrupt'].includes(c.method)).map(c => [c.method, c.params.status ?? null]);
+  assert.deepEqual(order, [['thread/goal/set', 'active'], ['thread/goal/set', 'paused'], ['turn/interrupt', null]], 'paused first: Codex must not start on the next step');
+  assert.equal(goalsOf(a.events).at(-1).status, 'paused');
+  assert.equal(lastReply(a.events).stopReason, 'aborted');
+  const from = a.events.length;
+  assert.equal((await a.rpc('prompt', { message: '/goal resume' })).success, true);
+  await until(() => a.events.slice(from).some(e => e.type === 'agent_start'), 'Codex to start again');
+  assert.equal(goalsOf(a.events).at(-1).status, 'active');
+  assert.equal((await a.rpc('prompt', { message: '/goal clear' })).success, true);
+  assert.equal(goalsOf(a.events).at(-1), null);
+  assert.equal(f.calls('thread/goal/clear').length, 1);
+  await a.rpc('abort');
+  assert.equal((await a.rpc('prompt', { message: '/goal resume' })).success, false, 'nothing to resume');
+});
+
+test('a goal Codex does not start on by itself is started for it, without a message of yours appearing', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  Object.assign(f.env, { FAKE_CODEX_GOAL: 'idle', IRIS_CODEX_GOAL_START_MS: '60' });
+  const a = f.start();
+  await a.rpc('prompt', { message: '/goal tidy the docs' });
+  await a.next(settled);
+  const asked = f.calls('turn/start').filter(c => c.params.threadId === 'thread-1');
+  assert.deepEqual(asked.map(c => c.params.input[0].text), ['Continue working toward the goal.']);
+  assert.deepEqual(await roles(a), ['assistant']);
+});
+
+test('editing an earlier message takes the Codex thread and the conversation back to before the turn it began', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  const state = (await a.rpc('get_state')).data;
+  for (const message of ['hello', 'second thought']) { const from = a.events.length; await a.rpc('prompt', { message }); await until(() => a.events.slice(from).some(settled), `the reply to ${message}`); }
+  const turns = () => readFileSync(state.sessionFile, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.customType === 'iris-codex-turn').map(e => e.data.turnId);
+  assert.equal(turns().length, 2);
+  assert.deepEqual(await roles(a), ['user', 'assistant', 'user', 'assistant']);
+  const rewound = await a.rpc('cli_rewind', { ordinal: 1, originalText: 'second thought' });
+  assert.equal(rewound.success, true);
+  assert.deepEqual(f.calls('thread/revert').map(c => c.params), [{ threadId: 'thread-1', beforeTurnId: turns()[1] }]);
+  assert.deepEqual(await roles(a), ['user', 'assistant'], 'the message and its reply are gone from the conversation');
+  const from = a.events.length;
+  await a.rpc('prompt', { message: 'second thought, better put' });
+  await until(() => a.events.slice(from).some(settled), 'the reply to the edited message');
+  const texts = async x => (await x.rpc('get_messages')).data.messages.filter(m => m.role === 'user').map(m => m.content[0].text);
+  assert.deepEqual(await texts(a), ['hello', 'second thought, better put']);
+  // The file keeps what was left behind; reopened, the conversation is still the edited one.
+  assert.match(readFileSync(state.sessionFile, 'utf8'), /second thought"/);
+  const again = f.start(state.sessionFile);
+  await again.rpc('get_state');
+  assert.deepEqual(await texts(again), ['hello', 'second thought, better put']);
+  assert.deepEqual(await roles(again), ['user', 'assistant', 'user', 'assistant']);
+  // A message that is not there cannot be edited, and Codex is not asked to go anywhere.
+  assert.equal((await again.rpc('cli_rewind', { ordinal: 7, originalText: 'never said' })).success, false);
+  assert.equal(f.calls('thread/revert').length, 1);
+});
+
+test('Codex’s own conversations are listed, and one is brought in with what was said in it and continued', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  const listed = await threads({ bin: f.bin, cwd: f.dir, env: f.env, version: '1.0.0' });
+  assert.deepEqual(listed, [
+    { id: 'old-1', title: 'Fix the parser', cwd: '/w/app', updatedAt: 1764000300000, model: 'gpt-a', path: '/codex-home/sessions/rollout-old-1.jsonl' },
+    { id: 'old-2', title: 'what does this repo do?', cwd: '/w/lib', updatedAt: 1764000100000 }], 'not an agent’s thread, nor one in which nothing was said');
+  // Listing is the stable API; bringing one in names its file, which only the experimental API takes.
+  assert.equal(f.calls('initialize')[0].params.capabilities, null);
+  const a = f.start(undefined, { importThread: { id: listed[0].id, path: listed[0].path } });
+  const state = (await a.rpc('get_state')).data;
+  assert.equal(f.calls('initialize').at(-1).params.capabilities.experimentalApi, true);
+  assert.deepEqual(f.calls('thread/fork').map(c => [c.params.threadId, c.params.path]), [['old-1', '/codex-home/sessions/rollout-old-1.jsonl']], 'forked into this home: the original is left as it is');
+  assert.equal(f.calls('thread/start').length + f.calls('thread/resume').length, 0);
+  const { messages } = (await a.rpc('get_messages')).data;
+  assert.deepEqual(messages.map(m => m.role), ['user', 'assistant', 'toolResult', 'toolResult', 'user', 'assistant']);
+  assert.equal(messages[0].content[0].text, 'please fix the parser');
+  assert.deepEqual(messages[1].content.map(block => block.type === 'toolCall' ? block.name : block.type), ['thinking', 'read', 'bash', 'text']);
+  assert.deepEqual([messages[1].stopReason, messages[1].durationMs, messages[1].content.at(-1).text], ['stop', 4200, 'Fixed the parser.']);
+  assert.deepEqual(messages.slice(2, 4).map(m => [m.toolName, m.isError, m.content[0].text]), [['read', false, 'parse()'], ['bash', true, '1 failing']]);
+  assert.deepEqual([messages[4].content[0].text, messages[5].stopReason], ['and the tests', 'aborted']);
+  assert.equal(a.events.filter(e => e.type === 'message_end' || e.type === 'agent_start').length, 0, 'read from the transcript when it opens, not replayed as events');
+  // Continued here like any conversation; reopened, it is this conversation's own thread, on the stable API.
+  await a.rpc('prompt', { message: 'carry on' });
+  await a.next(settled);
+  assert.equal(f.calls('turn/start').find(c => c.params.input[0].text === 'carry on').params.threadId, 'thread-1');
+  const again = f.start(state.sessionFile, { importThread: { id: listed[0].id, path: listed[0].path } });
+  await again.rpc('get_state');
+  assert.equal(f.calls('thread/fork').length, 1, 'brought in once');
+  assert.deepEqual(f.calls('thread/resume').map(c => c.params.threadId), ['thread-1']);
+  assert.equal(f.calls('initialize').at(-1).params.capabilities, null);
+  assert.equal((await again.rpc('get_messages')).data.messages.filter(m => m.role === 'user').length, 3);
 });

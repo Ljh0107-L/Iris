@@ -288,10 +288,11 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
   </>;
 }
 
-// Something in progress: six dots, two across and three down, lit in turn as a terminal's spinner draws them.
-// spectrum: in the conversation, beside the app's own mark, each dot is one colour of the spectrum.
-export function Spinner({ size = 14, spectrum = false }) {
-  return <span className={`spinner ${spectrum ? 'spectrum' : ''}`} style={{ width: size, height: size }} aria-hidden="true"><i /><i /><i /><i /><i /><i /></span>;
+// Something in progress, as dots in motion (the motion is in workspace.css). kind says what is going on:
+// 'swap' (four dots changing places: a step is under way), 'tumble' (three dots turning in space: thinking) or
+// 'orbit' (three dots circling in a row: writing). spectrum: in the conversation the dots are coloured.
+export function Spinner({ size = 14, spectrum = false, kind = 'tumble' }) {
+  return <span className={`spinner ${kind} ${spectrum ? 'spectrum' : ''}`} data-kind={kind} style={{ width: size, height: size }} aria-hidden="true"><i /><i /><i />{kind === 'swap' && <i />}</span>;
 }
 
 export function Modal({ title, onClose, children, width = 640, footer, bare }) {

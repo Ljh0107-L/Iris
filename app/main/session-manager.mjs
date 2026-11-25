@@ -18,7 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/iris-speed.mjs';
 import { readHistory } from '../../agent/iris-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, cliAccountStatus, cliSignIn, cliBoot, cliThreads, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -757,6 +757,35 @@ export class SessionManager extends EventEmitter {
     clearTimeout(this.cliStatusSave);
     this.cliStatusSave = setTimeout(() => { try { this.store.saveSettings(); } catch { /* kept until the next check */ } }, 1500);
     this.cliStatusSave.unref?.();
+  }
+  // Codex's own conversations on a machine (see cliThreads), without those already brought into Iris.
+  async cliThreads(environmentId, engine = CODEX_ENGINE) {
+    if (engine !== CODEX_ENGINE) return [];
+    const env = this.env(environmentId);
+    const bin = await this.#findCli(env, engine);
+    if (!bin) throw new Error(antigravityInstallMessage(env, engine));
+    const facts = env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null;
+    const taken = new Set(this.store.sessions.filter(s => s.engine === engine && s.environmentId === env.id && s.cliImport?.id).map(s => s.cliImport.id));
+    return (await cliThreads(env, { bin, local: this.local, facts, engine, run: this.runRemote })).filter(thread => !taken.has(thread.id));
+  }
+  // One of them becomes a conversation here: in its folder, under its name, with what was said in it (written
+  // into the transcript when it first opens) and continued on a thread of Iris's own. The original is not touched.
+  async importCliThread(environmentId, engine, thread) {
+    if (engine !== CODEX_ENGINE) throw new Error('Only Codex conversations can be brought in.');
+    const env = this.env(environmentId);
+    const text = (value, max) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
+    const id = text(thread?.id, 200), cwd = text(thread?.cwd, 2000), path = text(thread?.path, 4000);
+    if (!id || !cwd?.startsWith('/')) throw new Error('That conversation cannot be brought in.');
+    // It continues in the folder it was in; a folder that is gone cannot be worked in.
+    if (env.kind === 'local' && !existsSync(cwd)) throw new Error(`The folder of that conversation is no longer on this Mac: ${cwd}`);
+    const existing = this.store.sessions.find(s => s.engine === engine && s.environmentId === env.id && s.cliImport?.id === id && !s.archived);
+    if (existing) return this.#view(existing);
+    const now = Date.now();
+    const record = { id: randomUUID(), title: titleFrom(text(thread.title, 160) ?? 'Codex conversation'), environmentId: env.id, environmentLabel: env.label, cwd,
+      project: env.kind === 'local' ? basename(cwd) : remoteBase(cwd), engine, cliImport: { id, ...(path?.startsWith('/') ? { path } : {}) },
+      createdAt: now, updatedAt: now, ...(Number.isFinite(thread.updatedAt) ? { lastMessageAt: thread.updatedAt } : {}) };
+    this.#add(record);
+    return this.#view(record);
   }
   cliAccountLast(environmentId, engine = ANTIGRAVITY_ENGINE, account = null) {
     const key = this.#menuKey(engine, environmentId, account), last = this.store.settings.cliStatus?.[key];
@@ -2278,7 +2307,24 @@ export class SessionManager extends EventEmitter {
   // Edit an earlier user message: branch the conversation just before it and send the new text there.
   async editMessage(id, ordinal, originalText, text, attachments = []) {
     const record = this.record(id);
-    if (isCliSession(record)) throw new Error(`Editing old messages is not available in ${cliEngine(record.engine).label} conversations.`);
+    if (isCliSession(record)) {
+      // Codex can take a thread back to before a turn; the Antigravity CLI has no way to (it can only list,
+      // load, resume and close a session).
+      if (record.engine !== CODEX_ENGINE) throw new Error(`Editing old messages is not available in ${cliEngine(record.engine).label} conversations.`);
+      const session = await this.ensureStarted(id);
+      const runtime = this.runtimes.get(id);
+      this.#assertCurrent(record, runtime);
+      if (runtime.streaming) {
+        await this.abort(id);
+        for (const end = Date.now() + 10000; runtime.streaming && Date.now() < end;) await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      if (runtime.session !== session || runtime.streaming || runtime.cliRequest) throw new Error('Wait for Codex to finish, then edit the message.');
+      runtime.cliRequest = true;
+      try { await session.request('cli_rewind', { ordinal, originalText }, { timeout: 70000 }); }
+      finally { runtime.cliRequest = false; }
+      this.emit('rewound', { id }); // the desktop already shows the rewound conversation
+      return this.prompt(id, text, attachments);
+    }
     const session = await this.ensureStarted(id);
     const runtime = this.runtimes.get(id);
     if (runtime.streaming) {

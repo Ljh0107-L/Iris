@@ -725,6 +725,8 @@ export async function openSession(id, { record = true } = {}) {
   try {
     await reloadTranscript(id);
     if (!isCliSession) refreshStats(id);
+    // Codex keeps a goal with its thread: shown again when the conversation is.
+    if (engine === 'codex') api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
     if (engine !== 'claude-code' && !isCliSession) {
       api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
       api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
@@ -781,7 +783,7 @@ export async function startSession(text, attachments = []) {
     environmentId: draft.environmentId, environmentLabel, engine: draft.engine, cwd: draft.cwd ?? '', streaming: true };
   const clearPending = s => { const { [pendingId]: _, ...remaining } = s.pendingSessions; return remaining; };
   set({ view: 'session', activeId: pendingId, pendingSessions: { ...state.pendingSessions, [pendingId]: pendingSession },
-    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: text || attachments.length ? [{ role: 'user', timestamp: sentAt, content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
+    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: (text || attachments.length) && !(draft.engine === 'codex' && !attachments.length && /^\/goal(\s|$)/.test(text.trim())) ? [{ role: 'user', timestamp: sentAt, content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
   try {
     if (models) {
       await models;
@@ -852,7 +854,9 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
     const interrupts = session.engine !== 'codex' && !!session.streaming;
     // What was sent is on the page the moment it is sent, whatever the agent and wherever it runs: the agent's
     // own copy of it replaces this one when it arrives (over SSH that is a round trip or two later).
-    const shown = text.trim() || attachments.length ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}) } : null;
+    // (Codex's /goal is a command, not a message: what shows for it is the goal above the message box.)
+    const command = session.engine === 'codex' && !attachments.length && /^\/goal(\s|$)/.test(text.trim());
+    const shown = !command && (text.trim() || attachments.length) ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}) } : null;
     if (shown) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, shown] });
     try { await sending(id, () => api('prompt', id, text, attachments, { interrupt: interrupts })); }
     catch (error) { if (shown) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== shown) }); throw error; }
@@ -900,6 +904,13 @@ function warnIfNoImages(model, attachments) {
   if (!model || !attachments.some(a => a.kind === 'image')) return;
   const info = state.catalog?.find(m => m.provider === model.provider && m.id === model.id);
   if (info && !(info.input ?? ['text']).includes('image')) notify(`${info.name ?? model.id} doesn’t accept images, so they won’t be sent`, 'error');
+}
+
+// A conversation from a CLI's own history, brought in: it joins the list and opens.
+export async function importCliThread(environmentId, engine, thread) {
+  const session = await api('importCliThread', environmentId, engine, thread);
+  set(s => ({ sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
+  openSession(session.id);
 }
 
 export async function forkSession(id) {

@@ -1,6 +1,6 @@
 import { Fragment, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { engineLabel, isCliEngine } from './engines.js';
-import { Icon, IrisMark } from './Icons.jsx';
+import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
 import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
 import { api, editMessage, firstSentAt, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
@@ -67,12 +67,25 @@ const urlLabel = url => {
   } catch { return String(url ?? '').slice(0, 96); }
 };
 
-// What marks a step that is under way. A command that is running is the app's own mark, a prompt with its
-// cursor blinking; anything else in progress (thinking, reading, an edit, a tool) is the dots. A step that is
-// done has no mark at all.
-const isCommand = call => ['bash', 'Bash', 'powershell', 'PowerShell'].includes(call?.name);
-function Running({ command = false }) {
-  return command ? <IrisMark size={15} className="step-mark" /> : <Spinner size={14} spectrum />;
+// Whether the last thing in the conversation is a block of steps that is under way, and so carries the mark
+// itself. (Blocks that show nothing may follow it; a paragraph, a thought or a message after it means it is not.)
+const stepsRunning = (blocks, tools, live) => {
+  const block = blocks.findLast(candidate => ['work', 'tools', 'text', 'thinking', 'user', 'error'].includes(candidate.kind));
+  if (block?.kind === 'tools') return block.calls.some(call => tools[call.id]?.status === 'running' || (!tools[call.id] && live));
+  if (block?.kind !== 'work') return false;
+  return block.items.some(item => item.streaming || (item.kind === 'tools' && item.calls.some(call => tools[call.id]?.status === 'running' || (!tools[call.id] && live))));
+};
+// How long the step under way has been going, counted where it is shown.
+function Elapsed({ since }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const timer = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(timer); }, []);
+  const ms = Date.now() - since;
+  return ms >= 1000 ? <span className="step-duration">{seconds(ms)}</span> : null;
+}
+// What marks the step that is under way: four dots changing places for something being done (a command, a file
+// read or written, a search), three dots turning for a thought being written. A step that is done has no mark.
+function Running({ thinking = false }) {
+  return <Spinner size={14} spectrum kind={thinking ? 'tumble' : 'swap'} />;
 }
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 function describeCall(call) {
@@ -90,6 +103,9 @@ function describeCall(call) {
     case 'subagent_stop': return { verb: 'Stopped agent', subject: a.id ?? '' };
     case 'Task': return { verb: a.subagent_type ? `Agent · ${a.subagent_type}` : 'Agent', subject: a.description || String(a.prompt ?? '').split('\n')[0].slice(0, 90) || 'Delegated task', title: a.prompt };
     case 'AskUserQuestion': return { verb: 'Asked', subject: String(a.questions?.[0]?.question ?? '').split('\n')[0].slice(0, 120) || 'a question', detail: (a.questions?.length ?? 0) > 1 ? `and ${a.questions.length - 1} more` : '' };
+    // Antigravity looking after the commands it left running (saved by older versions as "Run manage_task").
+    case 'manage_task': case 'Run manage_task': return a.action === 'list' ? { verb: 'Listed', subject: 'background tasks' }
+      : /^(kill|stop|cancel|terminate)$/i.test(a.action ?? '') ? { verb: 'Stopped', subject: 'a background task' } : { verb: 'Checked', subject: 'a background task' };
     case 'TodoWrite': return { verb: 'Updated tasks', subject: `${(a.todos ?? []).length} ${(a.todos ?? []).length === 1 ? 'item' : 'items'}` };
     case 'WebSearch': return { verb: 'Searched web', subject: a.query ?? '', detail: Array.isArray(a.allowed_domains) && a.allowed_domains[0] ? a.allowed_domains[0] : '' };
     case 'WebFetch': return { verb: 'Fetched', subject: urlLabel(a.url), detail: a.prompt ? String(a.prompt).split('\n')[0].slice(0, 60) : '', title: a.url };
@@ -170,7 +186,7 @@ function ToolCall({ call, tool, bare = false }) {
       {!bare && <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && filePath) { openTarget(filePath); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {status === 'running' && <Running command={isCommand(call)} />}
+        {status === 'running' && <Running />}
         <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
           {filePath ? (
@@ -236,7 +252,7 @@ function ToolGroup({ calls, tools, live }) {
   return (
     <div className="tool-group">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
-        {running && <Running command={calls.some(c => isCommand(c) && (tools[c.id]?.status === 'running' || (!tools[c.id] && live)))} />}
+        {running && <Running />}
         <span>{toolSummary(calls)}</span>
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
@@ -276,14 +292,48 @@ function WorkNote({ item }) {
   return (
     <div className={`step thought ${open ? 'open' : ''}`}>
       <div className="step-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {item.streaming && <Running />}
+        {item.streaming && <Running thinking />}
         <FadeText className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</FadeText>
         <ReasoningTokens tokens={item.tokens} />
         <Caret open={open} />
       </div>
-      {open && <div className="step-detail step-markdown"><HistoryContent historyRef={item.historyRef}><Markdown text={item.text} sessionId={sessionId} documentPath="" /></HistoryContent></div>}
+      {open && <div className="step-detail step-markdown"><ThoughtText text={item.text} sessionId={sessionId} historyRef={item.historyRef} id={item.key} /></div>}
     </div>
   );
+}
+
+// The steps of an open group. A long run (Antigravity and Codex can do sixty things without a word between
+// them) opens to its last steps, where the work ended up, with the earlier ones one press away: opening a group
+// should not push the rest of the conversation a screen and a half down.
+const STEPS_SHOWN = 8;
+function WorkSteps({ items, calls, tools }) {
+  const rows = items.flatMap(item => item.kind === 'tools'
+    ? item.calls.map(call => ({ key: call.id, render: () => <ToolCall key={call.id} call={call} tool={tools[call.id]} bare={items.length === 1 && calls.length === 1} /> }))
+    : [{ key: item.key, render: () => <WorkNote key={item.key} item={item} /> }]);
+  const [all, setAll] = useDisclosure(`steps:${rows[0]?.key}`);
+  // A step that is open (opened by hand earlier, or by Find in conversation to show a match) is never among the
+  // hidden ones: then the whole run shows.
+  const { expanded } = useContext(DisclosureContext);
+  const early = rows.length <= STEPS_SHOWN + 2 ? [] : rows.slice(0, rows.length - STEPS_SHOWN);
+  const hidden = all || early.some(row => expanded[`tool:${row.key}`] || expanded[`note:${row.key}`]) ? 0 : early.length;
+  return <div className="work-body">
+    {hidden > 0 && <div className="step earlier"><div className="step-head" role="button" tabIndex={0} onClick={() => setAll(true)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setAll(true); } }}>
+      <span className="step-text">{hidden} earlier steps</span><Icon name="caretRight" size={14} className="step-caret" /></div></div>}
+    {rows.slice(hidden).map(row => row.render())}
+  </div>;
+}
+
+// A thought, opened. A long one shows its first part, and the rest when asked: a page of the model talking to
+// itself should not bury the answer under it.
+function ThoughtText({ text, sessionId, historyRef, id }) {
+  const [full, setFull] = useDisclosure(`thought:${id}`);
+  const box = useRef(null);
+  const [long, setLong] = useState(false);
+  useLayoutEffect(() => { const el = box.current; if (el && !full) setLong(el.scrollHeight > el.clientHeight + 4); }, [text, full]);
+  return <>
+    <div ref={box} className={`thought-text ${full ? 'full' : ''} ${long && !full ? 'cut' : ''}`}><HistoryContent historyRef={historyRef}><Markdown text={text} sessionId={sessionId} documentPath="" /></HistoryContent></div>
+    {long && !full && <button type="button" className="thought-more" onClick={() => setFull(true)}>Show all of it</button>}
+  </>;
 }
 
 // Consecutive steps folded into one line ("Ran 2 commands, edited plan.md (1 failed) +12"), opening to a card
@@ -304,13 +354,15 @@ function WorkGroup({ items, tools, live }) {
   const summary = (only && !only.mono && !only.raw ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
+  // When the step now under way began (the earliest of those still running).
+  const started = Math.min(...calls.filter(c => tools[c.id]?.status === 'running' && tools[c.id].startedAt).map(c => tools[c.id].startedAt), Infinity);
   const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('iris:open-file', { detail: path }));
   return (
     <div className={`tool-group work ${open ? 'open' : ''}`}>
       <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && onlyFile) { openTarget(onlyFile); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {running && <Running command={!thinkingNow && calls.some(c => isCommand(c) && (tools[c.id]?.status === 'running' || (!tools[c.id] && live)))} />}
+        {running && <Running thinking={thinkingNow} />}
         <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
             : onlyFile && only?.verb ? <>
@@ -320,6 +372,7 @@ function WorkGroup({ items, tools, live }) {
             : (summary || 'Working')}
         </FadeText>
         {failed > 0 && <span className="group-failed">({failed} failed)</span>}
+        {running && Number.isFinite(started) && <Elapsed since={started} />}
         {(edits.added > 0 || edits.removed > 0) && (
           <span className="group-diff-stats">
             {edits.added > 0 && <span className="plus">+{edits.added}</span>}
@@ -340,11 +393,7 @@ function WorkGroup({ items, tools, live }) {
           <Icon name="fileDiff" size={12} />
         </button>
       )}
-      {open && <div className="work-body">
-        {items.flatMap(item => item.kind === 'tools'
-          ? item.calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} bare={items.length === 1 && calls.length === 1} />)
-          : [<WorkNote key={item.key} item={item} />])}
-      </div>}
+      {open && <WorkSteps items={items} calls={calls} tools={tools} />}
     </div>
   );
 }
@@ -368,7 +417,7 @@ function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tok
         <ReasoningTokens tokens={tokens} />
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
-      {open && <div className="thinking-body"><HistoryContent historyRef={historyRef}><Markdown text={text} sessionId={sessionId} documentPath="" /></HistoryContent></div>}
+      {open && <div className="thinking-body"><ThoughtText text={text} sessionId={sessionId} historyRef={historyRef} id={blockKey} /></div>}
     </div>
   );
 }
@@ -822,7 +871,7 @@ function WorkingRow({ session, transcript, sending = false }) {
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
   return (
     <div className="working">
-      <Spinner size={14} spectrum />
+      <Spinner size={14} spectrum kind={state === 'Writing' ? 'orbit' : 'tumble'} />
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
       {tokens > 0 && <span className="working-meta">{formatTokens(tokens)} tokens</span>}
       <span className="shimmer">{session?.activityLabel ?? state}</span>
@@ -1069,7 +1118,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'orphanResult': return <ToolCall key={block.key} call={{ id: block.message.toolCallId, name: block.message.toolName ?? 'tool', arguments: { description: 'Command result' } }} tool={transcript.tools[block.message.toolCallId]} />;
             case 'pendingHistory': return <div key={block.key} className="block-notice">This part of the conversation is read when it comes into view.</div>;
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && !isCliEngine(session?.engine) && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && (!isCliEngine(session?.engine) || session?.engine === 'codex') && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} block={block} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
@@ -1106,7 +1155,8 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
           const Card = q.permission ? PermissionCard : QuestionCard;
           return <Card key={q.requestId} sessionId={session.id} question={q} />;
         })}
-        {working && !loading && !questions.length && <WorkingRow session={session} transcript={transcript} sending={sending} />}
+        {/* One mark at a time: while a step is under way the mark is on that step, and this line steps aside. */}
+        {working && !loading && !questions.length && !stepsRunning(blocks, transcript.tools, !!transcript.live) && <WorkingRow session={session} transcript={transcript} sending={sending} />}
         <div className="transcript-end" />
       </div>
     </div>

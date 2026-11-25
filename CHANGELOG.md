@@ -2,6 +2,24 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.9
+
+**New and changed**
+
+- **Codex has `/goal`.** `/goal <objective>` gives Codex its own long-running goal: Codex keeps working toward it turn after turn and marks it achieved itself. The goal shows above the message box with Pause, Resume and Clear; `/goal pause`, `/goal resume` and `/goal clear` do the same. Stopping the work pauses the goal.
+- **An earlier message in a Codex conversation can be edited.** Codex goes back to before the turn that message began, and continues from the edited one. (The Antigravity CLI has no way to go back, so its conversations cannot do this.)
+- **Conversations from Codex itself can be continued in Iris.** With Codex chosen on the new-conversation screen, **From Codex** lists the conversations of the Codex app, the terminal and editors on that machine; picking one opens it here with what was said in it. It is forked into Iris's own Codex home: the original stays as it is.
+- **The right panel shows the agent's thinking as it arrives**: the thought being written, or the last one of the turn. When the next begins, the one before leaves; the conversation keeps them all, folded.
+- **Thinking can be shown in your language.** Off unless turned on in **Settings → Translation**, where you give the API to use for it (address, key, model) and the language. Only that API is asked; with it off, thinking is shown as the model wrote it.
+- **You choose what the right panel shows.** The button at its top turns each card on or off: Environment, Context, Usage, Thinking, Background tasks, Agents.
+- **One mark for work in progress, and it says what is going on.** Four dots changing places: a step is under way (a command, a file read or written, a search). Three dots turning in space: the model is thinking. The same three circling in a row: it is writing. The mark is on the step while one is under way and under the conversation otherwise, never both. (These replace the dot grid of 0.1.8 and the blinking prompt.)
+- **A long run of steps opens to its last eight**, with the earlier ones one press away, and a long thought opens to its first part: opening either no longer pushes the rest of the conversation off the screen.
+- **Antigravity's checks on background commands read as that** ("Checked a background task") and are counted as such, in place of rows saying "Run manage_task".
+
+**Known limits:** `/goal`, editing a message and **From Codex** were built against Codex's published protocol and tested with a stand-in for Codex, not yet with a signed-in Codex.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.8
 
 **Fixed**

@@ -2403,35 +2403,42 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .tool-console .tool-running, .tool-running { padding: 0 2px; border-top: 0; font-size: var(--fs-sm); color: var(--muted); }
 .tool-command .prompt { color: var(--faint); user-select: none; }
 
-/* Something in progress: six dots, two across and three down, lit in turn (the dots a terminal's spinner
-   draws). In the conversation each dot is one colour of the spectrum, as the app's mark beside it is. */
-.spinner {
-  display: inline-grid; grid-template: repeat(3, 1fr) / repeat(2, 1fr); place-items: center;
-  flex-shrink: 0; border: 0; border-radius: 0; animation: none; color: var(--muted); vertical-align: -2px;
-}
-.spinner i { width: 50%; aspect-ratio: 1; border-radius: 50%; background: currentColor; animation-duration: .9s; animation-timing-function: step-end; animation-iteration-count: infinite; }
-.spinner i:nth-child(1) { animation-name: dots-1; }
-.spinner i:nth-child(2) { animation-name: dots-4; }
-.spinner i:nth-child(3) { animation-name: dots-2; }
-.spinner i:nth-child(4) { animation-name: dots-5; }
-.spinner i:nth-child(5) { animation-name: dots-3; }
-.spinner i:nth-child(6) { animation-name: dots-6; }
+/* Work in progress has one mark at a time, and which mark says what is going on:
+     swap    four dots at the corners of a square, opposite pairs changing places in turn: a step is under way
+     tumble  three dots on a ring that turns while it tumbles, nearer ones larger: the model is thinking
+     orbit   the same three circling in a row, the ring seen from its edge: the model is writing
+   In the conversation the dots are red, green and blue (and yellow, for the fourth); elsewhere they take the
+   colour of the text beside them. The keyframes are where each dot is, and how large, over one loop. */
+.spinner { position: relative; display: inline-block; flex-shrink: 0; border: 0; border-radius: 0; animation: none; color: var(--muted); vertical-align: -2px; }
+.spinner i { position: absolute; left: 50%; top: 50%; width: 34%; height: 34%; margin: -17% 0 0 -17%; border-radius: 50%; background: currentColor;
+  animation-duration: 1.9s; animation-timing-function: linear; animation-iteration-count: infinite; will-change: transform; }
+.spinner i:nth-child(1) { animation-name: tumble-1; }
+.spinner i:nth-child(2) { animation-name: tumble-2; }
+.spinner i:nth-child(3) { animation-name: tumble-3; }
+.spinner.orbit i { animation-duration: 1.5s; }
+.spinner.orbit i:nth-child(1) { animation-name: orbit-1; }
+.spinner.orbit i:nth-child(2) { animation-name: orbit-2; }
+.spinner.orbit i:nth-child(3) { animation-name: orbit-3; }
+.spinner.swap i { width: 28%; height: 28%; margin: -14% 0 0 -14%; animation-duration: 3.6s; animation-timing-function: cubic-bezier(.6, 0, .3, 1); }
+.spinner.swap i:nth-child(1) { animation-name: swap-1; }
+.spinner.swap i:nth-child(2) { animation-name: swap-2; }
+.spinner.swap i:nth-child(3) { animation-name: swap-3; }
+.spinner.swap i:nth-child(4) { animation-name: swap-4; }
 .spinner.spectrum i:nth-child(1) { background: #ff5e57; }
-.spinner.spectrum i:nth-child(2) { background: #ff9500; }
-.spinner.spectrum i:nth-child(3) { background: #ffcc00; }
-.spinner.spectrum i:nth-child(4) { background: #34c759; }
-.spinner.spectrum i:nth-child(5) { background: #0a84ff; }
-.spinner.spectrum i:nth-child(6) { background: #af52de; }
-/* Ten steps; the numbers are the dots of a braille cell (1 to 3 down the left, 4 to 6 down the right). */
-@keyframes dots-1 { 0% { opacity: 1; } 30% { opacity: 0; } 70% { opacity: 1; } }
-@keyframes dots-2 { 0% { opacity: 1; } 10% { opacity: 0; } 60% { opacity: 1; } }
-@keyframes dots-3 { 0% { opacity: 0; } 40% { opacity: 1; } }
-@keyframes dots-4 { 0% { opacity: 1; } 50% { opacity: 0; } 90% { opacity: 1; } }
-@keyframes dots-5 { 0% { opacity: 0; } 10% { opacity: 1; } 60% { opacity: 0; } }
-@keyframes dots-6 { 0% { opacity: 0; } 20% { opacity: 1; } 80% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .spinner i { animation-name: none; } }
-/* A command that is running: the app's mark, its cursor blinking. */
-.step-mark { flex-shrink: 0; }
+.spinner.spectrum i:nth-child(2) { background: #34c759; }
+.spinner.spectrum i:nth-child(3) { background: #0a84ff; }
+.spinner.spectrum i:nth-child(4) { background: #ffcc00; }
+@keyframes tumble-1 { 0% { transform: translate(95.1%, 0.0%) scale(0.577); opacity: 0.75; z-index: 6; } 6.25% { transform: translate(86.9%, 48.6%) scale(0.699); opacity: 0.83; z-index: 7; } 12.5% { transform: translate(50.0%, 68.7%) scale(0.840); opacity: 0.91; z-index: 8; } 18.75% { transform: translate(10.0%, 48.6%) scale(0.955); opacity: 0.97; z-index: 10; } 25% { transform: translate(-7.0%, 0.0%) scale(0.999); opacity: 1.00; z-index: 10; } 31.25% { transform: translate(10.0%, -48.6%) scale(0.955); opacity: 0.97; z-index: 10; } 37.5% { transform: translate(50.0%, -68.7%) scale(0.840); opacity: 0.91; z-index: 8; } 43.75% { transform: translate(86.9%, -48.6%) scale(0.699); opacity: 0.83; z-index: 7; } 50% { transform: translate(95.1%, -0.0%) scale(0.577); opacity: 0.75; z-index: 6; } 56.25% { transform: translate(65.0%, 48.6%) scale(0.499); opacity: 0.70; z-index: 5; } 62.5% { transform: translate(9.5%, 68.7%) scale(0.463); opacity: 0.67; z-index: 5; } 68.75% { transform: translate(-43.0%, 48.6%) scale(0.452); opacity: 0.67; z-index: 5; } 75% { transform: translate(-64.3%, 0.0%) scale(0.451); opacity: 0.66; z-index: 5; } 81.25% { transform: translate(-43.0%, -48.6%) scale(0.452); opacity: 0.67; z-index: 5; } 87.5% { transform: translate(9.5%, -68.7%) scale(0.463); opacity: 0.67; z-index: 5; } 93.75% { transform: translate(65.0%, -48.6%) scale(0.499); opacity: 0.70; z-index: 5; } 100% { transform: translate(95.1%, -0.0%) scale(0.577); opacity: 0.75; z-index: 6; } }
+@keyframes tumble-2 { 0% { transform: translate(-22.7%, 32.4%) scale(0.972); opacity: 0.98; z-index: 10; } 6.25% { transform: translate(-60.6%, -9.3%) scale(0.928); opacity: 0.96; z-index: 9; } 12.5% { transform: translate(-64.1%, -61.4%) scale(0.818); opacity: 0.90; z-index: 8; } 18.75% { transform: translate(-35.5%, -93.5%) scale(0.667); opacity: 0.81; z-index: 7; } 25% { transform: translate(3.5%, -86.6%) scale(0.522); opacity: 0.72; z-index: 5; } 31.25% { transform: translate(25.5%, -44.9%) scale(0.429); opacity: 0.65; z-index: 4; } 37.5% { transform: translate(14.1%, 7.3%) scale(0.402); opacity: 0.62; z-index: 4; } 43.75% { transform: translate(-26.4%, 39.3%) scale(0.423); opacity: 0.64; z-index: 4; } 50% { transform: translate(-72.4%, 32.4%) scale(0.492); opacity: 0.69; z-index: 5; } 56.25% { transform: translate(-95.5%, -9.3%) scale(0.584); opacity: 0.76; z-index: 6; } 62.5% { transform: translate(-78.9%, -61.4%) scale(0.672); opacity: 0.81; z-index: 7; } 68.75% { transform: translate(-28.0%, -93.5%) scale(0.739); opacity: 0.85; z-index: 7; } 75% { transform: translate(32.1%, -86.6%) scale(0.793); opacity: 0.88; z-index: 8; } 81.25% { transform: translate(71.0%, -44.9%) scale(0.845); opacity: 0.91; z-index: 8; } 87.5% { transform: translate(69.4%, 7.3%) scale(0.903); opacity: 0.95; z-index: 9; } 93.75% { transform: translate(30.5%, 39.3%) scale(0.955); opacity: 0.97; z-index: 10; } 100% { transform: translate(-22.7%, 32.4%) scale(0.972); opacity: 0.98; z-index: 10; } }
+@keyframes tumble-3 { 0% { transform: translate(-72.4%, -32.4%) scale(0.492); opacity: 0.69; z-index: 5; } 6.25% { transform: translate(-26.4%, -39.3%) scale(0.423); opacity: 0.64; z-index: 4; } 12.5% { transform: translate(14.1%, -7.3%) scale(0.402); opacity: 0.62; z-index: 4; } 18.75% { transform: translate(25.5%, 44.9%) scale(0.429); opacity: 0.65; z-index: 4; } 25% { transform: translate(3.5%, 86.6%) scale(0.522); opacity: 0.72; z-index: 5; } 31.25% { transform: translate(-35.5%, 93.5%) scale(0.667); opacity: 0.81; z-index: 7; } 37.5% { transform: translate(-64.1%, 61.4%) scale(0.818); opacity: 0.90; z-index: 8; } 43.75% { transform: translate(-60.6%, 9.3%) scale(0.928); opacity: 0.96; z-index: 9; } 50% { transform: translate(-22.7%, -32.4%) scale(0.972); opacity: 0.98; z-index: 10; } 56.25% { transform: translate(30.5%, -39.3%) scale(0.955); opacity: 0.97; z-index: 10; } 62.5% { transform: translate(69.4%, -7.3%) scale(0.903); opacity: 0.95; z-index: 9; } 68.75% { transform: translate(71.0%, 44.9%) scale(0.845); opacity: 0.91; z-index: 8; } 75% { transform: translate(32.1%, 86.6%) scale(0.793); opacity: 0.88; z-index: 8; } 81.25% { transform: translate(-28.0%, 93.5%) scale(0.739); opacity: 0.85; z-index: 7; } 87.5% { transform: translate(-78.9%, 61.4%) scale(0.672); opacity: 0.81; z-index: 7; } 93.75% { transform: translate(-95.5%, 9.3%) scale(0.584); opacity: 0.76; z-index: 6; } 100% { transform: translate(-72.4%, -32.4%) scale(0.492); opacity: 0.69; z-index: 5; } }
+@keyframes orbit-1 { 0% { transform: translate(100.0%, 0.0%) scale(0.670); opacity: 0.81; z-index: 7; } 6.25% { transform: translate(92.4%, 6.0%) scale(0.791); opacity: 0.88; z-index: 8; } 12.5% { transform: translate(70.7%, 11.1%) scale(0.897); opacity: 0.94; z-index: 9; } 18.75% { transform: translate(38.3%, 14.5%) scale(0.970); opacity: 0.98; z-index: 10; } 25% { transform: translate(0.0%, 15.6%) scale(0.996); opacity: 1.00; z-index: 10; } 31.25% { transform: translate(-38.3%, 14.5%) scale(0.970); opacity: 0.98; z-index: 10; } 37.5% { transform: translate(-70.7%, 11.1%) scale(0.897); opacity: 0.94; z-index: 9; } 43.75% { transform: translate(-92.4%, 6.0%) scale(0.791); opacity: 0.88; z-index: 8; } 50% { transform: translate(-100.0%, 0.0%) scale(0.670); opacity: 0.81; z-index: 7; } 56.25% { transform: translate(-92.4%, -6.0%) scale(0.557); opacity: 0.74; z-index: 6; } 62.5% { transform: translate(-70.7%, -11.1%) scale(0.468); opacity: 0.68; z-index: 5; } 68.75% { transform: translate(-38.3%, -14.5%) scale(0.416); opacity: 0.64; z-index: 4; } 75% { transform: translate(-0.0%, -15.6%) scale(0.402); opacity: 0.62; z-index: 4; } 81.25% { transform: translate(38.3%, -14.5%) scale(0.416); opacity: 0.64; z-index: 4; } 87.5% { transform: translate(70.7%, -11.1%) scale(0.468); opacity: 0.68; z-index: 5; } 93.75% { transform: translate(92.4%, -6.0%) scale(0.557); opacity: 0.74; z-index: 6; } 100% { transform: translate(100.0%, -0.0%) scale(0.670); opacity: 0.81; z-index: 7; } }
+@keyframes orbit-2 { 0% { transform: translate(-50.0%, 13.5%) scale(0.950); opacity: 0.97; z-index: 10; } 6.25% { transform: translate(-79.3%, 9.5%) scale(0.865); opacity: 0.92; z-index: 9; } 12.5% { transform: translate(-96.6%, 4.0%) scale(0.751); opacity: 0.86; z-index: 8; } 18.75% { transform: translate(-99.1%, -2.0%) scale(0.631); opacity: 0.79; z-index: 6; } 25% { transform: translate(-86.6%, -7.8%) scale(0.524); opacity: 0.72; z-index: 5; } 31.25% { transform: translate(-60.9%, -12.4%) scale(0.447); opacity: 0.66; z-index: 4; } 37.5% { transform: translate(-25.9%, -15.1%) scale(0.408); opacity: 0.63; z-index: 4; } 43.75% { transform: translate(13.1%, -15.5%) scale(0.403); opacity: 0.62; z-index: 4; } 50% { transform: translate(50.0%, -13.5%) scale(0.429); opacity: 0.65; z-index: 4; } 56.25% { transform: translate(79.3%, -9.5%) scale(0.494); opacity: 0.70; z-index: 5; } 62.5% { transform: translate(96.6%, -4.0%) scale(0.593); opacity: 0.76; z-index: 6; } 68.75% { transform: translate(99.1%, 2.0%) scale(0.711); opacity: 0.83; z-index: 7; } 75% { transform: translate(86.6%, 7.8%) scale(0.829); opacity: 0.90; z-index: 8; } 81.25% { transform: translate(60.9%, 12.4%) scale(0.926); opacity: 0.96; z-index: 9; } 87.5% { transform: translate(25.9%, 15.1%) scale(0.984); opacity: 0.99; z-index: 10; } 93.75% { transform: translate(-13.1%, 15.5%) scale(0.993); opacity: 1.00; z-index: 10; } 100% { transform: translate(-50.0%, 13.5%) scale(0.950); opacity: 0.97; z-index: 10; } }
+@keyframes orbit-3 { 0% { transform: translate(-50.0%, -13.5%) scale(0.429); opacity: 0.65; z-index: 4; } 6.25% { transform: translate(-13.1%, -15.5%) scale(0.403); opacity: 0.62; z-index: 4; } 12.5% { transform: translate(25.9%, -15.1%) scale(0.408); opacity: 0.63; z-index: 4; } 18.75% { transform: translate(60.9%, -12.4%) scale(0.447); opacity: 0.66; z-index: 4; } 25% { transform: translate(86.6%, -7.8%) scale(0.524); opacity: 0.72; z-index: 5; } 31.25% { transform: translate(99.1%, -2.0%) scale(0.631); opacity: 0.79; z-index: 6; } 37.5% { transform: translate(96.6%, 4.0%) scale(0.751); opacity: 0.86; z-index: 8; } 43.75% { transform: translate(79.3%, 9.5%) scale(0.865); opacity: 0.92; z-index: 9; } 50% { transform: translate(50.0%, 13.5%) scale(0.950); opacity: 0.97; z-index: 10; } 56.25% { transform: translate(13.1%, 15.5%) scale(0.993); opacity: 1.00; z-index: 10; } 62.5% { transform: translate(-25.9%, 15.1%) scale(0.984); opacity: 0.99; z-index: 10; } 68.75% { transform: translate(-60.9%, 12.4%) scale(0.926); opacity: 0.96; z-index: 9; } 75% { transform: translate(-86.6%, 7.8%) scale(0.829); opacity: 0.90; z-index: 8; } 81.25% { transform: translate(-99.1%, 2.0%) scale(0.711); opacity: 0.83; z-index: 7; } 87.5% { transform: translate(-96.6%, -4.0%) scale(0.593); opacity: 0.76; z-index: 6; } 93.75% { transform: translate(-79.3%, -9.5%) scale(0.494); opacity: 0.70; z-index: 5; } 100% { transform: translate(-50.0%, -13.5%) scale(0.429); opacity: 0.65; z-index: 4; } }
+@keyframes swap-1 { 0%, 6% { transform: translate(-100%, -100%); } 19%, 56% { transform: translate(100%, 100%); } 69%, 100% { transform: translate(-100%, -100%); } }
+@keyframes swap-2 { 0%, 31% { transform: translate(100%, -100%); } 44%, 81% { transform: translate(-100%, 100%); } 94%, 100% { transform: translate(100%, -100%); } }
+@keyframes swap-3 { 0%, 6% { transform: translate(100%, 100%); } 19%, 56% { transform: translate(-100%, -100%); } 69%, 100% { transform: translate(100%, 100%); } }
+@keyframes swap-4 { 0%, 31% { transform: translate(-100%, 100%); } 44%, 81% { transform: translate(100%, -100%); } 94%, 100% { transform: translate(-100%, 100%); } }
+@media (prefers-reduced-motion: reduce) { .spinner i { animation-play-state: paused; } }
 /* In the sidebar a conversation that is working has one quiet dot. */
 .row-dot.working { background: var(--muted); animation: pulse 1.6s ease-in-out infinite; }
 /* What a group's line says after its summary (how many failed, lines changed) stays on that line. */
@@ -2449,3 +2456,36 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .composer-shell > .conn-banner .button.small { flex-shrink: 0; }
 /* Every changed file shows all of its diff: the list scrolls, the cards do not shrink to fit it. */
 .change-file { flex-shrink: 0; }
+
+/* An opened thought: its first part, and the rest when asked. */
+.thought-text:not(.full) { max-height: 15.5em; overflow: hidden; }
+.thought-text.cut { -webkit-mask-image: linear-gradient(#000 calc(100% - 3.2em), transparent); mask-image: linear-gradient(#000 calc(100% - 3.2em), transparent); }
+.thought-more { margin-top: 4px; padding: 0; border: 0; background: none; font: inherit; font-size: var(--fs-sm); color: var(--muted); cursor: pointer; }
+.thought-more:hover { color: var(--text); }
+/* The earlier steps of a long run, one press away. */
+.work-body > .step.earlier .step-text { color: var(--faint); }
+
+/* The right panel: what it shows is chosen from the button at its top, and the agent's thinking as it arrives. */
+.panel-tools { display: flex; justify-content: flex-end; margin: -6px -4px -6px 0; }
+.panel-tools .tool-button { width: 24px; height: 24px; color: var(--faint); }
+.panel-tools .tool-button:hover, .panel-tools .tool-button.on { color: var(--text); }
+.thinking-feed { max-height: 36vh; overflow-y: auto; font-size: var(--fs-sm); line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.thinking-feed p { margin: 0 0 9px; white-space: pre-wrap; }
+.thinking-feed p:last-child { margin-bottom: 0; }
+.thinking-feed p.live { color: var(--text-2); }
+
+.thinking-feed p.pending { opacity: .72; }
+.thinking-note { margin-top: 6px; font-size: var(--fs-xs); color: var(--amber); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.translation-result { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0 0; font-size: var(--fs-md); color: var(--text-2); }
+.translation-result svg { flex-shrink: 0; margin-top: 3px; color: var(--green, #34c759); }
+
+/* Conversations from Codex's own history, on the new-conversation screen. */
+.cli-history { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.cli-history-search { width: 100%; height: 30px; padding: 0 10px; border: 1px solid var(--hairline); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: var(--fs-md); }
+.cli-history-list { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
+.cli-history-row { display: flex; flex-direction: column; gap: 1px; padding: 7px 8px; border: 0; border-radius: 8px; background: none; text-align: left; color: var(--text); font: inherit; cursor: pointer; }
+.cli-history-row:hover:not(:disabled) { background: var(--row-hover); }
+.cli-history-row:disabled { opacity: .6; cursor: default; }
+.cli-history-title { font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-history-meta { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-history-note { display: flex; align-items: center; gap: 7px; padding: 8px; font-size: var(--fs-sm); color: var(--muted); }

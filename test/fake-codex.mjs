@@ -7,6 +7,10 @@ const home = process.env.CODEX_HOME;
 const log = process.env.FAKE_CODEX_LOG, signedIn = () => home ? fs.existsSync(home + '/auth.json') : !fs.existsSync(process.env.FAKE_CODEX_SIGNED_OUT);
 const send = m => process.stdout.write(JSON.stringify(m) + '\\n');
 const note = (method, params) => { fs.appendFileSync(log, JSON.stringify({ method, params }) + '\\n'); };
+// (A goal is kept with the thread, as Codex keeps it in its own database: it is still there when Codex starts again.)
+const goalFile = log + '.goal';
+const keep = () => { if (goal) fs.writeFileSync(goalFile, JSON.stringify(goal)); else fs.rmSync(goalFile, { force: true }); };
+let goal = null; try { goal = JSON.parse(fs.readFileSync(goalFile, 'utf8')); } catch { /* none yet */ }
 let cwd = '/w', turn = 0, active = null, total = { totalTokens: 1000, inputTokens: 900, cachedInputTokens: 500, cacheWriteInputTokens: 0, outputTokens: 100, reasoningOutputTokens: 0 };
 // Codex counts tokens when a model request ends: once per request of a turn.
 const count = t => { const last = { totalTokens: 60, inputTokens: 50, cachedInputTokens: 20, cacheWriteInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 4 };
@@ -44,7 +48,8 @@ function handle(m) {
     case 'thread/start': if (m.params.ephemeral) return reply({ thread: { id: 'title-' + (++turn) }, model: 'gpt-a', reasoningEffort: 'low' });
       cwd = m.params.cwd; return reply({ thread: { id: 'thread-1' }, model: 'gpt-a', reasoningEffort: 'low' });
     case 'thread/name/set': reply({}); return send({ method: 'thread/name/updated', params: { threadId: m.params.threadId, threadName: m.params.name } });
-    case 'thread/resume': cwd = m.params.cwd ?? cwd; return m.params.threadId === 'thread-1' ? reply({ thread: { id: 'thread-1' }, model: 'gpt-a', reasoningEffort: 'low' }) : send({ id: m.id, error: { code: -32000, message: 'no such thread' } });
+    case 'thread/resume': cwd = m.params.cwd ?? cwd;
+      return m.params.threadId === 'thread-1' ? reply({ thread: { id: 'thread-1' }, model: 'gpt-a', reasoningEffort: 'low' }) : send({ id: m.id, error: { code: -32000, message: 'no such thread' } });
     case 'turn/start': { if (String(m.params.threadId).startsWith('title-')) { const id = m.params.threadId, t = 'turn-' + (++turn); reply({ turn: { id: t } });
         send({ method: 'item/completed', params: { threadId: id, turnId: t, item: { type: 'agentMessage', id: 'title-msg', text: JSON.stringify({ title: process.env.FAKE_CODEX_TITLE || '"Weather lookup by city."' }) } } });
         return send({ method: 'turn/completed', params: { threadId: id, turn: { id: t, status: 'completed', error: null } } }); }
@@ -101,6 +106,48 @@ function handle(m) {
       send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-1', delta: 'there' } });
       send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { type: 'agentMessage', id: 'msg-1', text: 'Hello there' } } });
       return finish('completed'); }
+    // Goals, as Codex keeps them: one per thread. An active goal on an idle thread is worked on without being
+    // asked (a turn Codex starts itself), unless FAKE_CODEX_GOAL is "idle"; "long" keeps that turn going.
+    case 'thread/goal/get': return reply({ goal });
+    case 'thread/goal/clear': goal = null; keep(); reply({ cleared: true }); return send({ method: 'thread/goal/cleared', params: { threadId: 'thread-1' } });
+    case 'thread/goal/set': {
+      if (!goal && !m.params.objective) return send({ id: m.id, error: { code: -32600, message: 'thread has no goal' } });
+      goal = { threadId: 'thread-1', objective: m.params.objective ?? goal.objective, status: m.params.status ?? goal?.status ?? 'active', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1764000000, updatedAt: 1764000000 };
+      keep(); reply({ goal });
+      send({ method: 'thread/goal/updated', params: { threadId: 'thread-1', turnId: null, goal } });
+      if (goal.status === 'active' && !active && process.env.FAKE_CODEX_GOAL !== 'idle') setTimeout(() => {
+        if (active || !goal || goal.status !== 'active') return;
+        active = 'turn-' + (++turn);
+        send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
+        send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'goal-msg-' + turn, delta: 'Working toward: ' + goal.objective } });
+        if (process.env.FAKE_CODEX_GOAL === 'long') return;
+        goal = { ...goal, status: 'complete' }; keep();
+        send({ method: 'thread/goal/updated', params: { threadId: 'thread-1', turnId: active, goal } });
+        finish('completed');
+      }, 20);
+      return;
+    }
+    // A conversation from Codex's own history, forked into this home from the file it is kept in: a new thread,
+    // with what was said in the old one.
+    case 'thread/fork': cwd = m.params.cwd ?? cwd;
+      if (m.params.threadId !== 'old-1' || m.params.path !== '/codex-home/sessions/rollout-old-1.jsonl') return send({ id: m.id, error: { code: -32000, message: 'no such thread' } });
+      return reply({ model: 'gpt-a', reasoningEffort: 'low', thread: { id: 'thread-1', model: 'gpt-a', turns: [
+        { id: 'old-turn-1', status: 'completed', startedAt: 1764000000, durationMs: 4200, error: null, items: [
+          { type: 'userMessage', id: 'u-1', clientId: null, content: [{ type: 'text', text: 'please fix the parser', text_elements: [] }] },
+          { type: 'reasoning', id: 'r-1', summary: ['Look at it first.'], content: [] },
+          { type: 'commandExecution', id: 'oc-1', command: "/bin/zsh -lc 'cat src/parser.js'", commandActions: [{ type: 'read', command: 'cat src/parser.js', name: 'parser.js', path: '/w/app/src/parser.js' }], status: 'completed', aggregatedOutput: 'parse()', exitCode: 0 },
+          { type: 'commandExecution', id: 'oc-2', command: "/bin/zsh -lc 'npm test'", commandActions: [{ type: 'unknown', command: 'npm test' }], status: 'failed', aggregatedOutput: '1 failing', exitCode: 1 },
+          { type: 'agentMessage', id: 'a-1', text: 'Fixed the parser.', phase: null }] },
+        { id: 'old-turn-2', status: 'interrupted', startedAt: 1764000100, durationMs: null, error: null, items: [
+          { type: 'userMessage', id: 'u-2', clientId: null, content: [{ type: 'text', text: 'and the tests', text_elements: [] }] },
+          { type: 'agentMessage', id: 'a-2', text: 'Starting on them.', phase: null }] }] } });
+    case 'thread/revert': return reply({ thread: { id: m.params.threadId }, turnsBackwardsCursor: null, itemsBackwardsCursor: null });
+    // Codex's own history: two conversations, an agent's thread and one in which nothing was said.
+    case 'thread/list': return reply({ data: [
+      { id: 'old-1', name: 'Fix the parser', preview: 'please fix the parser', cwd: process.env.FAKE_CODEX_THREAD_CWD || '/w/app', updatedAt: 1764000300, ephemeral: false, parentThreadId: null, model: 'gpt-a', path: '/codex-home/sessions/rollout-old-1.jsonl' },
+      { id: 'old-agent', name: null, preview: 'check it', cwd: '/w/app', updatedAt: 1764000200, ephemeral: false, parentThreadId: 'old-1', model: 'gpt-a' },
+      { id: 'old-2', name: null, preview: 'what does this repo do?\\nand a second line', cwd: '/w/lib', updatedAt: 1764000100, ephemeral: false, parentThreadId: null, model: null },
+      { id: 'old-empty', name: null, preview: '', cwd: '/w/lib', updatedAt: 1764000000, ephemeral: false, parentThreadId: null, model: null }], nextCursor: null, backwardsCursor: null });
     case 'turn/steer': return m.params.expectedTurnId === active ? reply({}) : send({ id: m.id, error: { code: -32000, message: 'no active turn' } });
     case 'turn/interrupt': reply({}); return finish('interrupted');
     case 'thread/compact/start': reply({}); send({ method: 'thread/compacted', params: { threadId: 'thread-1', turnId: 'compact-1' } }); return send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'compact-1', status: 'completed', error: null } } });

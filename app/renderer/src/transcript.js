@@ -249,6 +249,24 @@ export function speedTier(m) {
     : `The provider ran it at ${label} speed${billing}`;
   return { label, slower: true, title: `Asked for ${asked}. ${why}` };
 }
+// What the agent thought on the turn at hand (or, between turns, on the last one), in order: the right panel
+// shows it as it arrives. A reply still being written is the live one; its last thought is the one growing.
+export function turnThoughts(t) {
+  const messages = t?.messages ?? [];
+  let from = messages.length;
+  while (from > 0 && messages[from - 1].role !== 'user') from--;
+  const turn = [...messages.slice(from), ...(t?.live ? [t.live] : [])];
+  const thoughts = [];
+  turn.forEach((m, mi) => {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) return;
+    m.content.forEach((block, bi) => {
+      if (block?.type !== 'thinking' || block.redacted || typeof block.thinking !== 'string' || !block.thinking.trim()) return;
+      thoughts.push({ key: `${m.__liveKey ?? m.__entryId ?? mi}:${bi}`, text: block.thinking.trim(), streaming: m === t.live && bi === m.content.length - 1 });
+    });
+  });
+  return thoughts;
+}
+
 // The replies the Usage card counts, one per model request. Pi and Claude Code save each request as a reply of
 // its own. Codex and Antigravity save a turn as one reply listing its requests: each becomes an entry here, with
 // its own tokens where the CLI counts them per request (Codex) and the turn's where it does not (Antigravity).
@@ -351,7 +369,7 @@ export function applyEvent(t, event) {
     case 'compaction_start': return { ...t, compacting: true };
     case 'compaction_end': return { ...t, compacting: false };
     case 'tool_execution_start':
-      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: 'running', args: event.args } } };
+      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: 'running', args: event.args, startedAt: Date.now() } } };
     case 'tool_execution_update':
       return { ...t, tools: { ...t.tools, [event.toolCallId]: { ...t.tools[event.toolCallId], status: 'running', result: event.partialResult } } };
     case 'tool_execution_end':
@@ -663,7 +681,9 @@ export function toolSummary(calls) {
   if (mcpCount) parts.push(`${parts.length ? 'called' : 'Called'} ${plural(mcpCount, 'MCP tool', 'MCP tools')}`);
   if (counts.AskUserQuestion) parts.push(`${parts.length ? 'asked' : 'Asked'} ${counts.AskUserQuestion === 1 ? 'a question' : `${counts.AskUserQuestion} questions`}`);
   if (counts.subagent) parts.push(`Delegated ${plural(calls.filter(c => c.name === 'subagent').reduce((n, c) => n + (c.arguments?.tasks?.length ?? 0), 0), 'subtask', 'subtasks')}`);
-  const accounted = (counts.bash ?? 0) + edited + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0) + (counts.AskUserQuestion ?? 0);
+  const tasks = (counts.manage_task ?? 0) + (counts['Run manage_task'] ?? 0);
+  if (tasks) parts.push(`${parts.length ? 'checked' : 'Checked'} background tasks`);
+  const accounted = tasks + (counts.bash ?? 0) + edited + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0) + (counts.AskUserQuestion ?? 0);
   const other = calls.length - accounted;
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
   if (skipped) parts.push(`${plural(skipped, 'tool call', 'tool calls')} not executed`);

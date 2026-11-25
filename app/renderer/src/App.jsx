@@ -21,7 +21,8 @@ import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState,
 function GoalBanner({ session }) {
   const goal = useStore(s => s.goals[session.id]);
   if (!goal?.objective) return null;
-  const label = { active: 'Working', paused: 'Paused', complete: 'Achieved', blocked: 'Blocked' }[goal.status] ?? goal.status;
+  // (Codex also stops a goal when the plan's usage or the goal's own budget runs out.)
+  const label = { active: 'Working', paused: 'Paused', complete: 'Achieved', blocked: 'Blocked', usageLimited: 'Usage limit reached', budgetLimited: 'Budget used up' }[goal.status] ?? goal.status;
   const run = arg => api('prompt', session.id, `/goal ${arg}`).catch(e => notify(e.message, 'error'));
   return (
     <div className={`goal-banner ${goal.status}`}>
@@ -29,7 +30,7 @@ function GoalBanner({ session }) {
       <span className="goal-objective" title={goal.objective}>{goal.objective}</span>
       <span className={`goal-state ${goal.status}`}>{goal.status === 'active' && <span className="goal-pulse" />}{label}</span>
       {goal.status === 'active' && <button className="goal-action" onClick={() => run('pause')}>Pause</button>}
-      {(goal.status === 'paused' || goal.status === 'blocked') && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
+      {['paused', 'blocked', 'usageLimited', 'budgetLimited'].includes(goal.status) && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
       <button className="goal-close" aria-label="Clear goal" title="Clear goal" onClick={() => run('clear')}><Icon name="x" size={13} /></button>
     </div>
   );
@@ -241,7 +242,7 @@ function SessionView({ session }) {
           <div className="composer-shell">
             <ConnectionBanner session={session} />
             {cli && <CliLogin session={session} />}
-            {!isClaude && !cli && <GoalBanner session={session} />}
+            {((!isClaude && !cli) || session.engine === 'codex') && <GoalBanner session={session} />}
             {!isClaude && !cli && <UltraBanner session={session} />}
             <Composer session={session} autoFocus placeholder={placeholder} onSubmit={(text, attachments, options) => sendPrompt(session.id, text, attachments, options)} footer={<ComposerBar session={session} />} />
           </div>

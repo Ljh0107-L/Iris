@@ -29,7 +29,7 @@ export function providerBaseUrl(api, url) {
 
 const withOrWithoutV1 = base => /\/v1$/i.test(base) ? base.slice(0, -3) : `${base}/v1`;
 const isUrl = base => /^https?:\/\/[^/]/i.test(base);
-function requestHeaders(api, apiKey, headers) {
+export function requestHeaders(api, apiKey, headers) {
   const auth = !apiKey ? {} : api === ANTHROPIC
     ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', authorization: `Bearer ${apiKey}` }
     : api === GOOGLE ? { 'x-goog-api-key': apiKey } // Google reads a bearer token as OAuth and rejects a key there

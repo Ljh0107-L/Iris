@@ -1,8 +1,8 @@
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
-import { Spinner, baseName, shortPath, useResizable } from './ui.jsx';
-import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
+import { MenuItem, Popover, Spinner, baseName, shortPath, useResizable } from './ui.jsx';
+import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, turnThoughts, usageOf } from './transcript.js';
 import { api, stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
@@ -209,7 +209,84 @@ function EngineAgents({ transcript }) {
   </Card>;
 }
 
+// Thinking shown in the reader's language: only when they turned translation on in Settings → Translation and
+// gave the API for it there. A thought is translated a paragraph at a time, once the paragraph is finished:
+// what was translated stays as it is while the rest arrives, and a paragraph is never sent twice.
+const translations = new Map(); // "api settings\nparagraph" -> { text } | { error } | { pending }
+const translationWatchers = new Set();
+let translating = Promise.resolve();
+function useTranslation(paragraphs, choice) {
+  const [, redraw] = useState(0);
+  const scope = choice?.on && choice.baseUrl && choice.model ? [choice.api, choice.baseUrl, choice.model, choice.language].join('\n') : null;
+  useEffect(() => { const watch = () => redraw(n => n + 1); translationWatchers.add(watch); return () => { translationWatchers.delete(watch); }; }, []);
+  useEffect(() => {
+    if (!scope) return;
+    for (const paragraph of paragraphs) {
+      const key = `${scope}\n${paragraph}`;
+      if (translations.has(key)) continue;
+      if (translations.size > 400) translations.delete(translations.keys().next().value);
+      translations.set(key, { pending: true });
+      translating = translating.then(() => api('translate', paragraph)).then(text => { translations.set(key, { text }); },
+        error => { translations.set(key, { error: error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') }); })
+        .then(() => { for (const watch of translationWatchers) watch(); });
+    }
+  }, [scope, paragraphs.join('\u0000')]);
+  return paragraph => scope ? translations.get(`${scope}\n${paragraph}`) ?? null : null;
+}
+
+// What the agent is thinking right now: the thought being written, or the last one it had on this turn. One
+// at a time: when the next thought begins, the one before it leaves (the conversation keeps them all, folded).
+function ThinkingCard({ transcript, working }) {
+  const thought = useMemo(() => turnThoughts(transcript).at(-1) ?? null, [transcript?.messages, transcript?.live]);
+  const choice = useStore(s => s.settings?.translation);
+  const live = !!thought?.streaming && working;
+  const paragraphs = useMemo(() => (thought?.text ?? '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean), [thought?.text]);
+  // A paragraph still being written is shown as it is; the finished ones are translated.
+  const finished = live ? paragraphs.slice(0, -1) : paragraphs;
+  const translated = useTranslation(finished, choice);
+  const feed = useRef(null), following = useRef(true);
+  useLayoutEffect(() => { following.current = true; }, [thought?.key]);
+  useLayoutEffect(() => { const el = feed.current; if (el && following.current) el.scrollTop = el.scrollHeight; });
+  if (!thought) return <Card title="Thinking" collapsible={false} aside={<span>{working ? 'Nothing yet' : 'None this turn'}</span>} />;
+  const failed = finished.map(translated).find(result => result?.error);
+  return <Card title="Thinking" aside={live ? <span className="panel-pill">Live</span> : null}>
+    <div className="thinking-feed" ref={feed} onScroll={e => { const el = e.currentTarget; following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>
+      {paragraphs.map((paragraph, index) => {
+        const result = index < finished.length ? translated(paragraph) : null;
+        return <p key={index} className={`${live && index === paragraphs.length - 1 ? 'live' : ''} ${result?.pending ? 'pending' : ''}`}>{result?.text ?? paragraph}</p>;
+      })}
+    </div>
+    {failed && <div className="thinking-note" title={failed.error}>Not translated: {failed.error}</div>}
+  </Card>;
+}
+
+// The panel has little room, and what is worth it differs from person to person: each card can be left out.
+// The choice is kept, for every conversation.
+const PANEL_CARDS = [['environment', 'Environment'], ['context', 'Context'], ['usage', 'Usage'], ['thinking', 'Thinking'], ['jobs', 'Background tasks'], ['agents', 'Agents']];
+const PANEL_KEY = 'iris.panel.hidden';
+function usePanelCards() {
+  const [hidden, setHidden] = useState(() => { try { return new Set(JSON.parse(localStorage.getItem(PANEL_KEY) ?? '[]')); } catch { return new Set(); } });
+  const toggle = id => setHidden(previous => {
+    const next = new Set(previous);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    try { localStorage.setItem(PANEL_KEY, JSON.stringify([...next])); } catch { /* kept for this window */ }
+    return next;
+  });
+  return [id => !hidden.has(id), toggle];
+}
+function PanelChoice({ shows, toggle }) {
+  const anchor = useRef(null);
+  const [open, setOpen] = useState(false);
+  return <div className="panel-tools">
+    <button ref={anchor} type="button" className={`tool-button ${open ? 'on' : ''}`} onClick={() => setOpen(o => !o)} title="Choose what this panel shows" aria-label="Choose what this panel shows"><Icon name="sliders" size={14} /></button>
+    <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} width={210} placement="bottom-end">
+      {PANEL_CARDS.map(([id, label]) => <MenuItem key={id} label={label} checked={shows(id)} onClick={() => toggle(id)} />)}
+    </Popover>
+  </div>;
+}
+
 export function RightPanel({ session }) {
+  const [shows, toggleCard] = usePanelCards();
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
   const selection = useStore(s => s.subagentSelection[session.id]);
@@ -230,14 +307,16 @@ export function RightPanel({ session }) {
   </aside>;
   return (
     <aside className="right-panel">
-      <EnvironmentCard session={session} />
-      {(!antigravity || context) && <Card title="Context" collapsible={false} aside={<span title="Context usage reported by the agent">{contextLabel}{percent != null && Number.isFinite(context?.tokens) ? ` · ${Math.round(percent)}%` : ''}</span>}>
+      <PanelChoice shows={shows} toggle={toggleCard} />
+      {shows('environment') && <EnvironmentCard session={session} />}
+      {shows('context') && (!antigravity || context) && <Card title="Context" collapsible={false} aside={<span title="Context usage reported by the agent">{contextLabel}{percent != null && Number.isFinite(context?.tokens) ? ` · ${Math.round(percent)}%` : ''}</span>}>
         {percent != null && <div className={`context-bar ${percent > 100 ? 'over' : percent >= 80 ? 'high' : ''}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(Math.min(100, percent))} aria-label="Context window used"><span style={{ width: `${Math.max(1, Math.min(100, percent))}%` }} /></div>}
       </Card>}
-      <UsageCard transcript={transcript} antigravity={antigravity} />
-      {antigravity && !context && !transcript?.messages.some(m => antigravityTurnSpeed(m)) && <div className="panel-note">No usage yet</div>}
-      <BackgroundJobs key={session.id} sessionId={session.id} />
-      {usesPiAgents ? <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} /> : <EngineAgents transcript={transcript} />}
+      {shows('usage') && <UsageCard transcript={transcript} antigravity={antigravity} />}
+      {shows('usage') && antigravity && !context && !transcript?.messages.some(m => antigravityTurnSpeed(m)) && <div className="panel-note">No usage yet</div>}
+      {shows('thinking') && <ThinkingCard transcript={transcript} working={!!session.streaming} />}
+      {shows('jobs') && <BackgroundJobs key={session.id} sessionId={session.id} />}
+      {shows('agents') && (usesPiAgents ? <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} /> : <EngineAgents transcript={transcript} />)}
     </aside>
   );
 }

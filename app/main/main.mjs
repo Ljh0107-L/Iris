@@ -25,6 +25,7 @@ const cliEngineOf = engine => isCliEngineId(engine) ? engine : 'antigravity';
 import { UsageLedger } from './usage.mjs';
 import { stageExtensions } from './extensions.mjs';
 import { listCustomModels, resolveProviderBaseUrl } from './custom-providers.mjs';
+import { translateText } from './translate.mjs';
 import { BUILTIN_PROVIDERS } from './builtin-providers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -155,9 +156,11 @@ function syncCompactionReserves() {
   } catch { /* settings are best effort; Pi keeps its defaults if this cannot be written */ }
 }
 
+const TRANSLATION_KEY = 'iris-translation'; // where the translation API's key is kept, beside the providers' keys
 function publicSettings() {
   const providers = store.settings.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) }));
-  return { ...store.settings, providers, builtinProviders: BUILTIN_PROVIDERS };
+  return { ...store.settings, providers, builtinProviders: BUILTIN_PROVIDERS,
+    ...(store.settings.translation ? { translation: { ...store.settings.translation, hasKey: store.hasKey(TRANSLATION_KEY) } } : {}) };
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
@@ -332,6 +335,8 @@ const api = {
   cliSignInCancel: (environmentId, engine, account) => manager.cliSignInCancel(environmentId, { engine: cliEngineOf(engine), account }),
   cliCopySignIn: (environmentId, engine, account) => manager.cliCopySignIn(environmentId, { engine: cliEngineOf(engine), account }),
   cliAccountLast: (environmentId, engine, account) => manager.cliAccountLast(environmentId, cliEngineOf(engine), account),
+  cliThreads: (environmentId, engine) => manager.cliThreads(environmentId, cliEngineOf(engine)),
+  importCliThread: (environmentId, engine, thread) => manager.importCliThread(environmentId, cliEngineOf(engine), thread),
   cliUsageLast: (environmentId, engine) => cliEngineOf(engine) === 'antigravity' ? store.settings.cliUsage?.[environmentId] ?? null : null,
   // Antigravity's quota on this Mac, read from the CLI's own /usage screen (see antigravity-usage.mjs). It
   // takes some seconds, so a reading is kept for five minutes unless a fresh one is asked for.
@@ -453,6 +458,27 @@ const api = {
   openExternal: url => /^https?:\/\//.test(url) ? openInBrowser(url) : false,
   openPath: path => process.env.IRIS_INSECURE_TEST_STORAGE === '1' ? ((globalThis.__irisOpened ??= []).push(path), '') : shell.openPath(path),
   previewUrl: (id, path) => previewUrl(id, path),
+  // Translation of the agent's thinking (the right panel). Off unless turned on in Settings → Translation, where
+  // the person gives the API to use for it: its address, key and model. Nothing else is ever asked to translate.
+  setTranslation(choice, key) {
+    const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+    const apis = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai'];
+    store.settings.translation = { on: choice?.on === true, api: apis.includes(choice?.api) ? choice.api : apis[0], baseUrl: text(choice?.baseUrl, 500), model: text(choice?.model, 200), language: text(choice?.language, 60) || 'Simplified Chinese' };
+    if (typeof key === 'string' && key.trim()) store.setKey(TRANSLATION_KEY, key.trim());
+    store.saveSettings();
+    return publicSettings();
+  },
+  async translate(text) {
+    const choice = store.settings.translation;
+    if (!choice?.on) throw new Error('Translation is off. Turn it on in Settings → Translation.');
+    if (!choice.baseUrl || !choice.model) throw new Error('Translation needs an address and a model: Settings → Translation.');
+    return translateText({ api: choice.api, baseUrl: choice.baseUrl, apiKey: store.getKey(TRANSLATION_KEY), model: choice.model, text, language: choice.language });
+  },
+  // One sentence through the API as it is filled in (saved or not), so a wrong address or key shows at once.
+  async testTranslation(choice, key) {
+    return translateText({ api: choice?.api, baseUrl: choice?.baseUrl, apiKey: (typeof key === 'string' && key.trim()) || store.getKey(TRANSLATION_KEY), model: choice?.model, language: choice?.language || 'Simplified Chinese',
+      text: 'The tests pass. Next I will read the adapter.', timeoutMs: 30000 });
+  },
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
   searchFiles: (target, query = '') => typeof target === 'string'

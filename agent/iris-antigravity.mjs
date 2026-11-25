@@ -376,6 +376,8 @@ function toolOf(tool) {
     return { name: 'edit', arguments: { path } };
   }
   if (tool.kind === 'search' && text(raw.query)) return { name: 'WebSearch', arguments: { query: raw.query.slice(0, 500) } };
+  // The CLI's own housekeeping for commands it left running: it lists them, or asks how one is doing.
+  if (tool.cliName === 'manage_task' || /^Run manage_task$/.test(tool.title ?? '')) return { name: 'manage_task', arguments: { ...(text(raw.Action) ? { action: raw.Action.slice(0, 40) } : {}) } };
   if (tool.kind === 'fetch' && text(raw.Url ?? raw.url)) return { name: 'WebFetch', arguments: { url: String(raw.Url ?? raw.url).slice(0, 2000) } };
   return null;
 }
@@ -759,6 +761,7 @@ export class AntigravityAdapter {
       if (steps) turn.plan = tool;
     }
     if (text(update.kind)) tool.kind = update.kind;
+    if (text(update.name)) tool.cliName = update.name;
     if (text(update.title)) tool.title = update.title;
     if (update.rawInput && typeof update.rawInput === 'object') tool.raw = update.rawInput;
     if (Array.isArray(update.locations)) tool.paths = shownPaths(update.locations);

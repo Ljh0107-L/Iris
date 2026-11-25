@@ -11,6 +11,9 @@ import { pathToFileURL } from 'node:url';
 const ENGINE = 'codex';
 const BINDING = 'iris-codex-thread';
 const SETTINGS = 'iris-codex-settings';
+const TURN = 'iris-codex-turn';     // the Codex turn a message of yours began: what editing that message rewinds to
+const REWIND = 'iris-codex-rewind'; // the conversation continues from an earlier entry (a message was edited)
+const GOAL_START_MS = 8000;         // how long Codex has to start on a goal by itself before it is asked to
 const CONTROL_MS = 20000;
 const OPEN_MS = 60000;
 const ABORT_MS = 8000;
@@ -148,8 +151,20 @@ class Transcript {
     this.entries.push(...full); this.leafId = parentId;
   }
   bind(data) { this.append([{ type: 'custom', customType: BINDING, data }]); this.binding = data; }
-  messages() { return this.entries.filter(e => e.type === 'message').map(e => e.message); }
-  publicEntries() { return this.entries.filter(e => !(e.type === 'custom' && [BINDING, SETTINGS].includes(e.customType))); }
+  // The conversation as it stands: the entries from the first to the newest, without what an edited message
+  // left behind (those entries stay in the file, on a branch nothing points to any more).
+  branch() {
+    const byId = new Map(this.entries.map(e => [e.id, e])), out = [];
+    for (let entry = byId.get(this.leafId); entry; entry = byId.get(entry.parentId)) out.push(entry);
+    return out.reverse();
+  }
+  // Continue from `parentId` (null: from the very start): what came after it is left behind.
+  rewind(parentId) {
+    this.leafId = parentId ?? null;
+    this.append([{ type: 'custom', customType: REWIND, data: {} }]);
+  }
+  messages() { return this.branch().filter(e => e.type === 'message').map(e => e.message); }
+  publicEntries() { return this.branch().filter(e => !(e.type === 'custom' && [BINDING, SETTINGS, TURN, REWIND].includes(e.customType))); }
   close() { if (this.fd !== undefined) { closeSync(this.fd); this.fd = undefined; } }
 }
 
@@ -216,13 +231,15 @@ function accountOf(read, limits) {
     ...(r ? { limits: [window(r.primary), window(r.secondary)].filter(Boolean) } : {}),
   };
 }
-async function connect({ bin, cwd, env = process.env, version, home, handlers = {} }) {
+async function connect({ bin, cwd, env = process.env, version, home, handlers = {}, experimental = false }) {
   // Handlers get the peer itself: notifications can arrive before this function returns it.
   const peer = new Peer({ bin, cwd, env, home,
     onNotification: (method, params) => handlers.onNotification?.(peer, method, params),
     onRequest: (id, method, params) => handlers.onRequest ? handlers.onRequest(peer, id, method, params) : peer.send({ id, error: { code: -32601, message: `Unsupported: ${method}` } }),
     onClose: reason => handlers.onClose?.(peer, reason) });
-  await peer.request('initialize', { clientInfo: clientInfo(version), capabilities: null });
+  // experimental: only to bring in a conversation from Codex's own history, which names the file it is kept in
+  // (thread/fork by path); every other connection uses the stable API alone.
+  await peer.request('initialize', { clientInfo: clientInfo(version), capabilities: experimental ? { experimentalApi: true, requestAttestation: false } : null });
   peer.send({ method: 'initialized' });
   return peer;
 }
@@ -237,6 +254,29 @@ export async function account({ bin, cwd, version, logout = false, home, env = p
     if (!read?.account) return accountOf(read, null);
     // Signed in: also what a new conversation can choose from, so its menus exist before the first one opens.
     return { ...accountOf(read, limits), options: optionsOf(visibleModels(models)) };
+  } finally { peer.close(); }
+}
+
+// The conversations Codex itself keeps (the Codex app, the terminal, an editor), newest first: what can be
+// brought into Iris and continued here. Agents' own threads and one-off runs are not conversations of yours.
+export async function threads({ bin, cwd, version, home, env = process.env, limit = 200 }) {
+  const peer = await connect({ bin, cwd, env, version, home });
+  try {
+    const found = [];
+    for (let cursor = null, pages = 0; found.length < limit && pages < 8; pages++) {
+      const page = await peer.request('thread/list', { limit: Math.min(100, limit - found.length), sortKey: 'updated_at', sortDirection: 'desc', archived: false,
+        sourceKinds: ['cli', 'vscode', 'appServer', 'unknown'], ...(cursor ? { cursor } : {}) }, OPEN_MS);
+      for (const thread of Array.isArray(page?.data) ? page.data : []) {
+        if (!text(thread?.id) || thread.ephemeral || thread.parentThreadId || !text(thread.cwd)) continue;
+        const title = titleOf(thread.name ?? '') || String(thread.preview ?? '').trim().split('\n')[0].slice(0, 120);
+        if (!title) continue; // a thread nothing was ever said in
+        found.push({ id: thread.id, title, cwd: thread.cwd, updatedAt: Number.isFinite(thread.updatedAt) ? thread.updatedAt * 1000 : null, ...(text(thread.model) ? { model: thread.model } : {}),
+          ...(text(thread.path) ? { path: thread.path } : {}) }); // the file Codex keeps it in: what bringing it in forks from
+      }
+      cursor = page?.nextCursor ?? null;
+      if (!cursor) break;
+    }
+    return found;
   } finally { peer.close(); }
 }
 
@@ -270,7 +310,8 @@ export async function signIn({ bin, cwd, version, home, env = process.env, onUrl
 }
 
 // What the composer's slash menu offers in a Codex conversation (the desktop runs it; see #compact).
-const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation to free up context', source: ENGINE }];
+const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation to free up context', source: ENGINE },
+  { name: 'goal', description: 'Set a goal Codex keeps working toward: /goal <objective>, /goal pause, /goal resume, /goal clear', argumentHint: '<objective>', source: ENGINE }];
 const EFFORT_NAMES = { minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max', ultra: 'Ultra' };
 const effortId = e => typeof e === 'string' ? e : e?.reasoningEffort ?? e?.effort ?? null;
 const visibleModels = list => (list?.data ?? []).filter(m => text(m?.id) && !m.hidden);
@@ -303,12 +344,15 @@ function speedOption(model, speed) {
 
 export class CodexAdapter {
   constructor({ boot, write, env = process.env }) {
-    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, home, standby } = boot?.codex ?? {};
+    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, home, standby, importThread } = boot?.codex ?? {};
     // Standby: started for the new-conversation screen, before there is a conversation. Codex is running and
     // has said who is signed in and what it offers; the thread is opened when the first message names its folder.
     this.standby = standby === true && sessionFile == null;
-    this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true, home: text(home) && isAbsolute(home) ? home : undefined };
+    this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true, home: text(home) && isAbsolute(home) ? home : undefined,
+      // A conversation of Codex's own to continue here (see #adopt); only until this one has a thread of its own.
+      importThread: text(importThread?.id) ? { id: importThread.id, ...(text(importThread.path) && isAbsolute(importThread.path) ? { path: importThread.path } : {}) } : undefined };
     this.write = write; this.env = env;
+    this.goal = null; this.goalNudge = null;
     this.controls = Promise.resolve();
     this.permissions = new Map();
     this.models = []; this.model = null; this.effort = null; this.speed = null;
@@ -338,6 +382,9 @@ export class CodexAdapter {
       case 'prompt': {
         const images = Array.isArray(r.images) ? r.images : [];
         if (!(text(r.message) && r.message.trim()) && !images.length) throw new Error('Enter a message for Codex.');
+        // Codex's own goal: an objective it keeps working toward, turn after turn, until it is achieved.
+        const goal = !images.length && /^\/goal(?:\s+([\s\S]*))?$/.exec((r.message ?? '').trim());
+        if (goal) return this.#serial(() => this.#goalCommand((goal[1] ?? '').trim()));
         return this.#serial(() => this.#prompt(r.message ?? '', images));
       }
       case 'abort': return this.#abort();
@@ -347,6 +394,7 @@ export class CodexAdapter {
       case 'get_session_stats': return this.contextUsage ? { contextUsage: this.contextUsage } : null;
       case 'get_commands': return { commands: COMMANDS };
       case 'compact': return this.#serial(() => this.#compact());
+      case 'cli_rewind': return this.#serial(() => this.#rewind(r));
       default: throw new Error('This command is not supported in Codex conversations.');
     }
   }
@@ -377,7 +425,8 @@ export class CodexAdapter {
   async #connect() {
     if (this.peer && !this.peer.closed) return this.peer;
     if (!text(this.config.bin)) throw new Error('The configured Codex CLI could not be started.');
-    const peer = await connect({ bin: this.config.bin, cwd: this.config.cwd, env: this.env, version: this.config.clientVersion, home: this.config.home, handlers: {
+    const peer = await connect({ bin: this.config.bin, cwd: this.config.cwd, env: this.env, version: this.config.clientVersion, home: this.config.home,
+      experimental: !!this.config.importThread && !this.transcript?.binding?.threadId, handlers: {
       onNotification: (from, method, params) => this.#notification(from, method, params),
       onRequest: (from, id, method, params) => this.#request(from, id, method, params),
       onClose: (from, reason) => this.#disconnected(from, reason),
@@ -407,18 +456,25 @@ export class CodexAdapter {
     // without a word. `untrusted` lets only commands it knows to be read-only pass unasked.
     const policy = this.config.bypassPermissions ? { approvalPolicy: 'never', sandbox: 'danger-full-access' } : { approvalPolicy: 'untrusted', sandbox: 'workspace-write' };
     const saved = tr.binding?.threadId;
+    // A conversation brought in from Codex's own history (the Codex app, the terminal). Iris's Codex has a home
+    // of its own, so the thread is forked into it from the file Codex keeps it in: the original stays as it is,
+    // and what was said in it is written into this conversation's transcript once, before anything else.
+    const adopted = !saved && this.config.importThread ? this.config.importThread : null;
     let opened;
     try {
-      opened = saved ? await peer.request('thread/resume', { threadId: saved, cwd: this.config.cwd, ...policy }, OPEN_MS)
+      opened = adopted ? await peer.request('thread/fork', { threadId: adopted.id, ...(adopted.path ? { path: adopted.path } : {}), cwd: this.config.cwd, ...policy }, OPEN_MS)
+        : saved ? await peer.request('thread/resume', { threadId: saved, cwd: this.config.cwd, ...policy }, OPEN_MS)
         : await peer.request('thread/start', { cwd: this.config.cwd, ...policy }, OPEN_MS);
     } catch (error) {
       if (signInNeeded(error)) { this.authRequired = true; this.#updateState(); return; }
-      throw new Error(saved ? `Codex could not reopen this conversation: ${error.message}` : `Codex could not start a conversation: ${error.message}`);
+      throw new Error(saved || adopted ? `Codex could not reopen this conversation: ${error.message}` : `Codex could not start a conversation: ${error.message}`);
     }
     const threadId = opened?.thread?.id;
     if (!text(threadId)) throw new Error('Codex did not return a conversation ID.');
+    if (adopted) this.#adopt(tr, opened.thread);
     if (!saved) tr.bind({ threadId });
     this.threadId = threadId;
+    void this.#readGoal();
     const kept = tr.settings ?? {};
     this.model = (this.models.some(m => m.id === kept.model) ? kept.model : null) ?? (this.models.some(m => m.id === opened.model) ? opened.model : this.models[0]?.id ?? opened.model ?? null);
     this.effort = kept.effort ?? effortId(opened.reasoningEffort) ?? null;
@@ -451,27 +507,151 @@ export class CodexAdapter {
     if (this.turn) throw new Error('Codex is starting a turn. Try again in a moment.');
     const user = { role: 'user', content: [...(message ? [{ type: 'text', text: message }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', mimeType, data }))], timestamp: Date.now() };
     this.transcript.append([{ type: 'message', message: user }]);
-    const options = this.#options(), effort = options.find(o => o.id === 'effort')?.currentValue;
-    const speed = options.find(o => o.id === 'speed')?.currentValue;
-    const turn = { startedAt: Math.max(Date.now(), user.timestamp + 1), items: new Map(), content: [], tools: new Map(), results: [], model: this.model, usage: null, text: message,
+    const turn = this.#openTurn(message, Math.max(Date.now(), user.timestamp + 1), user);
+    await this.#requestTurn(turn, input);
+    return { disposition: 'started' };
+  }
+  // A turn of the conversation, begun here (a message of yours) or by Codex itself (the next step toward a goal).
+  #openTurn(message, startedAt = Date.now(), user = null) {
+    clearTimeout(this.goalNudge);
+    const turn = { startedAt, items: new Map(), content: [], tools: new Map(), results: [], model: this.model, usage: null, text: message,
       // The model requests of the turn, each with its tokens and how long it took (see thread/tokenUsage/updated).
-      requests: [], from: 0, counted: -Infinity };
-    turn.from = turn.startedAt;
+      requests: [], from: startedAt, counted: -Infinity };
     turn.done = new Promise(resolve => { turn.finish = resolve; });
     this.turn = turn;
     this.write({ type: 'agent_start' });
-    this.#message(user);
+    if (user) this.#message(user);
     this.write({ type: 'message_start', message: this.#assistant(turn, []) });
+    return turn;
+  }
+  async #requestTurn(turn, input) {
+    const options = this.#options(), effort = options.find(o => o.id === 'effort')?.currentValue;
+    const speed = options.find(o => o.id === 'speed')?.currentValue;
     try {
       const started = await this.peer.request('turn/start', { threadId: this.threadId, input, ...(this.model ? { model: this.model } : {}), ...(effort ? { effort } : {}),
         // Every turn says which tier it wants: null puts the thread back on standard speed.
         serviceTier: speed && speed !== 'standard' ? speed : null }, OPEN_MS);
-      turn.id ??= started?.turn?.id;
+      this.#turnKnown(turn, started?.turn?.id);
     } catch (error) {
       if (signInNeeded(error)) { this.authRequired = true; this.#updateState(); }
       this.#finishTurn(turn, 'error', signInNeeded(error) ? 'Sign in to Codex to continue.' : error.message);
     }
-    return { disposition: 'started' };
+  }
+  // Codex's name for the turn, kept with the conversation: editing the message that began it rewinds to here.
+  #turnKnown(turn, id) {
+    if (!text(id) || turn.id) return;
+    turn.id = id;
+    try { this.transcript.append([{ type: 'custom', customType: TURN, data: { turnId: id } }]); } catch { /* that message cannot be edited later */ }
+  }
+
+  // ---- /goal: Codex's own long-running objective. Codex keeps the goal with the thread, starts the next turn
+  // toward it whenever the thread is idle, and marks it complete (or blocked) itself.
+  #publishGoal(goal) {
+    const next = goal?.objective ? { objective: goal.objective, status: goal.status } : null;
+    if (JSON.stringify(next) === JSON.stringify(this.goal ?? null)) return;
+    this.goal = next;
+    this.write({ type: 'extension_ui_request', id: randomUUID(), method: 'setStatus', statusKey: 'iris-goal', ...(next ? { statusText: JSON.stringify(next) } : {}) });
+  }
+  async #readGoal() {
+    const peer = this.peer, threadId = this.threadId;
+    if (!peer || peer.closed || !threadId) return;
+    try { const read = await peer.request('thread/goal/get', { threadId }, CONTROL_MS); if (peer === this.peer && threadId === this.threadId) this.#publishGoal(read?.goal ?? null); }
+    catch { /* a Codex without goals: the conversation simply has none */ }
+  }
+  async #goalCommand(word) {
+    await this.#ensureReady();
+    if (this.authRequired) throw new Error('Sign in to Codex to continue.');
+    const set = async change => {
+      try { return (await this.peer.request('thread/goal/set', { threadId: this.threadId, origin: 'user', ...change }, CONTROL_MS))?.goal ?? null; }
+      catch (error) { throw new Error(`Codex could not set the goal: ${error.message}`); }
+    };
+    if (!word) { await this.#readGoal(); return { disposition: 'handled' }; }
+    if (word === 'clear') {
+      clearTimeout(this.goalNudge);
+      await this.peer.request('thread/goal/clear', { threadId: this.threadId, origin: 'user' }, CONTROL_MS).catch(error => { throw new Error(`Codex could not clear the goal: ${error.message}`); });
+      this.#publishGoal(null);
+      return { disposition: 'handled' };
+    }
+    if (word === 'pause') {
+      clearTimeout(this.goalNudge);
+      if (this.goal) this.#publishGoal(await set({ status: 'paused' }));
+      return { disposition: 'handled' };
+    }
+    if (word === 'resume') {
+      if (!this.goal) throw new Error('There is no goal to resume. Set one with /goal and what you want done.');
+      this.#publishGoal(await set({ status: 'active' }));
+    } else this.#publishGoal(await set({ objective: word, status: 'active' }));
+    // Codex starts on an active goal by itself when the thread is idle (the turn arrives as turn/started). Should
+    // it not, it is asked to: a goal that says "Working" over a conversation where nothing happens helps nobody.
+    clearTimeout(this.goalNudge);
+    if (!this.turn) {
+      this.goalNudge = setTimeout(() => {
+        if (this.closed || this.turn || this.compaction || this.goal?.status !== 'active') return;
+        this.#serial(async () => {
+          if (this.turn || this.goal?.status !== 'active') return;
+          await this.#requestTurn(this.#openTurn(''), [{ type: 'text', text: 'Continue working toward the goal.', text_elements: [] }]);
+        }).catch(() => {});
+      }, Number(this.env.IRIS_CODEX_GOAL_START_MS) || GOAL_START_MS);
+      this.goalNudge.unref?.();
+    }
+    return { disposition: 'handled' };
+  }
+
+  // ---- Editing an earlier message: the Codex thread is taken back to before the turn that message began, and
+  // so is this conversation. What came after stays in the transcript file, on a branch nothing follows.
+  async #rewind({ ordinal, originalText }) {
+    await this.#ensureReady();
+    if (this.authRequired) throw new Error('Sign in to Codex to continue.');
+    if (this.turn) throw new Error('Wait for Codex to finish, then edit the message.');
+    const branch = this.transcript.branch();
+    const said = entry => (entry.message.content ?? []).filter(part => part?.type === 'text').map(part => part.text).join('\n').trim();
+    const mine = branch.filter(entry => entry.type === 'message' && entry.message?.role === 'user');
+    const same = entry => said(entry) === String(originalText ?? '').trim();
+    let target = typeof ordinal === 'string' ? mine.find(entry => entry.id === ordinal) : mine[ordinal];
+    if (typeof ordinal !== 'string' && (!target || (originalText && !same(target)))) target = [...mine].reverse().find(same);
+    if (!target) throw new Error('That message can no longer be edited.');
+    // The turn it began: the first turn named after it. A message sent while Codex was working joined a turn
+    // already under way; editing it goes back to that turn's own first message.
+    let at = branch.indexOf(target), turnAt = branch.findIndex((entry, index) => index > at && entry.type === 'custom' && entry.customType === TURN);
+    const nextMine = branch.findIndex((entry, index) => index > at && entry.type === 'message' && entry.message?.role === 'user');
+    if (turnAt < 0 || (nextMine >= 0 && nextMine < turnAt)) {
+      for (let index = at - 1; index >= 0; index--) {
+        if (branch[index].type === 'custom' && branch[index].customType === TURN) { turnAt = index; break; }
+      }
+      if (turnAt < 0 || turnAt > at) throw new Error('This message was sent before Iris could rewind Codex conversations. Messages sent from now on can be edited.');
+      while (at > 0 && !(branch[at].type === 'message' && branch[at].message?.role === 'user' && at < turnAt)) at--;
+    }
+    try { await this.peer.request('thread/revert', { threadId: this.threadId, beforeTurnId: branch[turnAt].data.turnId }, OPEN_MS); }
+    catch (error) { throw new Error(`Codex could not go back to that message: ${error.message}`); }
+    this.transcript.rewind(branch[at].parentId);
+    return { entryId: branch[at].id };
+  }
+
+  // ---- A conversation from Codex's own history, written into this conversation's transcript: each turn as the
+  // live conversation would have saved it (a message of yours, the reply with its steps, each step's result).
+  #adopt(tr, thread) {
+    const write = this.write;
+    this.write = () => {}; // nothing of it is an event: the conversation is read from the transcript when it opens
+    try {
+      for (const stored of Array.isArray(thread?.turns) ? thread.turns : []) {
+        const items = Array.isArray(stored?.items) ? stored.items : [];
+        const startedAt = Number.isFinite(stored.startedAt) ? stored.startedAt * 1000 : Date.now();
+        for (const item of items.filter(item => item?.type === 'userMessage')) {
+          const content = (item.content ?? []).flatMap(part => part?.type === 'text' && text(part.text) ? [{ type: 'text', text: part.text }]
+            : part?.type === 'image' && /^data:image\/(?:png|jpeg|gif|webp);base64,/.test(part.url ?? '') ? [{ type: 'image', mimeType: part.url.slice(5, part.url.indexOf(';')), data: part.url.slice(part.url.indexOf(',') + 1) }]
+            : part?.type === 'localImage' && text(part.path) ? [{ type: 'text', text: `[Image: ${part.path}]` }] : []);
+          if (content.length) tr.append([{ type: 'message', message: { role: 'user', content, timestamp: startedAt } }]);
+        }
+        const turn = { startedAt, items: new Map(), content: [], tools: new Map(), results: [], model: thread.model ?? this.model, usage: null, text: '', requests: [], from: startedAt, counted: -Infinity, adopted: true };
+        turn.done = new Promise(resolve => { turn.finish = resolve; });
+        this.turn = turn;
+        if (text(stored.id)) { turn.id = stored.id; tr.append([{ type: 'custom', customType: TURN, data: { turnId: stored.id } }]); }
+        for (const item of items) { if (item?.type !== 'userMessage') { try { this.#itemCompleted(turn, item); } catch { /* a step this version cannot draw is left out */ } } }
+        const status = stored.status === 'interrupted' ? 'aborted' : stored.status === 'failed' ? 'error' : 'stop';
+        if (turn.content.length || status !== 'stop') this.#finishTurn(turn, status, status === 'error' ? stored.error?.message ?? 'Codex could not complete this turn.' : null, Number.isFinite(stored.durationMs) ? stored.durationMs : null);
+        else this.turn = null;
+      }
+    } finally { this.turn = null; this.write = write; }
   }
   // Codex summarizes the thread itself; the conversation shows where that happened.
   async #compact() {
@@ -657,7 +837,8 @@ export class CodexAdapter {
     if (this.turn && tool.start <= this.turn.counted) this.turn.from = tool.end;
     this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError, durationMs: tool.end - tool.start });
   }
-  #finishTurn(turn, stopReason, errorMessage) {
+  // storedMs: how long a turn read from Codex's history took (see #adopt); a live turn is timed here.
+  #finishTurn(turn, stopReason, errorMessage, storedMs = null) {
     if (this.turn !== turn) return;
     this.#cancelPermissions();
     this.#endBlock(turn);
@@ -667,9 +848,9 @@ export class CodexAdapter {
     const usage = u ? usageOf(u) : undefined;
     // A turn is saved as one reply. Its speed is measured per model request (requests); when Codex counted
     // none, over the model's own time in the turn: its length less the time its commands and tools ran (modelMs).
-    const ended = Date.now(), durationMs = Math.max(1, ended - turn.startedAt);
-    const modelMs = Math.max(1, durationMs - toolTime([...turn.tools.values()].flat().map(tool => [Math.max(tool.start, turn.startedAt), tool.end ?? ended])));
-    let message = { ...this.#assistant(turn, turn.content), stopReason, ...(usage ? { usage } : {}), durationMs, modelMs, ...(turn.requests.length ? { requests: turn.requests } : {}), ...(errorMessage ? { errorMessage } : {}) };
+    const ended = Date.now(), durationMs = turn.adopted ? storedMs : Math.max(1, ended - turn.startedAt);
+    const modelMs = turn.adopted ? null : Math.max(1, durationMs - toolTime([...turn.tools.values()].flat().map(tool => [Math.max(tool.start, turn.startedAt), tool.end ?? ended])));
+    let message = { ...this.#assistant(turn, turn.content), stopReason, ...(usage ? { usage } : {}), ...(durationMs ? { durationMs } : {}), ...(modelMs ? { modelMs } : {}), ...(turn.requests.length ? { requests: turn.requests } : {}), ...(errorMessage ? { errorMessage } : {}) };
     const results = [...turn.tools.values()].flat().map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
     catch { message = { ...message, stopReason: 'error', errorMessage: 'Could not save this turn to the Codex transcript.' }; }
@@ -749,12 +930,16 @@ export class CodexAdapter {
       if (method === 'turn/completed') { if (params.turn?.status === 'failed') this.compaction.error ??= params.turn.error?.message ?? 'Codex could not compact this conversation.'; this.compaction.finish(); }
       return;
     }
+    if (method === 'thread/goal/updated' && params.threadId === this.threadId) { this.#publishGoal(params.goal ?? null); return; }
+    if (method === 'thread/goal/cleared' && params.threadId === this.threadId) { this.#publishGoal(null); return; }
+    // A turn Codex began itself: the next step toward the conversation's goal. It is a reply like any other.
+    if (!this.turn && method === 'turn/started' && params.threadId === this.threadId && text(params.turn?.id) && this.transcript) this.#turnKnown(this.#openTurn(''), params.turn.id);
     const turn = this.turn;
     const agent = turn?.agents?.get(params.threadId); // an agent Codex started in this turn reports on a thread of its own
     if (agent) { this.#agentEvent(turn, agent, method, params); return; }
     if (!turn || params.threadId !== this.threadId) return;
     switch (method) {
-      case 'turn/started': turn.id ??= params.turn?.id; break;
+      case 'turn/started': this.#turnKnown(turn, params.turn?.id); break;
       case 'turn/plan/updated': this.#planUpdated(turn, params.plan); break;
       case 'item/started': if (params.item) this.#itemStarted(turn, params.item); break;
       case 'item/agentMessage/delta': this.#chunk(turn, 'text', params.itemId, params.delta); break;
@@ -841,6 +1026,11 @@ export class CodexAdapter {
     if (!turn) return {};
     turn.cancelled = true;
     this.#cancelPermissions();
+    // Stopping the work also pauses the goal: otherwise Codex would start on its next step at once.
+    clearTimeout(this.goalNudge);
+    if (this.goal?.status === 'active' && this.peer && !this.peer.closed) {
+      await this.peer.request('thread/goal/set', { threadId: this.threadId, origin: 'user', status: 'paused' }, ABORT_MS).then(set => this.#publishGoal(set?.goal ?? null), () => {});
+    }
     if (turn.id && this.peer && !this.peer.closed) await this.peer.request('turn/interrupt', { threadId: this.threadId, turnId: turn.id }, ABORT_MS).catch(() => {});
     if (await within(turn.done, ABORT_MS, TIMED_OUT) === TIMED_OUT) {
       // Codex did not confirm in time: end the turn here, and start from a fresh connection next time.
@@ -881,6 +1071,10 @@ try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSy
 if (isMain && ['--account-check', '--account-logout'].includes(process.argv[2])) {
   try { output(process.stdout, { cliAccountStatus: await account({ bin: process.argv[3], cwd: process.cwd(), version: process.argv[4], logout: process.argv[2] === '--account-logout', home: process.argv[5] || undefined }) }); }
   catch (error) { output(process.stdout, { cliAccountError: error.message }); }
+  process.exit(0);
+} else if (isMain && process.argv[2] === '--threads') {
+  try { output(process.stdout, { cliThreads: await threads({ bin: process.argv[3], cwd: process.cwd(), version: process.argv[4], home: process.argv[5] || undefined }) }); }
+  catch (error) { output(process.stdout, { cliThreadsError: error.message }); }
   process.exit(0);
 } else if (isMain && process.argv[2] === '--account-login') {
   // One line with the page to open, then the account once the browser is done. Closing stdin cancels.

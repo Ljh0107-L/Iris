@@ -469,12 +469,67 @@ function UsagePage() {
 }
 
 // ---------------------------------------------------------------- page
+// Translation of the agent's thinking in the right panel. Off until turned on here, and it uses only the API
+// given here: nothing else is ever asked to translate. With it off, thinking is shown as the model wrote it.
+const LANGUAGES = [['Simplified Chinese', '简体中文'], ['Traditional Chinese', '繁體中文'], ['English', 'English'], ['Japanese', '日本語'], ['Korean', '한국어'], ['Spanish', 'Español'], ['French', 'Français'], ['German', 'Deutsch']];
+function TranslationPage() {
+  const saved = useStore(s => s.settings?.translation);
+  const [on, setOn] = useState(saved?.on === true);
+  const [apiType, setApiType] = useState(saved?.api ?? CUSTOM_APIS[0].id);
+  const [baseUrl, setBaseUrl] = useState(saved?.baseUrl ?? '');
+  const [model, setModel] = useState(saved?.model ?? '');
+  const [language, setLanguage] = useState(saved?.language ?? 'Simplified Chinese');
+  const [key, setKey] = useState('');
+  const [state, setState] = useState(null); // { busy } | { ok, text } | { error }
+  const protocol = CUSTOM_APIS.find(a => a.id === apiType);
+  const choice = { on, api: apiType, baseUrl, model, language };
+  const complete = /^https?:\/\//.test(baseUrl.trim()) && model.trim();
+  const clean = error => error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+  const save = async next => {
+    try { setSettings(await api('setTranslation', next, key)); setKey(''); setState(s => s?.busy ? null : s); }
+    catch (error) { setState({ error: clean(error) }); }
+  };
+  const test = async () => {
+    setState({ busy: true });
+    try { setState({ ok: true, text: await api('testTranslation', choice, key) }); }
+    catch (error) { setState({ error: clean(error) }); }
+  };
+  return (
+    <form className="editor" onSubmit={e => { e.preventDefault(); void save(choice); }}>
+      <div className="setting-line">
+        <span className="field-label">Translate the agent’s thinking</span>
+        <Toggle on={on} label="Translate thinking" onChange={next => { setOn(next); void save({ ...choice, on: next }); }} />
+      </div>
+      <div className="field-pair">
+        <label className="field"><span className="field-label">Into</span>
+          <select value={language} onChange={e => setLanguage(e.target.value)}>{LANGUAGES.map(([name, label]) => <option key={name} value={name}>{label}</option>)}</select>
+        </label>
+        <label className="field"><span className="field-label">API protocol</span>
+          <select value={apiType} onChange={e => setApiType(e.target.value)}>{CUSTOM_APIS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
+        </label>
+      </div>
+      <div className="field-pair">
+        <label className="field"><span className="field-label">Base URL</span><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder={protocol?.baseUrl ?? 'https://api.example.com/v1'} spellCheck={false} /></label>
+        <label className="field"><span className="field-label">API key</span><input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder={saved?.hasKey ? '•••••••• saved' : protocol?.key ?? 'sk-…'} autoComplete="off" spellCheck={false} /></label>
+      </div>
+      <label className="field"><span className="field-label">Model</span><input value={model} onChange={e => setModel(e.target.value)} placeholder="A small, fast model is enough" spellCheck={false} /></label>
+      <div className="editor-actions">
+        <button type="button" className="button" disabled={!complete || state?.busy} onClick={test}>{state?.busy ? 'Trying…' : 'Try it'}</button>
+        <button type="submit" className="button primary" disabled={on && !complete}>Save</button>
+      </div>
+      {state?.ok && <p className="translation-result"><Icon name="check" size={14} /> {state.text}</p>}
+      {state?.error && <p className="cli-settings-error" role="alert">{state.error}</p>}
+    </form>
+  );
+}
+
 export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'subscriptions', label: 'Subscriptions', icon: 'key', title: 'Subscriptions' }, // plans used through their own CLIs: Codex, Antigravity
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' }, // API keys, for Pi and Claude Code
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
+    { id: 'translation', label: 'Translation', icon: 'globe', title: 'Translation' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
   const page = pages.find(p => p.id === tab) ?? pages[0];
@@ -494,7 +549,7 @@ export function SettingsPage() {
           <main className="settings-main">
             <div className="settings-content">
               <h1 className="settings-title">{page.title}</h1>
-              {page.id === 'subscriptions' ? <SubscriptionSettings /> : page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
+              {page.id === 'subscriptions' ? <SubscriptionSettings /> : page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'translation' ? <TranslationPage /> : <ConnectionsPage />}
             </div>
           </main>
         </div>

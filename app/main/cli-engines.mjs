@@ -47,6 +47,8 @@ export function antigravityInstallMessage(env, engine) {
 
 export function cliBoot(bin, record, sessionsDir, remote = false, bypassPermissions = true, home = null) {
   return { [cliEngine(record.engine).id]: { bin, sessionsDir, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, recordId: record.id, remote, bypassPermissions, ...(home ? { home } : {}),
+    // A conversation brought in from the CLI's own history: where it comes from, until this one has its own.
+    ...(record.cliImport ? { importThread: record.cliImport } : {}),
     ...(record.spare ? { standby: true } : {}), clientVersion: app.version } };
 }
 
@@ -73,6 +75,23 @@ export async function cliAccountStatus(env, { bin, local, facts, login = false, 
     ...(typeof identity === 'string' ? { identity: identity.slice(0, 200) } : {}), ...(typeof plan === 'string' ? { plan: plan.slice(0, 60) } : {}),
     ...(Array.isArray(options) && options.length ? { options } : {}),
     ...(Array.isArray(limits) ? { limits: limits.slice(0, 4).filter(l => Number.isFinite(l?.usedPercent)).map(l => ({ usedPercent: l.usedPercent, windowMinutes: l.windowMinutes, resetsAt: l.resetsAt })) } : {}) };
+}
+
+// The conversations a CLI keeps for itself (Codex: those of the Codex app, the terminal and editors, in Codex's
+// own home, not the one Iris gives it), newest first, so one can be brought into Iris and continued there.
+export async function cliThreads(env, { bin, local, facts, engine, run = runSsh, invoke = exec }) {
+  const args = ['--threads', bin, app.version];
+  let out;
+  if (env.kind === 'local') ({ stdout: out } = await invoke(local.node, [cliAdapterPath(engine), ...args], { cwd: homedir(), env: { ...process.env, ...local.extraEnv }, timeout: 70000, maxBuffer: 16 * 1024 * 1024 }));
+  else out = await run(env, `cd "$HOME" && exec ${[facts.node, remoteCliAdapter(facts, engine), ...args].map(shellQuote).join(' ')}`, { timeout: 70000 });
+  let result;
+  try { result = JSON.parse(out.trim().split('\n').at(-1)); } catch { throw new Error(`${cliEngine(engine).label} did not list its conversations.`); }
+  if (!Array.isArray(result?.cliThreads)) throw new Error(result?.cliThreadsError ?? `${cliEngine(engine).label} did not list its conversations.`);
+  const text = (value, max) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
+  return result.cliThreads.flatMap(thread => {
+    const id = text(thread?.id, 200), title = text(thread?.title, 160), cwd = text(thread?.cwd, 2000);
+    return id && title && cwd?.startsWith('/') ? [{ id, title, cwd, updatedAt: Number.isFinite(thread.updatedAt) ? thread.updatedAt : null, ...(text(thread.path, 4000)?.startsWith('/') ? { path: thread.path } : {}) }] : [];
+  });
 }
 
 // A sign-in the CLI itself carries out, on this Mac: the adapter names the page to open (onUrl), then

@@ -155,7 +155,7 @@ try {
 
   // ---- Settings → Subscriptions: a card per plan says what is true on the chosen machine; machines come from the app's own menu
   await page.keyboard.press('Meta+,');
-  assert.deepEqual((await page.locator('.settings-sidebar-nav button').allInnerTexts()).map(t => t.trim()), ['Subscriptions', 'Models', 'Connections', 'Usage'], 'sign-ins have a page of their own');
+  assert.deepEqual((await page.locator('.settings-sidebar-nav button').allInnerTexts()).map(t => t.trim()), ['Subscriptions', 'Models', 'Connections', 'Translation', 'Usage'], 'sign-ins have a page of their own');
   await page.locator('.settings-sidebar-nav button', { hasText: 'Models' }).click();
   await page.locator('section[aria-label="API keys"]').waitFor();
   assert.equal(await page.locator('.cli-settings').count(), 0, 'API keys are apart from the subscriptions');
@@ -251,6 +251,40 @@ try {
   assert.equal(await updateRow.locator('button').count(), 0);
   await page.locator('.toast-action', { hasText: 'Details' }).click();
   assert.ok(ipcCalls.some(c => c.method === 'sessionUpdateTold') && ipcCalls.some(c => c.method === 'showSessionUpdateReport'));
+
+  // ---- one mark for work in progress at a time, and which one says what is going on: three dots turning under
+  // the conversation while the model thinks, the same circling in a row while it writes, four dots changing places
+  // on the step that is under way
+  await page.keyboard.press('Escape');
+  const marks = () => page.evaluate(() => ({ line: [...document.querySelectorAll('.session-main .working .spinner')].map(el => `${el.dataset.kind}:${el.children.length}`),
+    step: [...document.querySelectorAll('.session-main .tool-group-head .spinner, .session-main .step-head .spinner')].map(el => `${el.dataset.kind}:${el.children.length}`) }));
+  const fire = events => page.evaluate(({ id, events }) => { for (const event of events) { if (event.status) window.fixtureEvent({ channel: 'status', payload: { id, ...event.status } }); else window.fixtureEvent({ channel: 'event', payload: { id, event } }); } }, { id: session.id, events });
+  const call = (id, name, args, index) => [{ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: index, id, toolName: name } },
+    { type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: index, toolCall: { type: 'toolCall', id, name, arguments: args } } },
+    { type: 'tool_execution_start', toolCallId: id, toolName: name, args }];
+  const done = (id, name) => ({ type: 'tool_execution_end', toolCallId: id, toolName: name, result: { content: [{ type: 'text', text: 'ok' }] }, isError: false });
+  const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60)))));
+  await fire([{ status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } }]);
+  await page.getByRole('button', { name: 'Latest' }).click().catch(() => {}); // (Find left the page on an earlier turn)
+  await page.locator('.session-main .working .spinner').waitFor();
+  assert.deepEqual(await marks(), { line: ['tumble:3'], step: [] }, 'thinking: three dots turning, under the conversation');
+  await fire(call('mark-read', 'read', { path: '/work/README.md' }, 0));
+  await page.locator('.session-main .tool-group-head .spinner').waitFor();
+  await settle();
+  assert.deepEqual(await marks(), { line: [], step: ['swap:4'] }, 'a step under way carries the mark (four dots), and the line under the conversation steps aside');
+  await fire([done('mark-read', 'read'), ...call('mark-bash', 'bash', { command: 'npm test' }, 1)]);
+  await settle();
+  assert.deepEqual(await marks(), { line: [], step: ['swap:4'] }, 'a command is a step like any other: the same mark, and still the only one');
+  await fire([done('mark-bash', 'bash')]);
+  await page.locator('.session-main .working .spinner').waitFor();
+  assert.deepEqual(await marks(), { line: ['tumble:3'], step: [] }, 'between steps the model is thinking again');
+  await fire([{ type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 2 } }, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 2, delta: 'Done with ' } }]);
+  await page.locator('.session-main .working .spinner.orbit').waitFor();
+  assert.deepEqual(await marks(), { line: ['orbit:3'], step: [] }, 'writing: the three dots circle in a row');
+  await fire([{ type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'toolCall', id: 'mark-read', name: 'read', arguments: { path: '/work/README.md' } }, { type: 'toolCall', id: 'mark-bash', name: 'bash', arguments: { command: 'npm test' } }, { type: 'text', text: 'Done with both.' }] } },
+    { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
+  await page.locator('.markdown', { hasText: 'Done with both.' }).waitFor();
+  assert.deepEqual(await marks(), { line: [], step: [] }, 'finished: no mark anywhere');
 
   assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS built renderer: streamed reply applied once per frame, queued message with Option+Enter, Find in conversation across unrendered rows and folded steps');
