@@ -43,3 +43,11 @@ test('what goes wrong is said as what it is, and nothing is asked without what i
   const unreachable = await translateText({ api: 'openai-completions', baseUrl: 'https://api.example.test/v1', model: 'm', language: 'English', text: 'hi', fetch: async () => { throw new Error('getaddrinfo ENOTFOUND'); } }).catch(e => e.message);
   assert.match(unreachable, /could not be reached: getaddrinfo ENOTFOUND/);
 });
+
+test('a model whose API translation cannot speak is refused by name, before anything is sent', async () => {
+  const refused = await ask('bedrock-converse-stream', 'https://bedrock.example.test', {});
+  assert.match(refused.error, /cannot use this model: its API \(bedrock-converse-stream\)/);
+  assert.equal(refused.call, undefined);
+  // Mistral's own API takes chat completions under /v1.
+  assert.equal((await ask('mistral-conversations', 'https://api.mistral.example.test', { choices: [{ message: { content: 'ok' } }] })).call.url, 'https://api.mistral.example.test/v1/chat/completions');
+});

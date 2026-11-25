@@ -156,11 +156,19 @@ function syncCompactionReserves() {
   } catch { /* settings are best effort; Pi keeps its defaults if this cannot be written */ }
 }
 
-const TRANSLATION_KEY = 'iris-translation'; // where the translation API's key is kept, beside the providers' keys
+const TRANSLATION_KEY = 'iris-translation'; // (0.1.9 kept a key of its own for translation; removed when the setting is next saved)
+// Translate with a model from Settings → Models: the model's own API and address, its provider's key and headers.
+async function translateWith(choice, text, timeoutMs) {
+  if (!choice?.provider || !choice?.model) throw new Error('Choose a model for translation in Settings → Translation.');
+  const provider = store.settings.providers.find(p => p.id === choice.provider);
+  const model = (await manager.catalog().catch(() => [])).find(m => m.provider === choice.provider && m.id === choice.model);
+  if (!provider || !model) throw new Error('The model chosen for translation is no longer in Settings → Models. Choose another in Settings → Translation.');
+  return translateText({ api: model.api, baseUrl: model.baseUrl, headers: provider.headers, apiKey: store.getKey(provider.id), model: model.id, text, language: choice.language || 'Simplified Chinese', ...(timeoutMs ? { timeoutMs } : {}) });
+}
 function publicSettings() {
   const providers = store.settings.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) }));
   return { ...store.settings, providers, builtinProviders: BUILTIN_PROVIDERS,
-    ...(store.settings.translation ? { translation: { ...store.settings.translation, hasKey: store.hasKey(TRANSLATION_KEY) } } : {}) };
+    ...(store.settings.translation ? { translation: { on: store.settings.translation.on === true, provider: store.settings.translation.provider ?? '', model: store.settings.translation.model ?? '', language: store.settings.translation.language ?? 'Simplified Chinese' } } : {}) };
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
@@ -458,27 +466,22 @@ const api = {
   openExternal: url => /^https?:\/\//.test(url) ? openInBrowser(url) : false,
   openPath: path => process.env.IRIS_INSECURE_TEST_STORAGE === '1' ? ((globalThis.__irisOpened ??= []).push(path), '') : shell.openPath(path),
   previewUrl: (id, path) => previewUrl(id, path),
-  // Translation of the agent's thinking (the right panel). Off unless turned on in Settings → Translation, where
-  // the person gives the API to use for it: its address, key and model. Nothing else is ever asked to translate.
-  setTranslation(choice, key) {
+  // Translation of the agent's thinking (the right panel). Off unless turned on in Settings → Translation, with
+  // one of the models already set up in Settings → Models (its provider, address and key are used as they are).
+  setTranslation(choice) {
     const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
-    const apis = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai'];
-    store.settings.translation = { on: choice?.on === true, api: apis.includes(choice?.api) ? choice.api : apis[0], baseUrl: text(choice?.baseUrl, 500), model: text(choice?.model, 200), language: text(choice?.language, 60) || 'Simplified Chinese' };
-    if (typeof key === 'string' && key.trim()) store.setKey(TRANSLATION_KEY, key.trim());
+    store.settings.translation = { on: choice?.on === true, provider: text(choice?.provider, 120), model: text(choice?.model, 200), language: text(choice?.language, 60) || 'Simplified Chinese' };
+    if (store.hasKey(TRANSLATION_KEY)) store.setKey(TRANSLATION_KEY, null); // the key of the separate API that 0.1.9 asked for
     store.saveSettings();
     return publicSettings();
   },
   async translate(text) {
     const choice = store.settings.translation;
     if (!choice?.on) throw new Error('Translation is off. Turn it on in Settings → Translation.');
-    if (!choice.baseUrl || !choice.model) throw new Error('Translation needs an address and a model: Settings → Translation.');
-    return translateText({ api: choice.api, baseUrl: choice.baseUrl, apiKey: store.getKey(TRANSLATION_KEY), model: choice.model, text, language: choice.language });
+    return translateWith(choice, text);
   },
-  // One sentence through the API as it is filled in (saved or not), so a wrong address or key shows at once.
-  async testTranslation(choice, key) {
-    return translateText({ api: choice?.api, baseUrl: choice?.baseUrl, apiKey: (typeof key === 'string' && key.trim()) || store.getKey(TRANSLATION_KEY), model: choice?.model, language: choice?.language || 'Simplified Chinese',
-      text: 'The tests pass. Next I will read the adapter.', timeoutMs: 30000 });
-  },
+  // One sentence through the chosen model, so a model that cannot be reached shows at once.
+  testTranslation: choice => translateWith(choice, 'The tests pass. Next I will read the adapter.', 30000),
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
   searchFiles: (target, query = '') => typeof target === 'string'

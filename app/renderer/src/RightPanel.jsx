@@ -3,7 +3,7 @@ import { isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, baseName, shortPath, useResizable } from './ui.jsx';
 import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, turnThoughts, usageOf } from './transcript.js';
-import { api, stopBackgroundJob, useStore } from './store.js';
+import { api, openSettings, stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
 import { backgroundElapsed, sortedBackgroundJobs } from './background-jobs.js';
@@ -209,15 +209,17 @@ function EngineAgents({ transcript }) {
   </Card>;
 }
 
-// Thinking shown in the reader's language: only when they turned translation on in Settings → Translation and
-// gave the API for it there. A thought is translated a paragraph at a time, once the paragraph is finished:
-// what was translated stays as it is while the rest arrives, and a paragraph is never sent twice.
-const translations = new Map(); // "api settings\nparagraph" -> { text } | { error } | { pending }
+// Thinking shown in the reader's language: only when translation is on in Settings → Translation, by the model
+// chosen there. A thought is translated a paragraph at a time: each paragraph as soon as it is finished, and
+// the one still being written once it has stood still for a moment (Antigravity sends a whole thought at
+// once, and it is then "the last thing written" until the next step begins). A paragraph is never sent twice.
+const LANGUAGE_NAMES = { 'Simplified Chinese': '简体中文', 'Traditional Chinese': '繁體中文', English: 'English', Japanese: '日本語', Korean: '한국어', Spanish: 'Español', French: 'Français', German: 'Deutsch' };
+const translations = new Map(); // "provider\nmodel\nlanguage\nparagraph" -> { text } | { error } | { pending }
 const translationWatchers = new Set();
 let translating = Promise.resolve();
 function useTranslation(paragraphs, choice) {
   const [, redraw] = useState(0);
-  const scope = choice?.on && choice.baseUrl && choice.model ? [choice.api, choice.baseUrl, choice.model, choice.language].join('\n') : null;
+  const scope = choice?.on && choice.provider && choice.model ? [choice.provider, choice.model, choice.language].join('\n') : null;
   useEffect(() => { const watch = () => redraw(n => n + 1); translationWatchers.add(watch); return () => { translationWatchers.delete(watch); }; }, []);
   useEffect(() => {
     if (!scope) return;
@@ -233,30 +235,44 @@ function useTranslation(paragraphs, choice) {
   }, [scope, paragraphs.join('\u0000')]);
   return paragraph => scope ? translations.get(`${scope}\n${paragraph}`) ?? null : null;
 }
+const SETTLED_MS = 700; // a paragraph that has not grown for this long is translated although it may yet grow
 
 // What the agent is thinking right now: the thought being written, or the last one it had on this turn. One
 // at a time: when the next thought begins, the one before it leaves (the conversation keeps them all, folded).
 function ThinkingCard({ transcript, working }) {
   const thought = useMemo(() => turnThoughts(transcript).at(-1) ?? null, [transcript?.messages, transcript?.live]);
   const choice = useStore(s => s.settings?.translation);
+  const modelName = useStore(s => s.catalog?.find(m => m.provider === choice?.provider && m.id === choice?.model)?.name) ?? choice?.model;
   const live = !!thought?.streaming && working;
   const paragraphs = useMemo(() => (thought?.text ?? '').split(/\n{2,}/).map(p => p.trim()).filter(Boolean), [thought?.text]);
-  // A paragraph still being written is shown as it is; the finished ones are translated.
-  const finished = live ? paragraphs.slice(0, -1) : paragraphs;
+  const [settled, setSettled] = useState(null); // the text that has stood still
+  useEffect(() => { const text = thought?.text ?? null; const timer = setTimeout(() => setSettled(text), SETTLED_MS); return () => clearTimeout(timer); }, [thought?.key, thought?.text]);
+  const finished = live && settled !== thought?.text ? paragraphs.slice(0, -1) : paragraphs;
   const translated = useTranslation(finished, choice);
+  const [original, setOriginal] = useState(false);
+  useEffect(() => { setOriginal(false); }, [thought?.key]);
   const feed = useRef(null), following = useRef(true);
   useLayoutEffect(() => { following.current = true; }, [thought?.key]);
   useLayoutEffect(() => { const el = feed.current; if (el && following.current) el.scrollTop = el.scrollHeight; });
+  const on = !!(choice?.on && choice.provider && choice.model);
   if (!thought) return <Card title="Thinking" collapsible={false} aside={<span>{working ? 'Nothing yet' : 'None this turn'}</span>} />;
-  const failed = finished.map(translated).find(result => result?.error);
+  const results = finished.map(translated);
+  const failed = results.find(result => result?.error), pending = on && (results.some(result => result?.pending) || finished.length < paragraphs.length);
+  const language = LANGUAGE_NAMES[choice?.language] ?? choice?.language;
   return <Card title="Thinking" aside={live ? <span className="panel-pill">Live</span> : null}>
     <div className="thinking-feed" ref={feed} onScroll={e => { const el = e.currentTarget; following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>
       {paragraphs.map((paragraph, index) => {
-        const result = index < finished.length ? translated(paragraph) : null;
+        const result = !original && index < finished.length ? translated(paragraph) : null;
         return <p key={index} className={`${live && index === paragraphs.length - 1 ? 'live' : ''} ${result?.pending ? 'pending' : ''}`}>{result?.text ?? paragraph}</p>;
       })}
     </div>
-    {failed && <div className="thinking-note" title={failed.error}>Not translated: {failed.error}</div>}
+    {on && <div className={`thinking-foot ${failed ? 'failed' : ''}`} role="status">
+      {failed ? <><Icon name="alert" size={12} /><span className="thinking-foot-text" title={failed.error}>Not translated: {failed.error}</span>
+          <button type="button" className="thinking-foot-action" onClick={() => openSettings(true, 'translation')}>Settings</button></>
+        : pending ? <><Spinner size={11} kind="orbit" /><span className="thinking-foot-text">Translating into {language}…</span></>
+        : <><Icon name="globe" size={12} /><span className="thinking-foot-text" title={`Translated by ${modelName}`}>{original ? 'As the model wrote it' : `${language} · ${modelName}`}</span>
+          <button type="button" className="thinking-foot-action" onClick={() => setOriginal(shown => !shown)}>{original ? 'Translation' : 'Original'}</button></>}
+    </div>}
   </Card>;
 }
 

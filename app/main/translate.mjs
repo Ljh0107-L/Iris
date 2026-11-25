@@ -1,4 +1,4 @@
-// Translating a piece of text with a model of the person's own choosing (one with an API key, from Settings →
+// Translating a piece of text with a model of the person's own choosing (one of those set up in Settings →
 // Models): the right panel uses it to show the agent's thinking in their language. One request, no streaming.
 import { providerBaseUrl, requestHeaders } from './custom-providers.mjs';
 
@@ -8,14 +8,15 @@ const instructions = language => `Translate the user's text into ${language}. It
 
 // What to send, and where in the reply the text is, for each kind of API a provider can speak.
 function request(api, base, model, system, text) {
-  if (api === ANTHROPIC) return { url: `${base}/v1/messages`, body: { model, max_tokens: 8192, system, messages: [{ role: 'user', content: text }] },
+  if (api === ANTHROPIC) return { url: `${base}/v1/messages`, body: { model, max_tokens: 4096, system, messages: [{ role: 'user', content: text }] },
     read: reply => (reply?.content ?? []).filter(part => part?.type === 'text').map(part => part.text).join('') };
   if (api === GOOGLE) return { url: `${base}/models/${encodeURIComponent(model)}:generateContent`, body: { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text }] }] },
     read: reply => (reply?.candidates?.[0]?.content?.parts ?? []).filter(part => !part?.thought).map(part => part?.text ?? '').join('') };
   if (api === RESPONSES) return { url: `${base}/responses`, body: { model, instructions: system, input: text, store: false },
     read: reply => typeof reply?.output_text === 'string' ? reply.output_text
       : (reply?.output ?? []).flatMap(item => item?.type === 'message' ? item.content ?? [] : []).filter(part => part?.type === 'output_text').map(part => part.text).join('') };
-  // Chat completions, which is also what the remaining built-in providers (Mistral among them) accept.
+  if (![CHAT, 'mistral-conversations'].includes(api)) throw new Error(`Translation cannot use this model: its API (${api ?? 'unknown'}) is not one it can speak. Choose another model.`);
+  // Chat completions, which Mistral's API accepts too.
   return { url: `${api === CHAT ? base : `${base}/v1`}/chat/completions`, body: { model, messages: [{ role: 'system', content: system }, { role: 'user', content: text }], stream: false },
     read: reply => { const content = reply?.choices?.[0]?.message?.content; return typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part?.text ?? '').join('') : ''; } };
 }

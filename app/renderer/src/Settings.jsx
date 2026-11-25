@@ -469,57 +469,88 @@ function UsagePage() {
 }
 
 // ---------------------------------------------------------------- page
-// Translation of the agent's thinking in the right panel. Off until turned on here, and it uses only the API
-// given here: nothing else is ever asked to translate. With it off, thinking is shown as the model wrote it.
-const LANGUAGES = [['Simplified Chinese', '简体中文'], ['Traditional Chinese', '繁體中文'], ['English', 'English'], ['Japanese', '日本語'], ['Korean', '한국어'], ['Spanish', 'Español'], ['French', 'Français'], ['German', 'Deutsch']];
+// Translation of the agent's thinking in the right panel: off or on, into which language, by which of the models
+// already set up in Settings → Models. Every change is saved as it is made and says so; "Try it" sends one
+// sentence through the chosen model and shows what came back, or why nothing did.
+export const TRANSLATION_LANGUAGES = [['Simplified Chinese', '简体中文'], ['Traditional Chinese', '繁體中文'], ['English', 'English'], ['Japanese', '日本語'], ['Korean', '한국어'], ['Spanish', 'Español'], ['French', 'Français'], ['German', 'Deutsch']];
+const TRIAL_SENTENCE = 'The tests pass. Next I will read the adapter.';
 function TranslationPage() {
-  const saved = useStore(s => s.settings?.translation);
-  const [on, setOn] = useState(saved?.on === true);
-  const [apiType, setApiType] = useState(saved?.api ?? CUSTOM_APIS[0].id);
-  const [baseUrl, setBaseUrl] = useState(saved?.baseUrl ?? '');
-  const [model, setModel] = useState(saved?.model ?? '');
-  const [language, setLanguage] = useState(saved?.language ?? 'Simplified Chinese');
-  const [key, setKey] = useState('');
-  const [state, setState] = useState(null); // { busy } | { ok, text } | { error }
-  const protocol = CUSTOM_APIS.find(a => a.id === apiType);
-  const choice = { on, api: apiType, baseUrl, model, language };
-  const complete = /^https?:\/\//.test(baseUrl.trim()) && model.trim();
+  const saved = useStore(s => s.settings?.translation) ?? { on: false, provider: '', model: '', language: 'Simplified Chinese' };
+  const catalog = useStore(s => s.catalog);
+  const catalogLoading = useStore(s => s.catalogLoading);
+  const providers = useStore(s => s.settings?.providers ?? []);
+  const [confirmed, setConfirmed] = useState(null); // the control whose change was just saved
+  const [trial, setTrial] = useState(null);         // { busy } | { text, ms } | { error }
+  useEffect(() => { loadCatalog(); }, []);
+  const models = useMemo(() => [...new Map((catalog ?? []).map(m => [`${m.provider}\n${m.id}`, m])).values()], [catalog]);
+  const groups = useMemo(() => providers.map(p => ({ provider: p, models: models.filter(m => m.provider === p.id) })).filter(g => g.models.length), [providers, models]);
+  const chosen = models.find(m => m.provider === saved.provider && m.id === saved.model);
+  const language = TRANSLATION_LANGUAGES.find(([name]) => name === saved.language)?.[1] ?? saved.language;
   const clean = error => error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
-  const save = async next => {
-    try { setSettings(await api('setTranslation', next, key)); setKey(''); setState(s => s?.busy ? null : s); }
-    catch (error) { setState({ error: clean(error) }); }
+  const save = async (change, control) => {
+    try {
+      setSettings(await api('setTranslation', { ...saved, ...change }));
+      setTrial(null); setConfirmed(control);
+      setTimeout(() => setConfirmed(now => now === control ? null : now), 1800);
+    } catch (error) { setTrial({ error: clean(error) }); }
   };
-  const test = async () => {
-    setState({ busy: true });
-    try { setState({ ok: true, text: await api('testTranslation', choice, key) }); }
-    catch (error) { setState({ error: clean(error) }); }
+  const tryIt = async () => {
+    const started = Date.now();
+    setTrial({ busy: true });
+    try { setTrial({ text: await api('testTranslation', saved), ms: Date.now() - started }); }
+    catch (error) { setTrial({ error: clean(error) }); }
   };
+  const Saved = ({ control }) => confirmed === control ? <span className="saved-tick" role="status"><Icon name="check" size={12} /> Saved</span> : null;
+  const state = !saved.on ? { tone: 'off', text: 'Off. Thinking is shown as the model wrote it.' }
+    : !chosen ? { tone: 'warn', text: 'On, but no model is chosen yet: thinking stays as the model wrote it until you pick one below.' }
+    : { tone: 'on', text: `On. Thinking in the right panel is shown in ${language}, translated by ${chosen.name ?? chosen.id}.` };
   return (
-    <form className="editor" onSubmit={e => { e.preventDefault(); void save(choice); }}>
-      <div className="setting-line">
-        <span className="field-label">Translate the agent’s thinking</span>
-        <Toggle on={on} label="Translate thinking" onChange={next => { setOn(next); void save({ ...choice, on: next }); }} />
-      </div>
-      <div className="field-pair">
-        <label className="field"><span className="field-label">Into</span>
-          <select value={language} onChange={e => setLanguage(e.target.value)}>{LANGUAGES.map(([name, label]) => <option key={name} value={name}>{label}</option>)}</select>
-        </label>
-        <label className="field"><span className="field-label">API protocol</span>
-          <select value={apiType} onChange={e => setApiType(e.target.value)}>{CUSTOM_APIS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
-        </label>
-      </div>
-      <div className="field-pair">
-        <label className="field"><span className="field-label">Base URL</span><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder={protocol?.baseUrl ?? 'https://api.example.com/v1'} spellCheck={false} /></label>
-        <label className="field"><span className="field-label">API key</span><input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder={saved?.hasKey ? '•••••••• saved' : protocol?.key ?? 'sk-…'} autoComplete="off" spellCheck={false} /></label>
-      </div>
-      <label className="field"><span className="field-label">Model</span><input value={model} onChange={e => setModel(e.target.value)} placeholder="A small, fast model is enough" spellCheck={false} /></label>
-      <div className="editor-actions">
-        <button type="button" className="button" disabled={!complete || state?.busy} onClick={test}>{state?.busy ? 'Trying…' : 'Try it'}</button>
-        <button type="submit" className="button primary" disabled={on && !complete}>Save</button>
-      </div>
-      {state?.ok && <p className="translation-result"><Icon name="check" size={14} /> {state.text}</p>}
-      {state?.error && <p className="cli-settings-error" role="alert">{state.error}</p>}
-    </form>
+    <div className="translation-page">
+      <section className={`translation-card ${state.tone}`}>
+        <div className="translation-head">
+          <div className="translation-head-text">
+            <span className="translation-title">Translate the agent’s thinking <Saved control="on" /></span>
+            <span className={`translation-state ${state.tone}`}>{state.text}</span>
+          </div>
+          <Toggle on={saved.on} label="Translate thinking" onChange={on => save({ on }, 'on')} />
+        </div>
+        <div className="field-pair">
+          <label className="field"><span className="field-label">Into <Saved control="language" /></span>
+            <select value={saved.language} onChange={e => save({ language: e.target.value }, 'language')}>{TRANSLATION_LANGUAGES.map(([name, label]) => <option key={name} value={name}>{label}</option>)}</select>
+          </label>
+          <label className="field"><span className="field-label">With <Saved control="model" /></span>
+            <select value={chosen ? `${chosen.provider}\n${chosen.id}` : ''} disabled={!models.length}
+              onChange={e => { const [provider, model] = e.target.value.split('\n'); if (model) save({ provider, model }, 'model'); }}>
+              <option value="" disabled>{catalogLoading && !models.length ? 'Reading your models…' : models.length ? 'Choose a model' : 'No models yet'}</option>
+              {groups.map(group => <optgroup key={group.provider.id} label={group.provider.name ?? group.provider.id}>
+                {group.models.map(m => <option key={m.id} value={`${m.provider}\n${m.id}`}>{m.name ?? m.id}</option>)}
+              </optgroup>)}
+            </select>
+          </label>
+        </div>
+        {!models.length && !catalogLoading && <div className="translation-note">
+          <span>Translation uses one of the models in Settings → Models. A small, fast one is enough.</span>
+          <button type="button" className="button small" onClick={() => openSettings(true, 'providers')}>Open Models</button>
+        </div>}
+      </section>
+      <section className="translation-card">
+        <div className="translation-head">
+          <div className="translation-head-text">
+            <span className="translation-title">Try it</span>
+            <span className="translation-state">One sentence through the chosen model, to see that it answers.</span>
+          </div>
+          <button type="button" className="button small" disabled={!chosen || trial?.busy} onClick={tryIt}>{trial?.busy ? <><Spinner size={12} /> Translating…</> : 'Translate a sentence'}</button>
+        </div>
+        <div className="translation-trial">
+          <div className="translation-trial-row"><span className="translation-trial-label">English</span><span>{TRIAL_SENTENCE}</span></div>
+          <div className={`translation-trial-row ${trial?.error ? 'failed' : trial?.text ? 'done' : ''}`} role="status">
+            <span className="translation-trial-label">{language}</span>
+            <span>{trial?.busy ? 'Waiting for the model…' : trial?.error ? trial.error : trial?.text ? trial.text : chosen ? 'Not tried yet.' : 'Choose a model first.'}</span>
+            {trial?.text && <span className="translation-trial-time">{(trial.ms / 1000).toFixed(1)}s</span>}
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 

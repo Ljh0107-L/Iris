@@ -2475,9 +2475,6 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .thinking-feed p.live { color: var(--text-2); }
 
 .thinking-feed p.pending { opacity: .72; }
-.thinking-note { margin-top: 6px; font-size: var(--fs-xs); color: var(--amber); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.translation-result { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0 0; font-size: var(--fs-md); color: var(--text-2); }
-.translation-result svg { flex-shrink: 0; margin-top: 3px; color: var(--green, #34c759); }
 
 /* Conversations from Codex's own history, on the new-conversation screen. */
 .cli-history { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
@@ -2489,3 +2486,34 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .cli-history-title { font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cli-history-meta { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cli-history-note { display: flex; align-items: center; gap: 7px; padding: 8px; font-size: var(--fs-sm); color: var(--muted); }
+
+/* Under the thinking: what the translation is doing (working, done and by which model, or why not). */
+.thinking-foot { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--hairline); font-size: var(--fs-xs); color: var(--faint); }
+.thinking-foot > svg, .thinking-foot > .spinner { flex-shrink: 0; }
+.thinking-foot-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thinking-foot.failed { color: var(--amber); }
+.thinking-foot-action { flex-shrink: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--muted); cursor: pointer; }
+.thinking-foot-action:hover { color: var(--text); }
+/* Settings → Translation: two cards, each a line that says where things stand and the controls under it. */
+.translation-page { display: flex; flex-direction: column; gap: 14px; }
+.translation-card { display: flex; flex-direction: column; gap: 14px; padding: 16px 18px; border: 1px solid var(--hairline); border-radius: 12px; }
+.translation-card.on { border-color: color-mix(in srgb, var(--green, #34c759) 45%, var(--hairline)); }
+.translation-card.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--hairline)); }
+.translation-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.translation-head-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.translation-title { display: flex; align-items: center; gap: 8px; font-size: var(--fs-base); font-weight: 500; color: var(--text); }
+.translation-state { font-size: var(--fs-md); line-height: 1.45; color: var(--muted); }
+.translation-state.on { color: var(--text-2); }
+.translation-state.warn { color: var(--amber); }
+.translation-card .field-label { display: flex; align-items: center; gap: 8px; }
+.translation-card .button.small { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; }
+.saved-tick { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-xs); font-weight: 400; color: var(--green, #34c759); animation: rise .18s var(--ease, ease-out); }
+.translation-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: var(--fs-md); color: var(--muted); }
+.translation-trial { display: flex; flex-direction: column; border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; }
+.translation-trial-row { display: flex; align-items: baseline; gap: 12px; padding: 10px 12px; font-size: var(--fs-md); line-height: 1.5; color: var(--muted); }
+.translation-trial-row + .translation-trial-row { border-top: 1px solid var(--hairline); }
+.translation-trial-row.done { color: var(--text); }
+.translation-trial-row.failed { color: var(--red); }
+.translation-trial-label { flex-shrink: 0; width: 76px; font-size: var(--fs-xs); color: var(--faint); }
+.translation-trial-row > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.translation-trial-time { flex-shrink: 0; font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }

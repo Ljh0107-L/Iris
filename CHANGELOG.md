@@ -2,6 +2,20 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.10
+
+**Fixed**
+
+- **Translated thinking shows while the thought is still on screen.** With Antigravity a thought arrives whole and counts as "still being written" until the next step begins, so its translation started only when the thought was about to leave the panel. A paragraph that has stood still for a moment is now translated at once.
+
+**New and changed**
+
+- **Translation uses a model from Settings → Models.** There is no separate address and key to enter: choose the language and one of your models. A translation API entered in 0.1.9 is no longer used; choose a model in its place.
+- **Settings → Translation says where things stand.** A line states whether translation is on, into which language and by which model; every change is saved as it is made and says "Saved"; **Translate a sentence** shows what the model returned and how long it took, or why it returned nothing.
+- **The Thinking card says what the translation is doing**: translating, done (with the language and the model, and **Original** to see what the model wrote), or not translated and why, with the way to Settings.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.9
 
 **New and changed**
