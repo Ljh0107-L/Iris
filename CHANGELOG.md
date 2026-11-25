@@ -2,6 +2,32 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.7
+
+**Fixed**
+
+- **File links in an answer open the file.** Antigravity names the files it touched as `file:///…` links, and those were stripped when the answer was drawn, so a click did nothing, on this Mac and on a host alike. They now open in the file pane. A link to a line (`#L12`, or `path:12` as Codex writes it) opens the file at that line and marks it.
+- **Antigravity's edits show what changed.** A change to part of a file was listed as `+0 −0` with an empty diff; it now shows the text replaced and its replacement.
+- **The list of a turn's changes shows every diff in full.** Cards were squeezed to fit the pane, some down to one line. Paths in it are relative to the conversation's folder instead of a long absolute path.
+- **A question from Antigravity or Codex is a card with its choices**, answered with a click or in your own words. It used to show as a tool that failed, with the choices written out as text. Antigravity's own copy of the question as a paragraph is left out.
+- **Quit quits.** After ⌘Q the window leaves at once, everything on this Mac is stopped, and Iris no longer waits on SSH hosts before going: a slow or unreachable host could keep it open in the background. Conversations on hosts keep running there, as before. When something is still working on this Mac, Iris asks first (**Quit Anyway** / Cancel).
+- **Subscriptions and the agent menu show what they know at once.** They said "Checking" beside a spinner for the five seconds the CLI takes to confirm a sign-in, every time. The last result is now shown straight away and checked again quietly; the Refresh button spins only when you press it.
+- **A connection message of several lines no longer spills over the message box**, and a plain text file is no longer coloured as if it were code.
+- **The folder shown for a No-folder conversation is its own folder**, not the day's folder above it.
+
+**New and changed**
+
+- **HTML pages open as pages.** A `.html` file in the file pane is drawn, with its styles, scripts and images loaded from its folder, on this Mac or on an SSH host, so a page an agent built on a server can be looked at without starting a web server there. The page runs in a frame of its own and can read nothing outside its folder. Reload, the source, and (on this Mac) Open in your browser are beside it.
+- **A message appears the moment you send it**, with every agent, including one sent while the agent is working.
+- **Pasted and attached images are sized for the model before they are sent.** A photo of 8 MB became 10 MB of text in the message and made the window stutter; it is now about 0.7 MB, in a fraction of a second. Small screenshots are sent as they are.
+- **Steps are laid out as in Claude Desktop**: a quiet line with room around it, opening into one card whose rows are divided by hairlines, a command in an inset box and its output as plain text. Counts such as "(1 failed)" stay on one line.
+- **The spinner is a thin arc.**
+- **Conversations in a folder are listed by when they were last written to**, newest first. (A conversation keeps its old place until its next message.)
+
+**Known limits:** Codex asks questions only in its plan mode, which Iris does not offer yet. A page previewed from a host loads each of its files over SSH, so a page with many files takes a moment to appear.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.6
 
 **Fixed**

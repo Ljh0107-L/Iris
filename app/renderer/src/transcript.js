@@ -641,8 +641,9 @@ export function toolSummary(calls) {
   if (counts.WebFetch) parts.push(`${parts.length ? 'fetched' : 'Fetched'} ${plural(counts.WebFetch, 'page', 'pages')}`);
   if (counts.Skill) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(counts.Skill, 'skill', 'skills')}`);
   if (mcpCount) parts.push(`${parts.length ? 'called' : 'Called'} ${plural(mcpCount, 'MCP tool', 'MCP tools')}`);
+  if (counts.AskUserQuestion) parts.push(`${parts.length ? 'asked' : 'Asked'} ${counts.AskUserQuestion === 1 ? 'a question' : `${counts.AskUserQuestion} questions`}`);
   if (counts.subagent) parts.push(`Delegated ${plural(calls.filter(c => c.name === 'subagent').reduce((n, c) => n + (c.arguments?.tasks?.length ?? 0), 0), 'subtask', 'subtasks')}`);
-  const accounted = (counts.bash ?? 0) + edited + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0);
+  const accounted = (counts.bash ?? 0) + edited + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0) + (counts.AskUserQuestion ?? 0);
   const other = calls.length - accounted;
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
   if (skipped) parts.push(`${plural(skipped, 'tool call', 'tool calls')} not executed`);

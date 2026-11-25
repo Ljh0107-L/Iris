@@ -1,5 +1,6 @@
 // Sidebar grouping is a presentation choice, not a session's execution directory.
 // No-folder chats keep separate projectless workspaces but share one group per host.
+const lastWritten = session => session.lastMessageAt ?? session.createdAt ?? 0;
 export function groupSessions(sessions) {
   const groups = new Map();
   for (const session of sessions) {
@@ -15,6 +16,9 @@ export function groupSessions(sessions) {
     });
     groups.get(key).items.push(session);
   }
-  // Preserve the source order (newest conversations/groups first) and session identities.
+  // Groups keep the source order (the newest conversation's folder first). Within a folder, the conversation
+  // written to last comes first; one that has not been written to since this was recorded keeps its place by
+  // when it was started.
+  for (const group of groups.values()) group.items.sort((a, b) => lastWritten(b) - lastWritten(a));
   return [...groups.values()];
 }

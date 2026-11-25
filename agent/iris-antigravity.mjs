@@ -327,6 +327,17 @@ function stepsOf(update) {
   return steps.filter(step => text(step?.title)).slice(0, 50).map(step => ({ content: step.title.slice(0, 300),
     status: step.status === 'done' || step.status === 'completed' ? 'completed' : step.status === 'in_progress' ? 'in_progress' : 'pending' }));
 }
+// A question the model puts to the person (ask_question): the question, and the answers it offers. The CLI
+// does not wait for the answer inside the turn: it ends the turn with the tool pending, and takes the next
+// message as the answer. So the question is shown as a card when the turn ends (see #finishTurn), and the
+// choice made there is sent as that next message.
+function asksOf(tool) {
+  const questions = tool.raw?.questions;
+  if (!/ask_question/i.test(tool.title ?? '') || !Array.isArray(questions)) return null;
+  const asks = questions.filter(q => text(q?.question)).slice(0, 8).map(q => ({ question: q.question.slice(0, 2000),
+    options: [...new Set((Array.isArray(q.options) ? q.options : []).filter(text).map(option => option.slice(0, 300)))].slice(0, 24), multi: q.is_multi_select === true }));
+  return asks.length ? asks : null;
+}
 function agentOf(tool) {
   const raw = tool.raw;
   if (!/invoke_subagent/i.test(tool.title ?? '') || !text(raw?.Prompt)) return null;
@@ -336,6 +347,9 @@ function agentOf(tool) {
 // The CLI's ordinary tools, shown the way Pi's and Claude Code's are: a command, a file read or written, a web
 // search. The CLI names the kind of each and gives its input (CommandLine, Path, query); anything else keeps
 // the CLI's own title. Only those fields are read: the rest of a tool's input is not passed on.
+const EDIT_SHOWN = 200000; // characters of a written or changed file kept for the conversation
+// The file before and after a change, as the CLI reports it once the change is made.
+const shownDiff = content => { const diff = (Array.isArray(content) ? content : []).find(block => block?.type === 'diff' && typeof block.newText === 'string'); return diff ? { oldText: typeof diff.oldText === 'string' ? diff.oldText : null, newText: diff.newText } : null; };
 function toolOf(tool) {
   const raw = tool.raw ?? {};
   const path = tool.paths[0] ?? (text(raw.Path) && isAbsolute(raw.Path) ? raw.Path : null);
@@ -344,7 +358,16 @@ function toolOf(tool) {
     return text(command) ? { name: 'bash', arguments: { command: command.slice(0, 20000), ...(text(raw.toolSummary) ? { description: raw.toolSummary.slice(0, 200) } : {}) } } : null;
   }
   if (tool.kind === 'read' && path) return { name: 'read', arguments: { path } };
-  if (tool.kind === 'edit' && path) return typeof raw.Content === 'string' ? { name: 'write', arguments: { path, content: raw.Content.slice(0, 200000) } } : { name: 'edit', arguments: { path } };
+  if (tool.kind === 'edit' && path) {
+    // A new file comes with its content; a change to one names what it replaces (Target, Replacement), and
+    // when it is done the CLI also gives the file before and after.
+    if (typeof raw.Content === 'string') return { name: 'write', arguments: { path, content: raw.Content.slice(0, EDIT_SHOWN) } };
+    if (typeof raw.Target === 'string' && typeof raw.Replacement === 'string') return { name: 'edit', arguments: { path, edits: [{ oldText: raw.Target.slice(0, EDIT_SHOWN), newText: raw.Replacement.slice(0, EDIT_SHOWN) }] } };
+    const diff = tool.diff;
+    if (diff && diff.oldText == null) return { name: 'write', arguments: { path, content: diff.newText.slice(0, EDIT_SHOWN) } };
+    if (diff && diff.oldText.length <= EDIT_SHOWN && diff.newText.length <= EDIT_SHOWN) return { name: 'edit', arguments: { path, edits: [{ oldText: diff.oldText, newText: diff.newText }] } };
+    return { name: 'edit', arguments: { path } };
+  }
   if (tool.kind === 'search' && text(raw.query)) return { name: 'WebSearch', arguments: { query: raw.query.slice(0, 500) } };
   if (tool.kind === 'fetch' && text(raw.Url ?? raw.url)) return { name: 'WebFetch', arguments: { url: String(raw.Url ?? raw.url).slice(0, 2000) } };
   return null;
@@ -450,6 +473,7 @@ export class AntigravityAdapter {
         if (!Array.isArray(images) || !images.every(image)) throw new Error('Choose a PNG, JPEG, GIF, or WebP image for Antigravity.');
         if (!(text(r.message) && r.message.trim()) && !images.length) throw new Error('Enter a message for Antigravity.');
         const epoch = this.cancelEpoch;
+        this.#askClosed();
         return this.#serial(() => this.#prompt(r.message ?? '', images, epoch));
       }
       case 'abort': return this.#abort();
@@ -695,6 +719,8 @@ export class AntigravityAdapter {
 
   #tool(turn, update) {
     if (!text(update.toolCallId)) return;
+    // The question of the turn before, which the CLI closes now that it has its answer: already shown.
+    if (update.toolCallId === this.askedId) return;
     let tool = turn.tools.get(update.toolCallId);
     // Antigravity keeps its task list with a tool it calls again for every change. All of a turn's calls are
     // one Tasks card, kept current, as the list is one thing.
@@ -710,9 +736,13 @@ export class AntigravityAdapter {
     if (text(update.title)) tool.title = update.title;
     if (update.rawInput && typeof update.rawInput === 'object') tool.raw = update.rawInput;
     if (Array.isArray(update.locations)) tool.paths = shownPaths(update.locations);
-    if (Array.isArray(update.content)) tool.result = shownContent(update.content);
+    if (Array.isArray(update.content)) { tool.result = shownContent(update.content); tool.diff = shownDiff(update.content) ?? tool.diff; }
     // Its task list and the agents it starts are shown as Claude Code's are: a Tasks card, and a task with its brief.
-    const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } } : agentOf(tool) ?? toolOf(tool);
+    const asks = asksOf(tool);
+    if (asks) tool.asks = asks;
+    const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } }
+      : asks ? { name: 'AskUserQuestion', arguments: { questions: asks.map(ask => ({ question: ask.question, options: ask.options.map(label => ({ label })), ...(ask.multi ? { multiSelect: true } : {}) })) } }
+      : agentOf(tool) ?? toolOf(tool);
     const call = known ? { type: 'toolCall', id: tool.id, ...known } : { type: 'toolCall', id: tool.id, name: tool.title ?? tool.kind ?? 'Antigravity tool',
       arguments: tool.paths.length ? { path: tool.paths[0], ...(tool.paths.length > 1 ? { paths: tool.paths } : {}) } : {} };
     if (known?.name === 'TodoWrite') tool.fallback = 'Tasks updated.';
@@ -747,9 +777,16 @@ export class AntigravityAdapter {
     if (this.turn !== turn) return;
     this.#cancelPermissions();
     this.#endBlock(turn);
+    // A question left open is the turn asking for an answer, not a tool that failed.
+    const asked = stopReason === 'stop' ? [...turn.tools.entries()].find(([, tool]) => tool.asks && !tool.message) : null;
+    if (asked) this.#toolEnd(asked[1], false, 'Asked.');
     for (const tool of turn.tools.values()) if (!tool.message) this.#toolEnd(tool, true, stopReason === 'aborted' ? 'Interrupted.' : 'Antigravity did not report tool completion.');
     // ACP does not expose individual model request timestamps or token counts.
     // Keep elapsed turn time separate from the provider metering used by Pi.
+    // The CLI also writes its question out as text ("Which colour? [1] red [2] green"). The card asks it, with
+    // the choices as buttons; the same thing as a paragraph above the card is left out of the conversation.
+    if (asked) turn.content = turn.content.filter(block => !(block?.type === 'text' && asked[1].asks.every(ask => block.text.includes(ask.question) && ask.options.every(option => block.text.includes(option)))
+      && block.text.length < 400 + asked[1].asks.reduce((n, ask) => n + ask.question.length + ask.options.join('').length + ask.options.length * 12, 0)));
     const __agyTurn = { durationMs: Math.max(1, Math.round(performance.now() - turn.requestedAt)), tokenEstimate: estimateOutput(turn.content) };
     // The CLI's own token counts for the turn, when it gives them (with the turn's length, they give its speed).
     let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
@@ -761,6 +798,40 @@ export class AntigravityAdapter {
     for (const result of results) this.#message(result);
     this.write({ type: 'agent_end' });
     this.write({ type: 'agent_settled' });
+    if (asked && !this.closed) { this.ask = { toolCallId: asked[0], questions: asked[1].asks, answers: [], open: null }; this.#askNext(); }
+  }
+
+  // The question card for the next unanswered question (one at a time when the model asked several).
+  #askNext() {
+    const ask = this.ask;
+    if (!ask) return;
+    const at = ask.answers.length, question = ask.questions[at];
+    ask.open = randomUUID();
+    this.write({ type: 'extension_ui_request', id: ask.open, ask: true, method: question.options.length ? 'select' : 'input',
+      header: ask.questions.length > 1 ? `Question ${at + 1} of ${ask.questions.length}` : 'Question', title: question.question,
+      ...(question.options.length ? { options: question.options } : {}), ...(question.multi ? { multiSelect: true } : {}) });
+  }
+  // An answer chosen on the card. With every question answered, the answers go to the CLI as the next message,
+  // which is how it takes them; dismissing the card sends nothing, and whatever is typed next is the answer.
+  #askAnswered(r) {
+    const ask = this.ask;
+    this.write({ type: 'extension_ui_dismiss', id: r.id });
+    ask.open = null;
+    const value = Array.isArray(r.value) ? r.value.filter(text).join(', ') : text(r.value) ? r.value : '';
+    if (r.cancelled || !value.trim()) { this.ask = null; this.askedId = ask.toolCallId; return; }
+    ask.answers.push(value);
+    if (ask.answers.length < ask.questions.length) { this.#askNext(); return; }
+    this.ask = null; this.askedId = ask.toolCallId;
+    const message = ask.questions.length === 1 ? ask.answers[0] : ask.questions.map((question, i) => `${question.question}\n${ask.answers[i]}`).join('\n\n');
+    const epoch = this.cancelEpoch;
+    this.#serial(() => this.#prompt(message, [], epoch)).catch(error => this.write({ type: 'extension_ui_request', id: randomUUID(), method: 'notify', notifyType: 'error', message: error.message }));
+  }
+  // A message typed while a question is open is the answer: the card goes.
+  #askClosed() {
+    const ask = this.ask;
+    if (!ask) return;
+    this.ask = null; this.askedId = ask.toolCallId;
+    if (ask.open) this.write({ type: 'extension_ui_dismiss', id: ask.open });
   }
 
   #cancelTurn(turn) {
@@ -847,6 +918,7 @@ export class AntigravityAdapter {
       options: [...options.keys()], optionDetails: details });
   }
   #answer(r) {
+    if (this.ask?.open === r.id) { this.#askAnswered(r); return; }
     const entry = this.permissions.get(r.id);
     if (!entry) return;
     this.permissions.delete(r.id);

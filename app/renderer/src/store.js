@@ -675,6 +675,10 @@ export function cliDraftMenus(options, chosen = {}) {
 export function refreshCliReadiness(environmentId, engine = 'antigravity') {
   const key = readinessKey(engine, environmentId);
   if (cliChecks.has(key)) return cliChecks.get(key);
+  // The CLI takes some seconds to say who is signed in. Until it does, what it said last time is shown.
+  if (state.cliReadiness[key] == null) api('cliAccountLast', environmentId, engine).then(last => {
+    if (last && state.cliReadiness[key] == null && cliChecks.has(key)) setCliReadiness(key, last.installed === false ? 'missing' : last.signedIn === true ? 'ready' : last.signedIn === false ? 'signedOut' : 'unknown');
+  }, () => {});
   const checking = api('cliReadiness', environmentId, engine).catch(() => 'unknown').then(status => {
     if (cliChecks.get(key) !== checking) return;
     cliChecks.delete(key);
@@ -839,13 +843,16 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
   requestFollow(id);
   const session = state.sessions.find(s => s.id === id);
   if (isCliEngine(session?.engine)) {
-    if (state.questions[id]?.length) throw new Error('Choose a permission option in the conversation.');
+    if (state.questions[id]?.some(q => q.permission)) throw new Error('Choose a permission option in the conversation.');
+    // (A question the agent asked is answered by whatever is sent next: the message goes to it as usual.)
     // The one command the desktop runs for Codex itself; everything else is a message to the CLI.
     if (session.engine === 'codex' && /^\/compact\s*$/.test(text) && !attachments.length) { await api('compact', id); return; }
     // Antigravity cannot take a message while it works, so sending one stops the turn and starts on the
     // message, as with Pi: it shows at once, and is replaced by the CLI's own copy when the turn begins.
     const interrupts = session.engine !== 'codex' && !!session.streaming;
-    const shown = interrupts ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true } : null;
+    // What was sent is on the page the moment it is sent, whatever the agent and wherever it runs: the agent's
+    // own copy of it replaces this one when it arrives (over SSH that is a round trip or two later).
+    const shown = text.trim() || attachments.length ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}) } : null;
     if (shown) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, shown] });
     try { await sending(id, () => api('prompt', id, text, attachments, { interrupt: interrupts })); }
     catch (error) { if (shown) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== shown) }); throw error; }
@@ -868,7 +875,9 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
   // and what it is doing now, and its background agents and jobs, carry on.
   const interrupt = !text.startsWith('/') && !(queue && streaming);
   const images = attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }));
-  const optimistic = streaming && interrupt ? { role: 'user', content: [{ type: 'text', text }, ...images], timestamp: Date.now(), __optimistic: true } : null;
+  // Shown the moment it is sent (see the same above); a message that waits its turn is shown dimmed instead,
+  // and a command ("/goal …") is not a message.
+  const optimistic = !text.startsWith('/') && !(queue && streaming) ? { role: 'user', content: [{ type: 'text', text }, ...images], timestamp: Date.now(), __optimistic: true, ...(streaming && interrupt ? { __interrupting: true } : {}) } : null;
   if (optimistic) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, optimistic] });
   // A queued message waits as a dimmed bubble until Pi reports it (message_end) or the run ends.
   const waiting = queue && streaming && !text.startsWith('/') ? { id: `queued:${Date.now()}:${Math.random().toString(36).slice(2)}`, text, images } : null;
@@ -962,13 +971,14 @@ export function newSession() { navigate({ view: 'new', activeId: null }); set({ 
 // ---------------------------------------------------------------- file preview
 // Paths inside the session folder are kept relative to it; anything else stays absolute.
 const relToSession = (id, path) => relativeSessionPath(state.sessions.find(s => s.id === id)?.cwd, path);
-export function openFile(id, path) {
+// line: the line a link pointed at, shown and marked once the file is open.
+export function openFile(id, path, line = null) {
   const rel = relToSession(id, path);
   if (!rel) return;
   set(s => {
     const cur = s.files[id] ?? { tabs: [], active: null };
     const tabs = cur.tabs.includes(rel) ? cur.tabs : [...cur.tabs, rel].slice(-8);
-    return { files: { ...s.files, [id]: { tabs, active: rel, changes: null } }, filePaneOpen: true, gitReviewOpen: false };
+    return { files: { ...s.files, [id]: { tabs, active: rel, changes: null, reveal: line > 0 ? { path: rel, line, at: Date.now() } : null } }, filePaneOpen: true, gitReviewOpen: false };
   });
 }
 export function closeFile(id, path) {

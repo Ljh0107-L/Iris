@@ -216,15 +216,71 @@ test('the CLI’s ordinary tools are a command, a file read or written and a web
     ['bash', { command: 'echo hi && ls', description: 'Run echo and ls' }],
     ['read', { path: '/work/notes.txt' }],
     ['write', { path: '/work/out.txt', content: 'done\n' }],
+    ['edit', { path: '/work/notes.txt', edits: [{ oldText: 'beta', newText: 'BETA' }] }],
+    ['edit', { path: '/work/list.txt', edits: [{ oldText: 'one\ntwo\n', newText: 'one\n2\n' }] }],
     ['WebSearch', { query: 'Iris versicolor' }],
     ['Run something_else', {}], // a tool this app has no words for keeps the CLI's title
   ]);
   // Only the fields that are shown are read from a tool's input: nothing else in it is passed on or saved.
   assert.doesNotMatch(JSON.stringify(peer.events) + readFileSync(state.sessionFile, 'utf8'), /fixture-private-raw-input/);
   // Its thoughts are separate blocks in the one reply, each closed before the tool that follows it.
-  assert.deepEqual(reply.content.map(block => block.type), ['thinking', 'toolCall', 'thinking', 'toolCall', 'toolCall', 'toolCall', 'toolCall', 'text']);
+  assert.deepEqual(reply.content.map(block => block.type), ['thinking', 'toolCall', 'thinking', 'toolCall', 'toolCall', 'toolCall', 'toolCall', 'toolCall', 'toolCall', 'text']);
   const output = peer.events.filter(event('tool_execution_end')).find(e => e.toolName === 'bash');
   assert.equal(output.result.content[0].text, 'hi\nnotes.txt');
+});
+
+test('a question the model asks is a card with its choices, and the choice is its answer', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'ask' });
+  await peer.next(event('agent_settled'));
+  // Asking ends the turn; the question is not a tool that failed.
+  const asked = lastAssistant((await readHistory(state.sessionFile)).messages).content.find(block => block.type === 'toolCall');
+  assert.deepEqual([asked.name, asked.arguments], ['AskUserQuestion', { questions: [{ question: 'Which colour do you prefer?', options: [{ label: 'red' }, { label: 'green' }, { label: 'blue' }] }] }]);
+  assert.deepEqual(peer.events.filter(event('tool_execution_end')).map(e => [e.toolName, e.isError]), [['AskUserQuestion', false]]);
+  // The CLI writes the question out as text too; the card asks it, so the conversation does not say it twice.
+  assert.deepEqual(lastAssistant((await readHistory(state.sessionFile)).messages).content.map(block => block.type), ['toolCall']);
+  const card = await peer.next(event('extension_ui_request'));
+  assert.deepEqual([card.ask, card.method, card.header, card.title, card.options], [true, 'select', 'Question', 'Which colour do you prefer?', ['red', 'green', 'blue']]);
+  // The choice is sent as the next message, which is how the CLI takes an answer.
+  const from = peer.events.length;
+  answer(peer, card, { value: 'green' });
+  await peer.next(event('agent_settled'), from);
+  assert.ok(peer.events.slice(from).some(e => e.type === 'extension_ui_dismiss' && e.id === card.id));
+  const history = (await readHistory(state.sessionFile)).messages;
+  assert.deepEqual(history.filter(m => m.role === 'user').map(m => m.content[0].text), ['ask', 'green']);
+  const reply = lastAssistant(history);
+  assert.deepEqual(reply.content.map(block => block.type), ['text'], 'the CLI closing the question it asked is not shown as another step');
+  assert.equal(reply.content[0].text, 'Answer received: green');
+  assert.deepEqual(f.calls('session/prompt').map(call => call.params.prompt[0].text), ['ask', 'green']);
+});
+
+test('several questions are asked one at a time and answered together; typing instead is an answer too', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  await peer.request('get_state');
+  await peer.request('prompt', { message: 'ask twice' });
+  const first = await peer.next(event('extension_ui_request'));
+  assert.deepEqual([first.header, first.title, first.multiSelect], ['Question 1 of 2', 'Which colour do you prefer?', undefined]);
+  let from = peer.events.length;
+  answer(peer, first, { value: 'blue' });
+  const second = await peer.next(event('extension_ui_request'), from);
+  assert.deepEqual([second.header, second.title, second.multiSelect, second.options], ['Question 2 of 2', 'Which sizes?', true, ['small', 'large']]);
+  assert.equal(f.calls('session/prompt').length, 1, 'nothing is sent until every question has its answer');
+  from = peer.events.length;
+  answer(peer, second, { value: ['small', 'large'] });
+  await peer.next(event('agent_settled'), from);
+  assert.equal(f.calls('session/prompt').at(-1).params.prompt[0].text, 'Which colour do you prefer?\nblue\n\nWhich sizes?\nsmall, large');
+  // Asked again, and answered by typing: the card goes and the typed message is the answer.
+  from = peer.events.length;
+  await peer.request('prompt', { message: 'ask' });
+  const again = await peer.next(event('extension_ui_request'), from);
+  const before = peer.events.length;
+  await peer.request('prompt', { message: 'a colour of my own: teal' });
+  await peer.next(event('agent_settled'), before);
+  assert.ok(peer.events.slice(before).some(e => e.type === 'extension_ui_dismiss' && e.id === again.id));
+  assert.equal(f.calls('session/prompt').at(-1).params.prompt[0].text, 'a colour of my own: teal');
 });
 
 test('a turn carries the token counts the CLI reports: input, cached, output, and thought', { timeout: 12000 }, async t => {

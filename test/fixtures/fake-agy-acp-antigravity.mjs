@@ -162,9 +162,31 @@ lines.on('line', line => {
         update('agent_thought_chunk', { content: { type: 'text', text: 'Then the files.' } });
         tool('t-2', { kind: 'read', title: 'File notes.txt', rawInput: { Path: '/work/notes.txt' }, locations: [{ path: '/work/notes.txt' }] });
         tool('t-3', { kind: 'edit', title: 'File out.txt', rawInput: { Content: 'done\n', Overwrite: true, Path: '/work/out.txt' }, locations: [{ path: '/work/out.txt' }] });
+        // A change to a file names what it replaces; a change of another shape only gives the file before and after, at the end.
+        tool('t-3b', { kind: 'edit', title: 'File notes.txt', rawInput: { Path: '/work/notes.txt', Target: 'beta', Replacement: 'BETA' }, locations: [{ path: '/work/notes.txt' }] }, { content: [{ type: 'diff', path: '/work/notes.txt', oldText: 'alpha\nbeta\n', newText: 'alpha\nBETA\n' }] });
+        tool('t-3c', { kind: 'edit', title: 'File list.txt', rawInput: { Path: '/work/list.txt', Chunks: 2 }, locations: [{ path: '/work/list.txt' }] }, { content: [{ type: 'diff', path: '/work/list.txt', oldText: 'one\ntwo\n', newText: 'one\n2\n' }] });
         tool('t-4', { kind: 'search', title: '"Iris versicolor" on Web', rawInput: { query: 'Iris versicolor' } });
         tool('t-5', { kind: 'other', title: 'Run something_else', rawInput: { token: 'fixture-private-raw-input' } });
         chunk('All four done.'); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
+      // The model asks the person something. The real CLI does not wait inside the turn: it ends it with the
+      // tool pending, takes the next message as the answer, and only then reports the tool as completed.
+      if (text === 'ask' || text === 'ask twice') {
+        const questions = [{ is_multi_select: false, options: ['red', 'green', 'blue'], question: 'Which colour do you prefer?' },
+          ...(text === 'ask twice' ? [{ is_multi_select: true, options: ['small', 'large'], question: 'Which sizes?' }] : [])];
+        const askId = `q-${(cache().asks ?? 0) + 1}`; // (every call has an id of its own, as in the real CLI)
+        update('tool_call', { toolCallId: askId, kind: 'other', title: 'Run ask_question', status: 'in_progress', rawInput: { questions } });
+        update('tool_call_update', { toolCallId: askId, kind: 'other', title: 'Run ask_question', status: 'pending', rawInput: { questions } });
+        // (The real CLI then writes the question out as text as well.)
+        chunk(questions.map(q => `${q.question}\n\n${q.options.map((option, i) => `- [${i + 1}] ${option}`).join('\n')}`).join('\n\n'));
+        save({ ...cache(), asked: questions, asks: (cache().asks ?? 0) + 1 });
+        reply(r.id, { stopReason: 'end_turn' }); break;
+      }
+      if (cache().asked) {
+        const questions = cache().asked;
+        save({ ...cache(), asked: undefined });
+        update('tool_call_update', { toolCallId: `q-${cache().asks}`, kind: 'other', title: 'Run ask_question', status: 'completed', rawInput: { questions } });
+        chunk(`Answer received: ${text}`); reply(r.id, { stopReason: 'end_turn' }); break;
       }
       // A turn that goes on until it is cancelled.
       if (text === 'long') { turn = { id: r.id, text }; chunk('Working on it'); break; }

@@ -179,6 +179,9 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     return next;
   }), [statusKey]);
   const [checking, setChecking] = useState(true);
+  // Until the app has said what it found last time (a moment), the row says nothing rather than "Checking".
+  const [asked, setAsked] = useState(() => lastAccountStatus.has(statusKey));
+  const [refreshing, setRefreshing] = useState(false); // the Refresh button was pressed; a check of its own accord is quiet
   const [requesting, setRequesting] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState(null);
@@ -261,9 +264,10 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     let alive = true;
     api('cliAccountLast', environmentId, engine, accountId).then(last => {
       if (!alive) return;
+      setAsked(true);
       if (last) setAccountState(now => now ?? last);
       if (last?.ageMs != null && last.ageMs < RECENT_MS) { if (!accountId) reportCliAccount(environmentId, last, engine); setChecking(false); } else void check();
-    }, () => { if (alive) void check(); });
+    }, () => { if (alive) { setAsked(true); void check(); } });
     return () => { alive = false; };
   }, [check, installing, fresh, signIn, environmentId, engine, accountId]);
   const signOut = async () => {
@@ -284,7 +288,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   }, [statusKey, environmentId, engine, accountId, antigravity, local, fresh]);
   const message = progress?.stage === 'error' ? progress.message : error;
   // What is true on that machine right now, in two or three words.
-  const state = installing ? 'Installing' : signingIn ? 'Signing in' : !account ? (checking ? 'Checking' : 'Could not check')
+  const state = installing ? 'Installing' : signingIn ? 'Signing in' : !account ? (!asked && !fresh ? '' : checking ? 'Checking' : 'Could not check')
     : account.installed === false ? 'Not installed'
     : signedIn ? null : account.signedIn === false ? 'Not signed in'
     : checking ? 'Checking' : 'Could not check';
@@ -297,11 +301,11 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   return <div className="sub-account">
     <div className="sub-account-row">
       {signedIn ? <span className="sub-state ok"><span className="sub-dot" /><span className="sub-who" title={who}>{who}</span></span>
-        : <span className={`sub-state ${busy ? 'busy' : ''}`}>{busy ? <Spinner size={11} /> : <span className="sub-dot" />}{who ? `${who} · ${state}` : state}</span>}
+        : <span className={`sub-state ${busy ? 'busy' : ''}`}>{busy ? <Spinner size={11} /> : state ? <span className="sub-dot" /> : null}{who && state ? `${who} · ${state}` : state || who}</span>}
       {plan && <span className="sub-plan">{plan}</span>}
       {!installing && !signingIn && <div className="sub-actions">
         {account?.installed ? <>
-          {signedIn && <button type="button" className="tool-button" aria-label="Refresh" title="Refresh" disabled={checking || readingUsage} onClick={() => { void check(); void readUsage(true); }}>{checking || readingUsage ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>}
+          {signedIn && <button type="button" className="tool-button" aria-label="Refresh" title="Refresh" disabled={refreshing} onClick={() => { setRefreshing(true); void Promise.all([check(), readUsage(true)]).finally(() => setRefreshing(false)); }}>{refreshing ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>}
           {signedIn ? (profile ? <button type="button" className="button small" title="Sign out and remove this account from Iris" onClick={onRemove}>Remove</button>
               : !antigravity && <button type="button" className="button small" disabled={checking} onClick={signOut}>Sign out</button>)
             : <>

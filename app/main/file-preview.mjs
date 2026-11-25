@@ -71,6 +71,16 @@ export async function filePreview(operation, cwd, rel = '', { fs, home } = {}) {
     candidates.sort((a, b) => (a.dir - b.dir) || ((a.rank ?? 5) - (b.rank ?? 5)) || (a.depth - b.depth) || a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' }));
     return { path: root, files: candidates.slice(0, 32).map(({ path: p, name, dir }) => ({ path: p, name, dir })) };
   }
+  // A file as it is, for a page shown in the file pane and what that page loads (styles, scripts, images).
+  // cwd is the folder the page may read from: nothing outside it is served, whatever a link in it says.
+  if (operation === 'raw') {
+    const [folder, file] = await Promise.all([fs.realpath(resolve(expand(cwd))), fs.realpath(path)]);
+    if (!file.startsWith(folder.endsWith('/') ? folder : `${folder}/`)) throw new Error('Outside the previewed folder');
+    const info = await fs.stat(file);
+    if (!info.isFile()) throw new Error(`${file} is not a regular file`);
+    if (info.size > 32 << 20) throw new Error('Too large to preview (32 MB limit)');
+    return { path: file, size: info.size, base64: (await fs.readFile(file)).toString('base64') };
+  }
   if (operation !== 'read') throw new Error('Unknown file preview operation');
 
   const imageTypes = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon' };

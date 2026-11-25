@@ -298,3 +298,25 @@ test('code preview bounds single-line and oversized text while keeping normal mu
   assert.equal(shouldAutoRefreshPreview({ kind: 'text', truncated: false }, false), true);
   assert.ok(HIGHLIGHT_MAX_CHARS < LARGE_TEXT_PREVIEW_CHARS);
 });
+
+test('a page and what it loads are served byte for byte, locally and through the remote reader, and only from inside its folder', { skip: process.platform === 'win32' }, async t => {
+  const root = await fixture(t);
+  const site = join(root, 'site');
+  await mkdir(join(site, 'assets'), { recursive: true });
+  const bytes = Buffer.from([0, 255, 1, 254, 10, 13, 0]);
+  await writeFile(join(site, 'index.html'), '<!doctype html><link rel="stylesheet" href="assets/a.css">页面');
+  await writeFile(join(site, 'assets', 'logo.bin'), bytes);
+  await writeFile(join(root, 'secret.txt'), 'not part of the page');
+  await symlink(join(root, 'secret.txt'), join(site, 'assets', 'link.txt'));
+  for (const read of [(cwd, rel) => filePreview('raw', cwd, rel), (cwd, rel) => shellPreview('raw', cwd, rel)]) {
+    const page = await read(site, 'index.html');
+    assert.equal(Buffer.from(page.base64, 'base64').toString('utf8'), '<!doctype html><link rel="stylesheet" href="assets/a.css">页面');
+    assert.deepEqual(Buffer.from((await read(site, 'assets/logo.bin')).base64, 'base64'), bytes);
+    // Neither a path that climbs out nor a link that points out is served.
+    await assert.rejects(read(site, '../secret.txt'), /Outside the previewed folder/);
+    await assert.rejects(read(site, 'assets/link.txt'), /Outside the previewed folder/);
+    await assert.rejects(read(site, '/etc/hosts'), /Outside the previewed folder/);
+    await assert.rejects(read(site, 'assets'), /not a regular file/);
+    await assert.rejects(read(site, 'missing.js'));
+  }
+});

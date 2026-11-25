@@ -756,6 +756,7 @@ export class CodexAdapter {
   #request(peer, id, method, params) {
     const turn = this.turn;
     const command = method === 'item/commandExecution/requestApproval', change = method === 'item/fileChange/requestApproval';
+    if (method === 'item/tool/requestUserInput') { this.#ask(peer, id, params); return; }
     if (!command && !change) { peer.send({ id, error: { code: -32601, message: `Iris does not handle ${method}.` } }); return; }
     if (peer !== this.peer || !turn || params.threadId !== this.threadId || this.permissions.size >= 8) { peer.send({ id, result: { decision: 'cancel' } }); return; }
     const uiId = randomUUID();
@@ -767,14 +768,46 @@ export class CodexAdapter {
       message: [command ? shellCommand(params.command ?? tools[0]?.call.arguments.command) : tools.map(tool => tool.call.arguments.path).filter(Boolean).join('\n'), params.reason, command && text(params.cwd) ? `in ${params.cwd}` : null].filter(Boolean).join('\n'),
       options: [...options.keys()], optionDetails: [{ label: 'Allow once', description: 'Allow once' }, { label: 'Allow for this conversation', description: 'Allow and remember' }, { label: 'Reject', description: 'Reject once' }] });
   }
+  // Codex's model asks the person something (request_user_input, which it has in its plan mode): each
+  // question is a card, one at a time, and the answers go back to Codex keyed by question.
+  #ask(peer, id, params) {
+    const questions = (Array.isArray(params?.questions) ? params.questions : []).filter(q => text(q?.id) && text(q.question)).slice(0, 8);
+    if (peer !== this.peer || !this.turn || params.threadId !== this.threadId || !questions.length || this.asking) { peer.send({ id, result: { answers: {} } }); return; }
+    this.asking = { peer, id, questions, answers: {}, open: null };
+    this.#askNext();
+  }
+  #askNext() {
+    const ask = this.asking, at = Object.keys(ask.answers).length, question = ask.questions[at];
+    const options = (Array.isArray(question.options) ? question.options : []).filter(option => text(option?.label)).slice(0, 24);
+    ask.open = randomUUID();
+    this.write({ type: 'extension_ui_request', id: ask.open, ask: true, method: options.length ? 'select' : 'input',
+      header: text(question.header) ? question.header.slice(0, 80) : ask.questions.length > 1 ? `Question ${at + 1} of ${ask.questions.length}` : 'Question',
+      title: question.question.slice(0, 2000),
+      ...(options.length ? { options: options.map(option => option.label.slice(0, 300)),
+        optionDetails: options.map(option => ({ label: option.label.slice(0, 300), ...(text(option.description) ? { description: option.description.slice(0, 400) } : {}) })) } : {}) });
+  }
+  #asked(r) {
+    const ask = this.asking;
+    this.write({ type: 'extension_ui_dismiss', id: r.id });
+    const value = (Array.isArray(r.value) ? r.value : [r.value]).filter(text);
+    if (r.cancelled || !value.length) { this.asking = null; ask.peer.send({ id: ask.id, result: { answers: ask.answers } }); return; }
+    ask.answers[ask.questions[Object.keys(ask.answers).length].id] = { answers: value };
+    if (Object.keys(ask.answers).length < ask.questions.length) { this.#askNext(); return; }
+    this.asking = null;
+    ask.peer.send({ id: ask.id, result: { answers: ask.answers } });
+  }
   #answer(r) {
+    if (this.asking?.open === r.id) { this.#asked(r); return; }
     const entry = this.permissions.get(r.id);
     if (!entry) return;
     this.permissions.delete(r.id);
     entry.peer.send({ id: entry.id, result: { decision: (!r.cancelled && entry.options.get(r.value)) || 'cancel' } });
     this.write({ type: 'extension_ui_dismiss', id: r.id });
   }
-  #cancelPermissions() { for (const id of [...this.permissions.keys()]) this.#answer({ id, cancelled: true }); }
+  #cancelPermissions() {
+    if (this.asking?.open) this.#asked({ id: this.asking.open, cancelled: true });
+    for (const id of [...this.permissions.keys()]) this.#answer({ id, cancelled: true });
+  }
 
   async #abort() {
     const turn = this.turn;

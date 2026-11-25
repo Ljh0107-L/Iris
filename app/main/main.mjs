@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, safeStorage, screen, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, protocol, safeStorage, screen, shell } from 'electron';
 import { MIN_SIZE, openingBounds, readWindowState, rememberWindow } from './window-state.mjs';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -9,6 +9,7 @@ import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from '.
 import { downloadLocal, downloadRemote } from './file-download.mjs';
 import { gitReview, remoteGitReviewScript, decodeGitReview } from './git-review.mjs';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
 import { Terminals, spawnPty } from './terminals.mjs';
@@ -49,6 +50,10 @@ const primary = app.requestSingleInstanceLock();
 if (!primary) app.quit();
 else app.on('second-instance', () => showWindow());
 
+// Pages shown in the file pane are served to it under a scheme of their own (see previewUrl): a page then
+// loads its styles, scripts and images by relative links, from this Mac or from an SSH host alike.
+protocol.registerSchemesAsPrivileged([{ scheme: 'iris-preview', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
+
 let store, manager, window, usage;
 const environments = () => listEnvironments({ sshConfig: process.env.IRIS_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} });
 
@@ -62,6 +67,43 @@ async function targetFilePreview(environmentId, cwd, operation, rel = '', engine
   const { node } = await manager.prepare(environmentId, { engine });
   const output = await runSsh(env, remoteFilePreviewScript(node, operation, cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
   return decodeRemoteFilePreview(output);
+}
+
+// A page in the file pane. Each previewed folder gets an address of its own (iris-preview://<token>/…); the
+// token names the machine and the folder, and only files inside that folder are served under it.
+const previews = new Map(); // "session\nfolder" -> { token, environmentId, root, engine }
+const PREVIEW_TYPES = { html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json', map: 'application/json',
+  svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', bmp: 'image/bmp',
+  woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', mp4: 'video/mp4', webm: 'video/webm',
+  wasm: 'application/wasm', txt: 'text/plain', md: 'text/plain', csv: 'text/csv', xml: 'application/xml', pdf: 'application/pdf', glb: 'model/gltf-binary', gltf: 'model/gltf+json' };
+function previewUrl(id, path) {
+  const record = manager.record(id);
+  if (typeof path !== 'string' || !path.startsWith('/') || path.includes('\0')) throw new Error('A page is previewed by its full path.');
+  // The conversation's folder when the page is in it (so "../assets" works), else the page's own folder.
+  const cwd = String(record.cwd ?? '').replace(/\/+$/, '');
+  const root = cwd.startsWith('/') && path.startsWith(`${cwd}/`) ? cwd : path.slice(0, path.lastIndexOf('/')) || '/';
+  const key = `${id}\n${root}`;
+  if (!previews.has(key)) {
+    if (previews.size >= 64) previews.delete(previews.keys().next().value);
+    previews.set(key, { token: `p${randomUUID().replaceAll('-', '')}`, environmentId: record.environmentId, root, engine: record.engine });
+  }
+  const rel = path.slice(root === '/' ? 1 : root.length + 1);
+  return `iris-preview://${previews.get(key).token}/${rel.split('/').map(encodeURIComponent).join('/')}`;
+}
+async function servePreview(request) {
+  const headers = { 'cache-control': 'no-store', 'access-control-allow-origin': '*' };
+  try {
+    const url = new URL(request.url);
+    const target = [...previews.values()].find(preview => preview.token === url.hostname);
+    if (!target) return new Response('This preview is no longer open.', { status: 404, headers });
+    let rel = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+    if (!rel || rel.endsWith('/')) rel += 'index.html';
+    const file = await targetFilePreview(target.environmentId, target.root, 'raw', rel, target.engine);
+    const type = PREVIEW_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream';
+    return new Response(Buffer.from(file.base64, 'base64'), { headers: { ...headers, 'content-type': /^text\/|javascript|json|xml/.test(type) ? `${type}; charset=utf-8` : type } });
+  } catch (error) {
+    return new Response(String(error?.message ?? error), { status: 404, headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' } });
+  }
 }
 
 async function sessionFilePreview(id, operation, rel = '') {
@@ -409,7 +451,8 @@ const api = {
   },
   compact: id => manager.compact(id),
   openExternal: url => /^https?:\/\//.test(url) ? openInBrowser(url) : false,
-  openPath: path => shell.openPath(path),
+  openPath: path => process.env.IRIS_INSECURE_TEST_STORAGE === '1' ? ((globalThis.__irisOpened ??= []).push(path), '') : shell.openPath(path),
+  previewUrl: (id, path) => previewUrl(id, path),
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
   searchFiles: (target, query = '') => typeof target === 'string'
@@ -479,6 +522,7 @@ function ask(channel, payload) {
 const shellEnv = !primary || process.env.IRIS_INSECURE_TEST_STORAGE === '1' || process.env.IRIS_NO_SHELL_ENV ? Promise.resolve({}) : resolveShellEnv();
 app.whenReady().then(async () => {
   if (!primary) return;
+  protocol.handle('iris-preview', servePreview);
   updater = new Updater({ app, net, cacheDir: join(app.getPath('userData'), 'updates'), send });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: app.name, submenu: [
@@ -609,16 +653,20 @@ app.on('before-quit', event => {
   // Anything still working on this Mac stops with the app: say so first. (Automated runs quit unattended.)
   const working = updateQuit || process.env.IRIS_QUIT_ON_CLOSE ? 0 : Math.max(ultraLocal.size, manager.localWorkCount());
   if (working && window && !window.isDestroyed()) {
-    const choice = dialog.showMessageBoxSync(window, { type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,
+    const choice = dialog.showMessageBoxSync(window, { type: 'warning', buttons: ['Quit Anyway', 'Cancel'], defaultId: 1, cancelId: 1,
       message: `${working === 1 ? 'A conversation is' : `${working} conversations are`} still working on this Mac`,
-      detail: 'Quitting stops replies, goals and background jobs here. History is kept, and an Ultra task carries on when you open its conversation again. Conversations on SSH hosts keep running.' });
+      detail: 'Quitting stops them. History is kept, and an Ultra task carries on when you open its conversation again. Conversations on SSH hosts keep running.' });
     if (choice !== 0) { event.preventDefault(); return; }
   }
   event.preventDefault();
   quitting = true;
+  // Quit means gone: the window leaves at once, everything on this Mac is stopped, and nothing waits on a host.
+  if (window && !window.isDestroyed()) window.hide();
   terminals.closeAll();
   stopUsageReaders();
-  manager.shutdown().finally(() => app.quit());
+  const leave = () => app.quit();
+  setTimeout(() => app.exit(0), 8000).unref?.(); // whatever is still pending, the app does not stay behind
+  manager.shutdown().then(leave, leave);
 });
 // However the app goes (quit, an update, a crash handler calling exit), no CLI it started to read a quota stays.
 process.on('exit', stopUsageReaders);

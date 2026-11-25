@@ -2319,45 +2319,110 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .composer.opening .composer-plus { opacity: 0.45; }
 .composer.opening .composer-toolbar { min-height: 30px; }
 
-/* ---- Steps, quiet. What the agent did is a grey line among its words, as in Claude and Codex: the text
-   darkens under the pointer and nothing is filled in, when hovered or when open. A command and what it
-   printed are plain mono text under a thin rule, not a box; a file is its name, not a chip. */
+/* ---- Steps, laid out as Claude Desktop lays them out. A group of steps is one grey line at the size of the
+   text around it, with room above and below. Open, it is a card: a hairline border, a row for each step and a
+   hairline between rows. An open step shows its command in an inset box and what it printed as plain text
+   under it. Nothing is filled in under the pointer; the words get a shade darker. */
+.history-virtual-row[data-mounted="true"][data-block-kind="thinking"],
+.history-virtual-row[data-mounted="true"][data-block-kind="work"],
+.history-virtual-row[data-mounted="true"][data-block-kind="tools"],
+.history-virtual-row[data-mounted="true"][data-block-kind="orphanResult"] { padding: 8px 0; }
 .tool-group-head,
 .thinking .tool-group-head,
 .work .tool-group-head {
   font-family: var(--sans);
-  font-size: var(--fs-md);
-  min-height: 24px;
-  padding: 2px 0;
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  min-height: 0;
+  height: auto;
+  padding: 0;
   margin-left: 0;
-  gap: 6px;
+  gap: 8px;
   border-radius: 0;
+  color: var(--muted);
 }
 .tool-group-head:hover:not(.static),
 .thinking .tool-group-head:hover:not(.static),
 .work .tool-group-head:hover:not(.static),
-.step-head:hover { background: transparent; color: var(--text); }
-.step-head:hover .step-verb, .step-head:hover .step-subject { color: var(--text); }
+.step-head:hover { background: transparent; color: var(--text-2); }
+.step-head:hover .step-verb { color: var(--text-2); }
+.step-head:hover .step-subject { color: var(--text); }
 .tool-group-head:focus-visible, .step-head:focus-visible { outline: 2px solid var(--signal-soft); outline-offset: 2px; border-radius: var(--r-sm); }
-.step-head { min-height: 24px; padding: 2px 0; margin-left: 0; gap: 6px; border-radius: 0; transition: color .12s; }
-.step-verb + .step-subject { color: var(--muted); }
-.step-subject.mono { font-family: var(--mono); font-size: 12px; }
-.work-body, .thinking-body { margin: 2px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--hairline); }
-.step-detail { padding: 2px 0 8px; }
+.work-body {
+  margin: 10px 0 2px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: transparent;
+  overflow: hidden;
+}
+.work-body > .step + .step { border-top: 1px solid var(--hairline); }
+.step-head {
+  min-height: 38px;
+  padding: 8px 14px;
+  margin: 0;
+  gap: 8px;
+  border-radius: 0;
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  color: var(--muted);
+  transition: color .12s;
+}
+.step-subject.mono { font-family: var(--mono); font-size: 12.5px; }
+.step-detail { display: grid; gap: 8px; padding: 0 14px 12px; }
+.step > .step-detail:first-child { padding-top: 12px; } /* the only step of its group: no row of its own above it */
+.thinking-body { margin: 8px 0 2px; padding: 0 0 0 14px; border-left: 2px solid var(--hairline); }
 .step .file-ref-inline, .tool-group-head .file-ref-inline { display: inline; margin: 0; padding: 0; border: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; }
 .step .file-ref-inline::before, .tool-group-head .file-ref-inline::before { display: none; }
 .step .file-ref-inline:hover, .tool-group-head .file-ref-inline:hover { text-decoration: underline; background: transparent; }
-.tool-command, .tool-output, .tool-console, .tool-console .tool-command, .tool-console .tool-output, .tool-output.boxed,
-[data-theme="dark"] .tool-command, [data-theme="dark"] .tool-output, [data-theme="dark"] .tool-console {
-  background: transparent;
+/* A command: the line that was run in an inset box, and under it what it printed, as it came. */
+.tool-console, [data-theme="dark"] .tool-console { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.tool-command, .tool-console .tool-command, [data-theme="dark"] .tool-command {
+  margin: 0;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--code-block);
+  color: var(--text-2);
+  font: 12.5px/1.6 var(--mono);
+  max-height: 200px;
+  overflow: auto;
+}
+.tool-output, .tool-console .tool-output, .tool-output.boxed, [data-theme="dark"] .tool-output {
+  margin: 0;
+  padding: 0 2px;
   border: 0;
   border-radius: 0;
-  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 12.5px/1.6 var(--mono);
+  max-height: 320px;
+  overflow: auto;
 }
-.tool-console, .step-detail > .tool-command, .step-detail > .tool-output { margin: 2px 0 4px; padding-left: 12px; border-left: 1px solid var(--hairline); }
-.tool-console .tool-command { padding: 1px 0; color: var(--text-2); }
-.tool-console .tool-output { padding: 1px 0; border-top: 0; color: var(--muted); max-height: 280px; }
-.tool-console .tool-running { padding: 1px 0; border-top: 0; }
-.tool-command .prompt { color: var(--faint); }
-/* (Inside an opened group the group's own rule is enough.) */
-.work-body .tool-console, .work-body .step-detail > .tool-command, .work-body .step-detail > .tool-output { padding-left: 0; border-left: 0; }
+.tool-console.error .tool-output, .tool-output.error { color: var(--red); }
+.tool-console .tool-running, .tool-running { padding: 0 2px; border-top: 0; font-size: var(--fs-sm); color: var(--muted); }
+.tool-command .prompt { color: var(--faint); user-select: none; }
+
+/* Something in progress: a thin arc turning on a faint ring, as in Claude Desktop, in place of the heavy
+   two-tone ring. It takes the colour of the text beside it. */
+.spinner {
+  border: 1.5px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-top-color: currentColor;
+  color: var(--muted);
+  animation: spin .9s linear infinite;
+}
+/* What a group's line says after its summary (how many failed, lines changed) stays on that line. */
+.group-failed, .group-diff-stats, .step-failed, .step-duration, .reasoning-tokens { white-space: nowrap; flex-shrink: 0; }
+
+/* A page drawn in the file pane. Pages assume a white sheet unless they say otherwise. */
+.fp-html { display: block; width: 100%; height: 100%; min-height: 350px; border: 0; background: #fff; }
+.fp-content:has(> .fp-html) { overflow: hidden; }
+/* The line a link in the conversation pointed at. */
+.fp-code { position: relative; }
+.fp-line-mark { position: absolute; left: 0; right: 0; background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); pointer-events: none; }
+/* A connection message of more than one line (a narrow conversation beside the file pane) grows; it never
+   spills over the message box. */
+.composer-shell > .conn-banner { height: auto; min-height: 32px; padding-block: 5px; line-height: 1.4; }
+.composer-shell > .conn-banner .button.small { flex-shrink: 0; }
+/* Every changed file shows all of its diff: the list scrolls, the cards do not shrink to fit it. */
+.change-file { flex-shrink: 0; }

@@ -222,7 +222,7 @@ function SessionView({ session }) {
   }, [session.id]);
   const isClaude = session.engine === 'claude-code', cli = isCliEngine(session.engine);
   const placeholder = cli
-    ? questions.length ? 'Choose a permission option above…' : session.cli?.authRequired ? 'Sign in to send a message…' : `Message ${engineLabel(session.engine)}…`
+    ? questions.some(q => q.permission) ? 'Choose a permission option above…' : questions.length ? 'Choose an answer above, or type your own…' : session.cli?.authRequired ? 'Sign in to send a message…' : `Message ${engineLabel(session.engine)}…`
     : questions.length ? 'Answer the agent’s question…'
     : !isClaude && ultraWorking
       ? 'Add to the task, @ to mention, / for actions'

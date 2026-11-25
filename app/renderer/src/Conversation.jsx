@@ -82,6 +82,7 @@ function describeCall(call) {
     case 'subagent_message': return { verb: 'Messaged agent', subject: a.message ?? '', detail: a.id, title: a.message };
     case 'subagent_stop': return { verb: 'Stopped agent', subject: a.id ?? '' };
     case 'Task': return { verb: a.subagent_type ? `Agent · ${a.subagent_type}` : 'Agent', subject: a.description || String(a.prompt ?? '').split('\n')[0].slice(0, 90) || 'Delegated task', title: a.prompt };
+    case 'AskUserQuestion': return { verb: 'Asked', subject: String(a.questions?.[0]?.question ?? '').split('\n')[0].slice(0, 120) || 'a question', detail: (a.questions?.length ?? 0) > 1 ? `and ${a.questions.length - 1} more` : '' };
     case 'TodoWrite': return { verb: 'Updated tasks', subject: `${(a.todos ?? []).length} ${(a.todos ?? []).length === 1 ? 'item' : 'items'}` };
     case 'WebSearch': return { verb: 'Searched web', subject: a.query ?? '', detail: Array.isArray(a.allowed_domains) && a.allowed_domains[0] ? a.allowed_domains[0] : '' };
     case 'WebFetch': return { verb: 'Fetched', subject: urlLabel(a.url), detail: a.prompt ? String(a.prompt).split('\n')[0].slice(0, 60) : '', title: a.url };
@@ -805,7 +806,7 @@ function WorkingRow({ session, transcript, sending = false }) {
   // Real output tokens of the model calls finished so far this turn (no live estimate).
   const tokens = turn.reduce((n, m) => n + (m.role === 'assistant' ? m.usage?.output ?? 0 : 0), 0);
   const lastBlock = live?.content?.filter(Boolean).at(-1);
-  const pending = messages.at(-1)?.__optimistic && !messages.at(-1).__first;
+  const pending = messages.at(-1)?.__interrupting;
   const state = pending ? 'Interrupting…'
     : (session?.compacting ?? transcript.compacting) ? 'Compacting conversation'
     : transcript.retry ? `Reconnecting to model · retry ${transcript.retry.attempt}/${transcript.retry.maxAttempts}`

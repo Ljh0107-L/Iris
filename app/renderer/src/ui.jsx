@@ -183,6 +183,9 @@ renderer.codespan = ({ text }) => {
 };
 marked.setOptions({ gfm: true, breaks: false, renderer });
 marked.use(mathExtension);
+// Agents name the files they touched as links to file:///… (Antigravity) or to a path (Codex). The link is kept;
+// a click on it never navigates: it opens the file in the file pane (onClick below).
+DOMPurify.addHook('uponSanitizeAttribute', (node, data) => { if (node.tagName === 'A' && data.attrName === 'href' && /^file:\/\/\//i.test(data.attrValue)) data.forceKeepAttr = true; });
 DOMPurify.addHook('afterSanitizeAttributes', node => { if (node.tagName === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noreferrer'); } });
 
 const sanitizeMarkdown = html => DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] });
@@ -230,8 +233,8 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
     updateMarkdownBlocks(root.current, shown.current, text, { documentPath, readFile: sessionId && documentPath !== undefined ? path => api('readFile', sessionId, path) : null });
   }, [incremental, text, sessionId, documentPath]);
   useLayoutEffect(() => () => { for (const block of shown.current?.drawn ?? []) block.dispose?.(); shown.current = null; }, []);
-  const openTarget = path => {
-    if (sessionId) openFile(sessionId, path);
+  const openTarget = (path, line) => {
+    if (sessionId) openFile(sessionId, path, line);
     else window.dispatchEvent(new CustomEvent('iris:open-file', { detail: path }));
   };
   const fileTargetFrom = target => {
@@ -262,7 +265,7 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
       const destination = resolveMarkdownReference(link.getAttribute('href'), documentPath);
       if (destination.kind === 'external') api('openExternal', destination.url);
       else if (destination.kind === 'anchor') scrollMarkdownAnchor(root.current, destination.fragment);
-      else if (destination.kind === 'file') openTarget(destination.path);
+      else if (destination.kind === 'file') openTarget(destination.path, destination.line);
       return;
     }
     const ref = e.target.closest('[data-path]');

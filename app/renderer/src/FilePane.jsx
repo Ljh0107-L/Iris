@@ -1,17 +1,19 @@
 // Claude-style file preview: tabs of open files, a rendered/source preview, and the session folder's tree.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, MenuItem, Markdown, Popover, Spinner, pointAnchor, useResizable } from './ui.jsx';
 import { ImagePreview } from './ImagePreview.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { prepareCodePreview, shouldAutoRefreshPreview } from './file-preview-view.js';
+import { relativeSessionPath } from './file-paths.js';
 import { api, closeFile, downloadFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
 
 const LANGS = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'bash', zsh: 'bash', bash: 'bash',
   yml: 'yaml', yaml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini', json: 'json', rs: 'rust', go: 'go', c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', hpp: 'cpp', cu: 'cpp',
   java: 'java', kt: 'kotlin', swift: 'swift', rb: 'ruby', php: 'php', css: 'css', scss: 'scss', less: 'less', html: 'xml', xml: 'xml', svg: 'xml', sql: 'sql',
   lua: 'lua', r: 'r', pl: 'perl', diff: 'diff', patch: 'diff', makefile: 'makefile', mk: 'makefile', md: 'markdown', graphql: 'graphql' };
+const PLAIN_TEXT = new Set(['', 'txt', 'text', 'log', 'out', 'csv', 'tsv']);
 const extOf = path => { const name = path.split('/').pop().toLowerCase(); return name === 'makefile' ? 'makefile' : name.includes('.') ? name.split('.').pop() : ''; };
 export const iconFor = name => {
   const ext = extOf(name);
@@ -82,13 +84,28 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
   </Popover>}</>;
 }
 
+// Cheap and stable: only to tell whether a page's text changed since it was last drawn.
+const hashText = text => { let hash = 0; for (let i = 0; i < text.length; i += Math.max(1, Math.floor(text.length / 4096))) hash = (hash * 31 + text.charCodeAt(i)) | 0; return hash; };
 const escapeHtml = text => text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
-function CodeView({ view, ext }) {
+// line: the line a link in the conversation pointed at. It is brought into view and marked.
+function CodeView({ view, ext, line, lineAt }) {
   const { displayedText: text, lineCount, highlight, wrapped } = view;
+  const box = useRef(null);
+  const [mark, setMark] = useState(null);
+  useLayoutEffect(() => {
+    const source = box.current?.querySelector('.fp-source');
+    const height = source ? parseFloat(getComputedStyle(source).lineHeight) : 0;
+    if (!line || wrapped || line > lineCount || !(height > 0)) { setMark(null); return; }
+    const top = source.offsetTop + (line - 1) * height;
+    setMark({ top, height });
+    const scroller = box.current.closest('.fp-content');
+    scroller?.scrollTo({ top: Math.max(0, box.current.offsetTop + top - scroller.clientHeight / 3) });
+  }, [line, lineAt, lineCount, wrapped, text]);
   const html = useMemo(() => {
     if (!highlight) return escapeHtml(text);
     const lang = LANGS[ext];
+    if (!lang && PLAIN_TEXT.has(ext)) return escapeHtml(text); // notes and logs are not code: no guessed colours
     try {
       return lang && hljs.getLanguage(lang)
         ? hljs.highlight(text, { language: lang, ignoreIllegals: true }).value
@@ -97,7 +114,8 @@ function CodeView({ view, ext }) {
   }, [text, ext, highlight]);
   const showGutter = !wrapped || lineCount <= 1;
   return (
-    <div className={`fp-code ${wrapped ? 'wrap' : ''}`}>
+    <div ref={box} className={`fp-code ${wrapped ? 'wrap' : ''}`}>
+      {mark && <div className="fp-line-mark" style={{ top: mark.top, height: mark.height }} />}
       {showGutter && <pre className="fp-gutter" aria-hidden="true">{Array.from({ length: lineCount }, (_, i) => i + 1).join('\n')}</pre>}
       <pre className="fp-source"><code className="hljs" dangerouslySetInnerHTML={{ __html: html }} /></pre>
     </div>
@@ -113,6 +131,22 @@ function PdfPreview({ dataUrl, name }) {
     return () => URL.revokeObjectURL(objectUrl);
   }, [dataUrl]);
   return url ? <iframe className="fp-pdf" src={url} title={`PDF: ${name}`} /> : <div className="fp-empty"><Spinner /></div>;
+}
+
+// A page, drawn. It runs in a frame of its own, apart from Iris, and loads what it links to (styles, scripts,
+// images) from its folder on the machine the conversation runs on.
+function HtmlPreview({ sessionId, path, name, version }) {
+  const [url, setUrl] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    setError(null);
+    api('previewUrl', sessionId, path).then(found => { if (alive) setUrl(found); }, e => { if (alive) setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); });
+    return () => { alive = false; };
+  }, [sessionId, path]);
+  if (error) return <div className="fp-empty error"><Icon name="alert" size={15} /> {error}</div>;
+  return url ? <iframe key={version} className="fp-html" src={url} title={`Page: ${name}`} sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock" />
+    : <div className="fp-empty"><Spinner /></div>;
 }
 
 function DirectoryPreview({ sessionId, listing, onOpen }) {
@@ -146,7 +180,8 @@ function DirectoryPreview({ sessionId, listing, onOpen }) {
   );
 }
 
-function Preview({ sessionId, path, toolsDone, manualVersion }) {
+const PAGE_TYPES = new Set(['html', 'htm']);
+function Preview({ sessionId, path, toolsDone, manualVersion, reveal, local }) {
   const [file, setFile] = useState(null);
   const [dirListing, setDirListing] = useState(null);
   const [error, setError] = useState(null);
@@ -185,11 +220,18 @@ function Preview({ sessionId, path, toolsDone, manualVersion }) {
     return () => { alive = false; };
   }, [sessionId, path, toolsDone, manualVersion]);
   useEffect(() => { setSource(false); setExpanded(false); setWrapOverride(null); scroller.current?.scrollTo(0, 0); }, [path]);
+  // A link to a line of a page shows its source, where the line is.
+  useEffect(() => { if (reveal && PAGE_TYPES.has(extOf(path))) setSource(true); }, [reveal?.at, path]);
   const ext = extOf(path);
   const cleanPath = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
   const parts = cleanPath.split('/');
   const crumbs = parts.length > 4 ? [parts[0], '…', ...parts.slice(-3)] : parts;
-  const isCode = file?.kind === 'text' && (ext !== 'md' || source);
+  const page = PAGE_TYPES.has(ext);
+  const rendered = (ext === 'md' || page) && !source;
+  const isCode = file?.kind === 'text' && !rendered;
+  // The page is drawn again when its file changed, and when asked to (Reload, Refresh).
+  const [reloads, setReloads] = useState(0);
+  const pageVersion = useMemo(() => `${reloads}:${manualVersion}:${file?.size ?? 0}:${file?.content?.length ?? 0}:${hashText(file?.content ?? '')}`, [reloads, manualVersion, file]);
   const codeView = useMemo(
     () => (isCode ? prepareCodePreview(file.content, { expanded, wrapOverride }) : null),
     [isCode, file, expanded, wrapOverride],
@@ -199,7 +241,9 @@ function Preview({ sessionId, path, toolsDone, manualVersion }) {
     <div className="fp-preview">
       <div className="fp-crumbs">
         <span className="fp-crumb-path">{crumbs.map((c, i) => <span key={i} className={i === crumbs.length - 1 ? 'last' : ''}>{c}</span>)}</span>
-        {file?.kind === 'text' && ext === 'md' && <button className={`tool-button ${source ? 'on' : ''}`} onClick={() => setSource(s => !s)} title={source ? 'Show preview' : 'Show source'} aria-label="Toggle source"><Icon name="code" size={16} /></button>}
+        {file?.kind === 'text' && page && rendered && <button className="tool-button" onClick={() => setReloads(n => n + 1)} title="Reload the page" aria-label="Reload page"><Icon name="refresh" size={15} /></button>}
+        {file?.kind === 'text' && page && local && <button className="tool-button" onClick={() => api('openPath', file.path ?? path)} title="Open in your browser" aria-label="Open in browser"><Icon name="externalLink" size={15} /></button>}
+        {file?.kind === 'text' && (ext === 'md' || page) && <button className={`tool-button ${!rendered ? 'on' : ''}`} onClick={() => setSource(s => !s)} title={source ? 'Show preview' : 'Show source'} aria-label="Toggle source"><Icon name="code" size={16} /></button>}
         {codeView && <button className={`tool-button ${codeView.wrapped ? 'on' : ''}`} disabled={codeView.maxLineLength > 50000 && expanded} onClick={() => setWrapOverride(!codeView.wrapped)} title={codeView.wrapped ? 'Disable line wrap' : 'Wrap lines'} aria-label="Toggle line wrap" aria-pressed={codeView.wrapped}><Icon name="wrap" size={15} /></button>}
         {file && <DownloadButton sessionId={sessionId} path={file.path ?? path} />}
       </div>
@@ -232,9 +276,9 @@ function Preview({ sessionId, path, toolsDone, manualVersion }) {
         {file?.kind === 'image' && (file.dataUrl ? <div className="fp-image"><ImagePreview src={file.dataUrl} alt={parts.at(-1)} /></div> : <div className="fp-empty">Image too large to preview · {sizeLabel(file.size)}</div>)}
         {file?.kind === 'pdf' && (file.dataUrl ? <PdfPreview dataUrl={file.dataUrl} name={parts.at(-1)} /> : <div className="fp-empty">PDF too large to preview · {sizeLabel(file.size)} (32 MB limit)</div>)}
         {file?.kind === 'binary' && <div className="fp-empty"><Icon name="fileAny" size={16} /> Binary file · {sizeLabel(file.size)}</div>}
-        {file?.kind === 'text' && (ext === 'md' && !source
-          ? <div className="fp-markdown"><Markdown text={file.content} sessionId={sessionId} documentPath={file.path ?? path} refreshKey={refreshKey} /></div>
-          : <CodeView view={codeView} ext={ext} />)}
+        {file?.kind === 'text' && (rendered && page ? <HtmlPreview sessionId={sessionId} path={file.path ?? path} name={parts.at(-1)} version={pageVersion} />
+          : rendered ? <div className="fp-markdown"><Markdown text={file.content} sessionId={sessionId} documentPath={file.path ?? path} refreshKey={refreshKey} /></div>
+          : <CodeView view={codeView} ext={ext} line={reveal?.line} lineAt={reveal?.at} />)}
         {file?.truncated && file.kind === 'text' && <div className="fp-truncated">First {sizeLabel(new TextEncoder().encode(file.content).length)} of {sizeLabel(file.size)}</div>}
       </div>
     </div>
@@ -242,7 +286,7 @@ function Preview({ sessionId, path, toolsDone, manualVersion }) {
 }
 
 // The change review: every file one turn changed, as diffs.
-function ChangesView({ sessionId, changes }) {
+function ChangesView({ sessionId, changes, cwd }) {
   return (
     <div className="fp-preview">
       <div className="fp-content changes">
@@ -252,7 +296,7 @@ function ChangesView({ sessionId, changes }) {
           return (
             <section key={change.path} className="change-file">
               <button className="change-head" onClick={() => openFile(sessionId, change.path)} title="Open file">
-                <Icon name={iconFor(change.path)} size={15} /><span className="change-path" title={change.path}>{change.path}</span>
+                <Icon name={iconFor(change.path)} size={15} /><span className="change-path" title={change.path}>{relativeSessionPath(cwd, change.path) ?? change.path}</span>
                 <span className="plus">+{added}</span><span className="minus">−{removed}</span>
               </button>
               <div className="change-body">
@@ -321,8 +365,9 @@ export function FilePane({ session }) {
       </div>
       <div className="fp-body">
         {state.active
-          ? <Preview key={`${session.id}\n${state.active}`} sessionId={session.id} path={state.active} toolsDone={toolsDone} manualVersion={version} />
-          : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} />
+          ? <Preview key={`${session.id}\n${state.active}`} sessionId={session.id} path={state.active} toolsDone={toolsDone} manualVersion={version}
+              reveal={state.reveal?.path === state.active ? state.reveal : null} local={local} />
+          : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} cwd={session.cwd} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
         {tree && (state.active || state.changes
           ? <div className="fp-tree-wrap" style={{ width: treeWidth }}>{treeHandle}<div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div></div>

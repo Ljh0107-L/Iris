@@ -1570,7 +1570,8 @@ export class SessionManager extends EventEmitter {
       const question = {
         requestId: request.id, method: request.method, title: request.title, message: request.message,
         options: request.options, placeholder: request.placeholder, prefill: request.prefill,
-        ...(isCliSession(record) ? { permission: true } : {}),
+        // From a CLI this is a tool asking for permission, unless the CLI's model is asking the person something.
+        ...(isCliSession(record) && request.ask !== true ? { permission: true } : {}),
         ...(request.header ? { header: request.header } : {}),
         ...(request.multiSelect ? { multiSelect: true } : {}),
         ...(Array.isArray(request.optionDetails) ? { optionDetails: request.optionDetails } : {}),
@@ -1653,6 +1654,8 @@ export class SessionManager extends EventEmitter {
   // waiting for the current assistant turn and its tool calls to finish like a steering message does.
   async prompt(id, text, attachments = [], { interrupt = false } = {}) {
     const record = this.record(id);
+    // When the conversation was last written to: the sidebar lists a folder's conversations by it.
+    if (!record.spare) this.#save(record, { lastMessageAt: Date.now() });
     if (isCliSession(record)) {
       let session = await this.ensureStarted(id);
       let runtime = this.runtimes.get(id);
@@ -2357,17 +2360,21 @@ export class SessionManager extends EventEmitter {
     await runtime.starting?.catch(() => {});
   }
 
-  async shutdown() {
+  async shutdown({ waitMs = 3000 } = {}) {
     clearInterval(this.sweeper);
     this.warmSequence++; // an outstanding folder/binary probe must not start a new spare on quit
     const spares = [...this.spares.values()];
     this.spares.clear();
-    await Promise.all(spares.map(spare => this.#stopSpare(spare)));
-    await Promise.all([...this.runtimes.keys()].map(id => this.close(id)));
-    await this.egress?.close();
-    // Nothing of this app keeps running on this Mac after it quits: its relay stops every local Pi (they
+    // Quitting does not wait on a host: a conversation there keeps running in the host's relay whether or not
+    // this Mac says goodbye, and a host that is slow or gone must not hold the app open.
+    const within = (work, ms) => Promise.race([work, new Promise(resolve => setTimeout(resolve, ms).unref?.())]);
+    await within(Promise.all([
+      ...spares.map(spare => this.#stopSpare(spare)),
+      ...[...this.runtimes.keys()].map(id => this.close(id)),
+    ]).then(() => this.egress?.close()).catch(() => {}), waitMs);
+    // Nothing of this app keeps running on this Mac after it quits: its relay stops every local agent (they
     // resume from their session files when opened again). Sessions on SSH hosts keep running there.
     await this.#localRelay(['shutdown']).catch(() => {});
-    await closeSshMux();
+    await within(closeSshMux(), 1500);
   }
 }

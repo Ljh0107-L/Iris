@@ -158,6 +158,26 @@ test('a new conversation is named by Codex after its first reply, in a request t
   assert.equal(f.calls('thread/start').filter(c => c.params.ephemeral).length, 1);
 });
 
+test('a question Codex asks is a card for each part, and the answers reach Codex by question', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'ask me first' });
+  const first = await a.next(e => e.type === 'extension_ui_request');
+  // Not a permission request: a question, with what each choice means.
+  assert.deepEqual([first.ask, first.method, first.header, first.title, first.options], [true, 'select', 'Colour', 'Which colour do you prefer?', ['Red', 'Green']]);
+  assert.deepEqual(first.optionDetails, [{ label: 'Red', description: 'Warm' }, { label: 'Green', description: 'Calm' }]);
+  const from = a.events.length;
+  a.adapter.handle({ type: 'extension_ui_response', id: first.id, value: 'Green' });
+  const second = await a.next(e => e.type === 'extension_ui_request' && e.id !== first.id);
+  assert.deepEqual([second.ask, second.method, second.header, second.title], [true, 'input', 'Reason', 'Why?']);
+  assert.ok(!f.calls('reply').some(call => call.params?.answers), 'nothing goes back until every part is answered');
+  a.adapter.handle({ type: 'extension_ui_response', id: second.id, value: 'It is restful' });
+  await a.next(settled);
+  assert.deepEqual(f.calls('reply').at(-1).params, { answers: { colour: { answers: ['Green'] }, why: { answers: ['It is restful'] } } });
+  assert.match(lastReply(a.events).content.at(-1).text, /Answers: /);
+  assert.equal(a.events.slice(from).filter(e => e.type === 'extension_ui_dismiss').length, 2);
+});
+
 test('a command waits for approval, and the answer reaches Codex', { timeout: 20000 }, async t => {
   for (const [answer, decision, text] of [['Allow once', 'accept', 'Tests pass.'], ['Reject', 'decline', 'Not run.']]) {
     const f = fixture(t), a = f.start();

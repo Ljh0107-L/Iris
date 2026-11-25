@@ -172,12 +172,41 @@ export const BUILTIN_COMMANDS = [
 
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const toBase64 = buffer => { let s = ''; const bytes = new Uint8Array(buffer); for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
+// A picture goes to the agent no larger than a model reads it. Models scale a large picture down themselves
+// (to about 1,600 to 2,000 pixels on its long side), so a Retina screenshot or a photo sent whole is megabytes
+// that only cost time: through the app, the relay and, for an agent on a host, the SSH connection, before the
+// agent can start. A screenshot stays a PNG (its text stays sharp); a picture that is still large as a PNG is
+// a photograph, and goes as a JPEG.
+const IMAGE_MAX_EDGE = 2048, IMAGE_KEEP_BYTES = 1_200_000;
+export async function fitImage(file) {
+  if (file.type === 'image/gif' || typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return file; // (a GIF may move)
+  let bitmap;
+  try { bitmap = await createImageBitmap(file); } catch { return file; } // not a picture this browser can read: sent as it is
+  try {
+    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    if (scale === 1 && file.size <= IMAGE_KEEP_BYTES) return file;
+    const width = Math.max(1, Math.round(bitmap.width * scale)), height = Math.max(1, Math.round(bitmap.height * scale));
+    const draw = background => {
+      const canvas = new OffscreenCanvas(width, height), context = canvas.getContext('2d');
+      if (background) { context.fillStyle = background; context.fillRect(0, 0, width, height); }
+      context.imageSmoothingQuality = 'high';
+      context.drawImage(bitmap, 0, 0, width, height);
+      return canvas;
+    };
+    let blob = file.type === 'image/png' ? await draw(null).convertToBlob({ type: 'image/png' }) : null;
+    if (!blob || blob.size > IMAGE_KEEP_BYTES) blob = await draw('#ffffff').convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+    if (blob.size >= file.size) return file;
+    const name = (file.name || 'image').replace(/\.[^.]+$/, '') + (blob.type === 'image/jpeg' ? '.jpg' : '.png');
+    return new File([blob], name, { type: blob.type });
+  } finally { bitmap.close?.(); }
+}
 async function attachmentFromFile(file) {
   const path = window.iris.pathForFile?.(file) ?? '';
   if (IMAGE_TYPES.includes(file.type)) {
     if (file.size > 20 << 20) throw new Error(`${file.name} is too large (images up to 20 MB)`);
-    const data = toBase64(await file.arrayBuffer());
-    return { kind: 'image', name: file.name || 'image.png', mimeType: file.type, data, preview: `data:${file.type};base64,${data}` };
+    const fitted = await fitImage(file);
+    const data = toBase64(await fitted.arrayBuffer());
+    return { kind: 'image', name: fitted.name || file.name || 'image.png', mimeType: fitted.type, data, preview: `data:${fitted.type};base64,${data}` };
   }
   if (path) return { kind: 'file', name: file.name, path };
   if (file.size > 50 << 20) throw new Error(`${file.name} is too large (files up to 50 MB)`);
@@ -442,9 +471,10 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
       try {
         if (cli && IMAGE_TYPES.includes(file.type)) {
           if (session?.cli?.image === false) throw new Error('This Antigravity CLI does not accept images.');
-          if (file.size > ANTIGRAVITY_IMAGE_LIMIT) throw new Error(`${file.name} is too large (Antigravity accepts images up to 4 MB each).`);
         }
         const att = await attachmentFromFile(file);
+        // (Measured after the picture was fitted to what a model reads: a large one has become a small one.)
+        if (cli && att.kind === 'image' && att.data.length * 3 / 4 > ANTIGRAVITY_IMAGE_LIMIT) throw new Error(`${file.name} is too large (Antigravity accepts images up to 4 MB each).`);
         const latestText = onCancel ? editorRef.current.text : getState().composerDrafts[draftKey]?.text ?? '';
         setAttachments(list => {
           const next = [...list, { ...att, key: Math.random().toString(36).slice(2) }];

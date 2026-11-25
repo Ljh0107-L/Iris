@@ -114,9 +114,24 @@ test('Antigravity keeps a first draft awaiting sign-in without sending to any Pi
     { engine: 'antigravity', environmentId: 'ssh:host', cwd: '/remote/work', prompt: 'draft for the SSH host', creationId: pendingRemote });
   store.setDraft({ engine: 'pi' });
   assert.deepEqual(store.getState().draft.model, piModel);
-  store.set({ questions: { [session.id]: [{ method: 'select', requestId: 'permission', options: ['Allow once'] }] } });
+  store.set({ questions: { [session.id]: [{ method: 'select', requestId: 'permission', permission: true, options: ['Allow once'] }] } });
   await assert.rejects(store.sendPrompt(session.id, 'Allow once'), /Choose a permission option/);
   assert.ok(calls.every(([method]) => method !== 'answer' && method !== 'prompt'));
+});
+
+test('a CLI permission request holds a typed message back; a question the agent asked takes it as the answer', async () => {
+  reset();
+  const calls = [];
+  invoke = (method, ...args) => { calls.push([method, ...args]); return Promise.resolve(null); };
+  store.set({ sessions: [{ id: 'agy', engine: 'antigravity', status: 'connected', streaming: false, cli: {} }], activeId: 'agy', transcripts: {}, composerDrafts: {}, notices: [],
+    questions: { agy: [{ method: 'select', requestId: 'p1', permission: true, options: ['Allow once'] }] } });
+  await assert.rejects(store.sendPrompt('agy', 'Allow once'), /Choose a permission option/);
+  assert.ok(!calls.some(([method]) => method === 'prompt'));
+  store.set({ questions: { agy: [{ method: 'select', requestId: 'asked', options: ['red', 'green'] }] } });
+  await store.sendPrompt('agy', 'teal');
+  assert.deepEqual(calls.filter(([method]) => method === 'prompt').map(([, id, text, , options]) => [id, text, options]), [['agy', 'teal', { interrupt: false }]]);
+  // And it is on the page at once, before the agent has said it received it.
+  assert.deepEqual(store.getState().transcripts.agy.messages.map(m => [m.role, m.content[0].text, m.__optimistic]), [['user', 'teal', true]]);
 });
 
 test('Antigravity startup progress and failure stay with the saved conversation and its draft', async () => {
@@ -194,7 +209,8 @@ test('completing sign-in in Settings supersedes a stale background check', async
   reset();
   const oldCheck = deferred(), newCheck = deferred();
   let probes = 0;
-  invoke = () => (++probes === 1 ? oldCheck.promise : newCheck.promise);
+  // (What was found last time is asked for beside the check; here nothing was.)
+  invoke = method => method === 'cliAccountLast' ? Promise.resolve(null) : (++probes === 1 ? oldCheck.promise : newCheck.promise);
   const old = store.refreshCliReadiness('local');
   store.reportCliAccount('local', { installed: true, signedIn: true });
   assert.equal(store.getState().cliReadiness.local, 'ready');
@@ -238,7 +254,7 @@ test('failed first prompt does not redirect a different active conversation', as
 
 for (const ultra of [true, false]) test(`queued prompt respects Ultra while retaining normal interruption (Ultra: ${ultra})`, async t => {
   const record = { id: 'a', title: 'Existing', ultra };
-  const manager = new SessionManager({ store: { sessions: [record], settings: { providers: [], defaults: {} } }, environments: () => [], local: {} });
+  const manager = new SessionManager({ store: { sessions: [record], settings: { providers: [], defaults: {} }, saveSessions() {} }, environments: () => [], local: {} });
   t.after(() => clearInterval(manager.sweeper));
   const calls = []; let sent = 0;
   const session = { prompt: async () => { calls.push('prompt'); return { disposition: ++sent === 1 ? 'queued' : 'started' }; },
@@ -249,6 +265,7 @@ for (const ultra of [true, false]) test(`queued prompt respects Ultra while reta
   manager.ensureStarted = async () => session;
   const result = await manager.prompt('a', 'additional instruction', [], { interrupt: true });
   assert.equal(result.interrupted, !ultra);
+  assert.ok(record.lastMessageAt > 0, 'the conversation remembers when it was last written to');
   assert.deepEqual(calls, ultra ? ['prompt'] : ['prompt', 'abortBash', 'clearQueue', 'abort', 'prompt']);
 });
 

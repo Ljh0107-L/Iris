@@ -46,3 +46,10 @@ test('group keys do not collide on delimiter characters in hosts or paths', () =
   const sessions = [chat('a', '/b|/c', { noFolder: false, environmentId: 'ssh:a' }), chat('b', '/c', { noFolder: false, environmentId: 'ssh:a|/b' })];
   assert.equal(groupSessions(sessions).length, 2);
 });
+
+test('within a folder, the conversation written to last comes first', () => {
+  const at = (id, createdAt, lastMessageAt) => ({ id, environmentId: 'local', environmentLabel: 'This computer', cwd: '/work/app', project: 'app', createdAt, ...(lastMessageAt ? { lastMessageAt } : {}) });
+  // Source order is by creation, newest first; "old" was written to after "new" was started.
+  const [group] = groupSessions([at('new', 300), at('middle', 200, 250), at('old', 100, 400)]);
+  assert.deepEqual(group.items.map(s => s.id), ['old', 'new', 'middle']);
+});

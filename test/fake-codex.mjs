@@ -18,7 +18,9 @@ process.stdin.on('data', d => { buffer += d; let i; while ((i = buffer.indexOf('
 process.stdin.on('end', () => process.exit(0));
 function handle(m) {
   if (m.method) note(m.method, m.params ?? m.result);
-  if (m.method === undefined) { note('reply', m.result); if (m.result && m.result.decision) { const ok = m.result.decision.startsWith('accept');
+  if (m.method === undefined) { note('reply', m.result);
+    if (m.result && m.result.answers) { send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-3', delta: 'Answers: ' + JSON.stringify(m.result.answers) } }); finish('completed'); return; }
+    if (m.result && m.result.decision) { const ok = m.result.decision.startsWith('accept');
       send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-1', command: 'npm test', status: ok ? 'completed' : 'declined', aggregatedOutput: ok ? 'ok 12 tests' : null, exitCode: ok ? 0 : null } } });
       send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-2', delta: ok ? 'Tests pass.' : 'Not run.' } }); finish('completed'); } return; }
   const reply = result => send({ id: m.id, result });
@@ -48,6 +50,10 @@ function handle(m) {
       send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
       const text = m.params.input.find(i => i.type === 'text').text;
       if (text.includes('wait')) return; // stays active until interrupted
+      // The model asks the person something (request_user_input): a server request, answered by question id.
+      if (text.includes('ask')) return send({ id: 'input-1', method: 'item/tool/requestUserInput', params: { threadId: 'thread-1', turnId: active, itemId: 'ask-1', isBlocking: true, autoResolutionMs: null,
+        questions: [{ id: 'colour', header: 'Colour', question: 'Which colour do you prefer?', isOther: true, isSecret: false, options: [{ label: 'Red', description: 'Warm' }, { label: 'Green', description: 'Calm' }] },
+          { id: 'why', header: 'Reason', question: 'Why?', isOther: false, isSecret: false, options: null }] } });
       if (text.includes('run')) { send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'cmd-1', command: 'npm test', status: 'inProgress' } } });
         return send({ id: 'approval-1', method: 'item/commandExecution/requestApproval', params: { threadId: 'thread-1', turnId: active, itemId: 'cmd-1', command: 'npm test', cwd: '/w', reason: 'runs the test suite' } }); }
       // Codex's own agent, as the real CLI reports one: a "started" activity naming the agent's thread, that

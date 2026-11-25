@@ -39,3 +39,16 @@ test('anchors, external destinations and unsafe schemes are classified explicitl
   assert.equal(headingSlug('第一部分 · 拆解 WRF'), '第一部分--拆解-wrf');
 });
 
+
+test('links to a line of a file: file:///…#L12 as Antigravity writes them, path:12 as Codex does', () => {
+  assert.deepEqual(resolveMarkdownReference('file:///home/me/app/notes.txt#L2'), { kind: 'file', path: '/home/me/app/notes.txt', fragment: 'L2', line: 2 });
+  assert.equal(resolveMarkdownReference('file:///home/me/app/a.js#L12-L20').line, 12);
+  assert.deepEqual(resolveMarkdownReference('/home/me/app/src/app.ts:12'), { kind: 'file', path: '/home/me/app/src/app.ts', fragment: '', line: 12 });
+  assert.deepEqual(resolveMarkdownReference('src/app.ts:12:3', '/home/me/app/README.md'), { kind: 'file', path: '/home/me/app/src/app.ts', fragment: '', line: 12 });
+  // A bare name with a line is a file, not a URL scheme; a real scheme is still refused.
+  assert.deepEqual(resolveMarkdownReference('app.ts:7'), { kind: 'file', path: 'app.ts', fragment: '', line: 7 });
+  assert.equal(resolveMarkdownReference('javascript:alert(1)').kind, 'blocked');
+  assert.equal(resolveMarkdownReference('vscode://file/x:12').kind, 'blocked');
+  // No line: nothing is added.
+  assert.deepEqual(resolveMarkdownReference('file:///home/me/site/index.html'), { kind: 'file', path: '/home/me/site/index.html', fragment: '' });
+});

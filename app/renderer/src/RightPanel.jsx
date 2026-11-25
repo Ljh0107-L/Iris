@@ -169,7 +169,7 @@ function EnvironmentCard({ session }) {
   return (
     <Card title="Environment" collapsible={false}>
       <div className="panel-row"><Icon name={local ? 'laptop' : 'terminal'} size={18} /><span className="panel-row-text">{local ? 'This computer' : session.environmentLabel}</span></div>
-      {cwd && <div className="panel-row" title={cwd}><Icon name="folder" size={18} /><span className="panel-row-text">{session.project || baseName(cwd)}<span className="muted"> · {shortPath(parent, home)}</span></span></div>}
+      {cwd && <div className="panel-row" title={cwd}><Icon name="folder" size={18} /><span className="panel-row-text">{session.noFolder ? baseName(cwd) : session.project || baseName(cwd)}<span className="muted"> · {shortPath(parent, home)}</span></span></div>}
       {branch && <div className="panel-row"><Icon name="branch" size={18} /><span className="panel-row-text">{branch}</span></div>}
     </Card>
   );
