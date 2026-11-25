@@ -1,9 +1,9 @@
 import { Fragment, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { engineLabel, isCliEngine } from './engines.js';
-import { Icon } from './Icons.jsx';
+import { Icon, IrisMark } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
 import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
-import { api, editMessage, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
+import { api, editMessage, firstSentAt, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
 import { ImagePreview } from './ImagePreview.jsx';
@@ -107,7 +107,12 @@ function describeCall(call) {
     case 'grep': return { verb: 'Searched for', subject: a.pattern ?? '', detail: a.path };
     case 'find': return { verb: 'Found files', subject: a.pattern ?? a.path ?? '' };
     case 'ls': return { verb: 'Listed', subject: a.path ?? '.' };
-    default: return { verb: call.name, subject: JSON.stringify(a).slice(0, 160), raw: true };
+    default: {
+      // A tool this page has no words for: its name, and the one thing it was given that reads as words
+      // (a path, a query). Never its input as JSON: `{}` after a name says nothing.
+      const hint = path ? baseOf(path) : Object.values(a).find(v => typeof v === 'string' && v.trim() && v.length <= 200);
+      return hint ? { verb: call.name, subject: String(hint).split('\n')[0].slice(0, 120), title: path || undefined } : { subject: call.name };
+    }
   }
 }
 
@@ -130,9 +135,15 @@ function EditDiff({ hunks }) {
 const Caret = ({ open }) => <Icon name={open ? 'caretDown' : 'caretRight'} size={14} className="step-caret" />;
 const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
 
-function ToolCall({ call, tool }) {
-  const [open, setOpen] = useDisclosure(`tool:${call.id}`);
-  const { onOpenFile, onFileContextMenu, sessionId } = useContext(DisclosureContext);
+// bare: the step is the only one in its group, whose line already says what it is. Opening the group then
+// shows what the step did, not the same line once more with another arrow to press.
+function ToolCall({ call, tool, bare = false }) {
+  const [opened, setOpen] = useDisclosure(`tool:${call.id}`);
+  const open = bare || opened;
+  const { onOpenFile, onFileContextMenu, sessionId, setExpanded } = useContext(DisclosureContext);
+  // Shown open as the only step, it stays open when the group gains another (a thought, a second command):
+  // what someone is reading must not fold away under them.
+  useEffect(() => { if (bare) setExpanded(previous => previous[`tool:${call.id}`] ? previous : { ...previous, [`tool:${call.id}`]: true }); }, [bare, call.id, setExpanded]);
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
   const trace = call.__trace;
   const { verb, subject, detail, mono, title } = describeCall(call);
@@ -148,7 +159,7 @@ function ToolCall({ call, tool }) {
   const isMcp = call.name?.startsWith('mcp__');
   return (
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
-      <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
+      {!bare && <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && filePath) { openTarget(filePath); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {status === 'running' && <Spinner size={12} />}
@@ -166,7 +177,7 @@ function ToolCall({ call, tool }) {
         {status === 'skipped' && <span className="step-duration">Skipped</span>}
         {failed && <span className="step-failed">{status === 'cancelled' ? 'Cancelled' : status === 'timed_out' ? 'Timed out' : 'Failed'}</span>}
         <Caret open={open} />
-      </div>
+      </div>}
       {open && (
         <div className="step-detail tool-detail">
           {detailState.pending ? <HistoryLoading {...detailState} /> : <>
@@ -323,7 +334,7 @@ function WorkGroup({ items, tools, live }) {
       )}
       {open && <div className="work-body">
         {items.flatMap(item => item.kind === 'tools'
-          ? item.calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)
+          ? item.calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} bare={items.length === 1 && calls.length === 1} />)
           : [<WorkNote key={item.key} item={item} />])}
       </div>}
     </div>
@@ -768,19 +779,33 @@ function WorkingRow({ session, transcript, sending = false }) {
       opening: 'Opening conversation…',
       configuring: 'Restoring conversation…',
     }[session.phase] ?? connecting;
-    return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
+    // A first message has been sent and its conversation is being opened: to the person that is the agent
+    // thinking about it, so it reads as that, timed from the moment they sent it. What takes real time and
+    // has something to say (a host being set up, an upload with its size) still says it.
+    const sent = isPendingSession(session.id) ? transcript.messages.findLast(m => m.role === 'user')?.timestamp : null;
+    if (sent) {
+      const setup = session.statusMessage || (isClaude && ccPrep?.status === 'preparing' ? ccPrep.message : null) || (envPrep?.status === 'preparing' ? envPrep.message : null);
+      const elapsed = Math.max(0, Date.now() - sent);
+      return <div className="working"><IrisMark size={16} className="working-mark" />{elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}<span className="shimmer">{setup || 'Thinking'}</span></div>;
+    }
+    return <div className="working"><IrisMark size={16} className="working-mark" /><span className="shimmer">{phase}</span></div>;
   }
   // Sent, and the agent has not started the turn yet: no timer from the previous turn.
-  if (sending && !session?.streaming) return <div className="working"><span className="working-dot" /><span className="shimmer">Thinking</span></div>;
+  // The first message of a conversation is timed from when it was sent (the conversation was opened for it).
+  const first = session ? firstSentAt(session.id) : null;
+  if (sending && !session?.streaming) {
+    const waited = first ? Date.now() - first : 0;
+    return <div className="working"><IrisMark size={16} className="working-mark" />{waited >= 1000 && <span className="working-meta">{seconds(waited)}</span>}<span className="shimmer">Thinking</span></div>;
+  }
   const messages = transcript.messages;
   let from = messages.length; while (from > 0 && messages[from - 1].role !== 'user') from--;
   const turn = messages.slice(from);
-  const startedAt = messages[from - 1]?.timestamp ?? turn[0]?.__timing?.start ?? transcript.live?.__t0;
+  const startedAt = first ?? messages[from - 1]?.timestamp ?? turn[0]?.__timing?.start ?? transcript.live?.__t0;
   const live = transcript.live;
   // Real output tokens of the model calls finished so far this turn (no live estimate).
   const tokens = turn.reduce((n, m) => n + (m.role === 'assistant' ? m.usage?.output ?? 0 : 0), 0);
   const lastBlock = live?.content?.filter(Boolean).at(-1);
-  const pending = messages.at(-1)?.__optimistic;
+  const pending = messages.at(-1)?.__optimistic && !messages.at(-1).__first;
   const state = pending ? 'Interrupting…'
     : (session?.compacting ?? transcript.compacting) ? 'Compacting conversation'
     : transcript.retry ? `Reconnecting to model · retry ${transcript.retry.attempt}/${transcript.retry.maxAttempts}`
@@ -789,7 +814,7 @@ function WorkingRow({ session, transcript, sending = false }) {
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
   return (
     <div className="working">
-      <span className="working-dot" />
+      <IrisMark size={16} className="working-mark" />
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
       {tokens > 0 && <span className="working-meta">{formatTokens(tokens)} tokens</span>}
       <span className="shimmer">{session?.activityLabel ?? state}</span>

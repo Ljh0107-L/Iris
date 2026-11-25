@@ -466,8 +466,8 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   // Images for a model that can't read them would be dropped while still showing in your message, so say so
   // as soon as one is attached and hold the message until they are removed or another model is chosen.
   const imagesRefused = !!textOnlyModel && attachments.some(a => a.kind === 'image');
-  // Codex takes a message while it works; Antigravity has to be stopped first.
-  const blocked = sendBlock || imagesRefused || (cli && session && ((working && activeEngine !== 'codex') || session.status !== 'connected' || session.cli?.authRequired));
+  // A message can be sent while the agent works: Codex reads it before its next step, the others stop and start on it.
+  const blocked = sendBlock || imagesRefused || (cli && session && (session.status !== 'connected' || session.cli?.authRequired));
   const submit = async ({ queue = false } = {}) => {
     if (blocked) return;
     let receipt;

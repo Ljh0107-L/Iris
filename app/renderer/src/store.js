@@ -189,6 +189,7 @@ window.iris.subscribe(({ channel, payload }) => {
           reloadTranscript(payload.id); refreshStats(payload.id);
         } }
       if (payload.event.type === 'agent_settled') {
+        firstSent.delete(payload.id);
         if (state.activeId === payload.id && !transcriptOf(payload.id).history?.viewingOlder) reloadTranscript(payload.id);
         if (!isCliEngine(state.sessions.find(s => s.id === payload.id)?.engine)) scheduleStats(payload.id);
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
@@ -749,6 +750,11 @@ function scheduleStats(id) {
   statsTimers.set(id, setTimeout(() => { statsTimers.delete(id); refreshStats(id); }, 120));
 }
 
+// When the first message of a conversation was sent, so that the wait shown for its reply is counted from the
+// moment the person pressed Send, not from when the conversation had been opened for it.
+const firstSent = new Map();
+export const firstSentAt = id => firstSent.get(id) ?? null;
+
 export async function startSession(text, attachments = []) {
   let { draft } = state;
   const claude = draft.engine === 'claude-code', cli = isCliEngine(draft.engine);
@@ -764,12 +770,14 @@ export async function startSession(text, attachments = []) {
   const blocked = cli && !draftCliAccount(draft) && cliSendBlock(state.cliReadiness[readinessKey(draft.engine, draft.environmentId)], draft.engine);
   if (blocked) throw new Error(blocked);
   const pendingId = `pending:${++nextPendingId}`;
+  const sentAt = Date.now();
   const environmentLabel = state.environments.find(env => env.id === draft.environmentId)?.label ?? 'the selected machine';
-  const pendingSession = { id: pendingId, title: 'New conversation', status: 'connecting', phase: claude || (cli && draft.environmentId !== 'local') ? 'preparing' : 'starting',
+  // Named by its first words from the start, as its record will be once it exists.
+  const pendingSession = { id: pendingId, title: text.trim().split('\n')[0].slice(0, 60) || 'New conversation', status: 'connecting', phase: claude || (cli && draft.environmentId !== 'local') ? 'preparing' : 'starting',
     environmentId: draft.environmentId, environmentLabel, engine: draft.engine, cwd: draft.cwd ?? '', streaming: true };
   const clearPending = s => { const { [pendingId]: _, ...remaining } = s.pendingSessions; return remaining; };
   set({ view: 'session', activeId: pendingId, pendingSessions: { ...state.pendingSessions, [pendingId]: pendingSession },
-    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: text || attachments.length ? [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
+    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: text || attachments.length ? [{ role: 'user', timestamp: sentAt, content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
   try {
     if (models) {
       await models;
@@ -784,10 +792,16 @@ export async function startSession(text, attachments = []) {
         : { ...target, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra });
     set(s => ({ ...(s.activeId === pendingId ? { activeId: session.id } : {}), pendingSessions: clearPending(s),
       ...(draft.ultra && !claude && !cli && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
-      transcripts: { ...s.transcripts, [session.id]: s.transcripts[session.id] ?? { ...emptyTranscript(), loaded: true }, [pendingId]: undefined },
+      // The message stays on screen while the conversation takes it: it is shown as sent until the agent's
+      // own copy of it arrives and replaces it (or the send fails, and it goes back to the message box).
+      transcripts: { ...s.transcripts, [session.id]: s.transcripts[session.id] ?? { ...emptyTranscript(), loaded: true,
+        messages: (s.transcripts[pendingId]?.messages ?? []).map(message => ({ ...message, __optimistic: true, __first: true })) }, [pendingId]: undefined },
       history: s.history.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       future: s.future.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
+    firstSent.set(session.id, sentAt);
+    // (If the message could not be sent after all, its copy on screen goes too.)
+    const unsend = () => { firstSent.delete(session.id); const t = transcriptOf(session.id); if (t.messages.some(m => m.__first)) setTranscript(session.id, { ...t, messages: t.messages.filter(m => !m.__first) }); };
     if (cli) {
       if (state.activeId === session.id) api('focusSession', session.id).catch(() => {});
       if (text.trim() || attachments.length) {
@@ -802,13 +816,14 @@ export async function startSession(text, attachments = []) {
         };
         if (session.status === 'connected' && !session.cli?.authRequired) {
           try { await sending(session.id, () => api('prompt', session.id, text, attachments)); }
-          catch (error) { saveFirstDraft(); notify(error.message, 'error'); }
-        } else saveFirstDraft(); // Reconnect or sign-in never sends a saved draft.
+          catch (error) { unsend(); saveFirstDraft(); notify(error.message, 'error'); }
+        } else { unsend(); saveFirstDraft(); } // Reconnect or sign-in never sends a saved draft.
       }
       api('updateDefaults', { environmentId: draft.environmentId, engine: draft.engine }).then(setSettings).catch(() => {});
     } else {
       warnIfNoImages(draft.model, attachments);
-      await sending(session.id, () => api('prompt', session.id, text, attachments));
+      try { await sending(session.id, () => api('prompt', session.id, text, attachments)); }
+      catch (error) { unsend(); throw error; }
       api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, engine: draft.engine, thinkingLevel: draft.thinkingLevel, effort: draft.effort, speed: draft.speed }).then(setSettings).catch(() => {});
     }
   } catch (error) {
@@ -827,7 +842,13 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
     if (state.questions[id]?.length) throw new Error('Choose a permission option in the conversation.');
     // The one command the desktop runs for Codex itself; everything else is a message to the CLI.
     if (session.engine === 'codex' && /^\/compact\s*$/.test(text) && !attachments.length) { await api('compact', id); return; }
-    await sending(id, () => api('prompt', id, text, attachments));
+    // Antigravity cannot take a message while it works, so sending one stops the turn and starts on the
+    // message, as with Pi: it shows at once, and is replaced by the CLI's own copy when the turn begins.
+    const interrupts = session.engine !== 'codex' && !!session.streaming;
+    const shown = interrupts ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true } : null;
+    if (shown) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, shown] });
+    try { await sending(id, () => api('prompt', id, text, attachments, { interrupt: interrupts })); }
+    catch (error) { if (shown) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== shown) }); throw error; }
     return;
   }
   const pending = state.questions[id]?.find(q => q.method === 'select' || q.method === 'input' || q.method === 'editor');

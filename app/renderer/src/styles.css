@@ -319,7 +319,6 @@ code, pre, kbd { font-family: var(--mono); }
 .ask-a::before { content: '↳ '; color: var(--faint); }
 
 .working { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14.5px; padding: 2px 0; }
-.working-dot { width: 9px; height: 9px; border-radius: 2px; background: var(--accent); animation: spin-square 1.4s ease-in-out infinite; }
 @keyframes spin-square { 50% { transform: rotate(90deg) scale(.75); border-radius: 50%; } }
 .shimmer { background: linear-gradient(90deg, #8f8d88 0%, #ecebe6 50%, #8f8d88 100%); background-size: 200% 100%; -webkit-background-clip: text; color: transparent; animation: shimmer 1.8s linear infinite; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }

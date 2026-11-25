@@ -222,7 +222,7 @@ function SessionView({ session }) {
   }, [session.id]);
   const isClaude = session.engine === 'claude-code', cli = isCliEngine(session.engine);
   const placeholder = cli
-    ? questions.length ? 'Choose a permission option above…' : session.cli?.authRequired ? 'Sign in to send a message…' : session.streaming && session.engine !== 'codex' ? `${engineLabel(session.engine)} is working. Stop it to send something new…` : `Message ${engineLabel(session.engine)}…`
+    ? questions.length ? 'Choose a permission option above…' : session.cli?.authRequired ? 'Sign in to send a message…' : `Message ${engineLabel(session.engine)}…`
     : questions.length ? 'Answer the agent’s question…'
     : !isClaude && ultraWorking
       ? 'Add to the task, @ to mention, / for actions'
@@ -314,9 +314,16 @@ function Header({ session, view }) {
   const [title, setTitle] = useState('');
   const local = session?.environmentId === 'local';
   const activeSession = view === 'session' && session && !isPendingSession(session.id);
+  // A conversation that is still being opened already has its place in the window: its name and machine are
+  // shown, and the tools appear when there is a conversation for them to act on.
+  const opening = view === 'session' && session && isPendingSession(session.id);
   return (
-    <header className={`main-head drag ${activeSession ? '' : 'welcome-head'} ${sidebar ? '' : 'no-sidebar'}`}>
+    <header className={`main-head drag ${activeSession || opening ? '' : 'welcome-head'} ${sidebar ? '' : 'no-sidebar'}`}>
       {!sidebar && <div className="window-tools no-drag"><button className="tool-button" onClick={toggleSidebar} aria-label="Show sidebar"><Icon name="sidebarToggle" size={18} /></button></div>}
+      {opening && <div className="header-context">
+        <span className="title-button opening" title={session.title}><EngineLogo engine={session.engine ?? 'pi'} size={16} className="title-engine-logo" title={engineLabel(session.engine)} /><span>{session.title}</span></span>
+        {!local && session.environmentLabel && <span className="header-env-badge"><Icon name="terminal" size={11} />{session.environmentLabel}</span>}
+      </div>}
       {activeSession ? <>
         {renaming
           ? <input className="title-input no-drag" autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => { setRenaming(false); if (title.trim()) api('rename', session.id, title.trim()); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false); }} />
@@ -397,7 +404,19 @@ export function App() {
       <main className="main">
         <Header session={session} view={view} />
         {view === 'session' && session ? (pending
-          ? <div className="session-view"><div className="session-main"><Transcript session={session} transcript={pendingTranscript ?? emptyTranscript()} questions={[]} /></div></div>
+          ? <div className="session-view"><div className="session-main">
+              <Transcript session={session} transcript={pendingTranscript ?? emptyTranscript()} questions={[]} />
+              {/* The message box is where it will be, so nothing moves when the conversation is there. */}
+              <div className="dock"><div className="composer-shell">
+                <div className="composer with-toolbar opening">
+                  <div className="composer-box"><div className="composer-row">
+                    <span className="composer-plus" aria-hidden="true"><Icon name="plus" size={22} stroke={1.45} /></span>
+                    <textarea rows={1} disabled aria-label="Message" placeholder={`${engineLabel(session.engine)} is working on your first message…`} />
+                  </div></div>
+                  <div className="composer-toolbar" aria-hidden="true" />
+                </div>
+              </div></div>
+            </div></div>
           : <SessionView key={session.id} session={session} />) : <NewSessionView />}
       </main>
       {settingsOpen && <SettingsPage />}

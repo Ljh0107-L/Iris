@@ -154,6 +154,20 @@ lines.on('line', line => {
         tool('s-2', 'Run update_steps', { steps: [{ status: 'done', title: 'Start sub-agent' }, { status: 'done', title: 'Report' }] });
         chunk('It said hi.'); reply(r.id, { stopReason: 'end_turn' }); break;
       }
+      // A turn that uses the CLI's ordinary tools, reported as the real CLI reports them (kind, title, rawInput).
+      if (text === 'tools') {
+        const tool = (id, fields, done = {}) => { update('tool_call', { toolCallId: id, status: 'in_progress', ...fields }); update('tool_call_update', { toolCallId: id, status: 'completed', ...fields, ...done }); };
+        update('agent_thought_chunk', { content: { type: 'text', text: 'First the command.' } });
+        tool('t-1', { kind: 'execute', title: 'echo hi && ls', rawInput: { CommandLine: 'echo hi && ls', WaitMsBeforeAsync: 5000, toolSummary: 'Run echo and ls', apiKey: 'fixture-private-raw-input' } }, { content: [{ type: 'content', content: { type: 'text', text: 'Created At: 2026-11-24T09:15:32-08:00\nCompleted At: 2026-11-24T09:15:40-08:00\nCommand exited with code 0.\n\nCommand output:\nhi\nnotes.txt' } }] });
+        update('agent_thought_chunk', { content: { type: 'text', text: 'Then the files.' } });
+        tool('t-2', { kind: 'read', title: 'File notes.txt', rawInput: { Path: '/work/notes.txt' }, locations: [{ path: '/work/notes.txt' }] });
+        tool('t-3', { kind: 'edit', title: 'File out.txt', rawInput: { Content: 'done\n', Overwrite: true, Path: '/work/out.txt' }, locations: [{ path: '/work/out.txt' }] });
+        tool('t-4', { kind: 'search', title: '"Iris versicolor" on Web', rawInput: { query: 'Iris versicolor' } });
+        tool('t-5', { kind: 'other', title: 'Run something_else', rawInput: { token: 'fixture-private-raw-input' } });
+        chunk('All four done.'); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
+      // A turn that goes on until it is cancelled.
+      if (text === 'long') { turn = { id: r.id, text }; chunk('Working on it'); break; }
       // A turn with the token counts the CLI gives (cached tokens are counted apart from the input).
       if (text === 'counted') { chunk('Counted.'); reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 24, cachedReadTokens: 600, cachedWriteTokens: 0, thoughtTokens: 22, totalTokens: 1624 } }); break; }
       if (text === 'simple' || bypass) { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }

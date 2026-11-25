@@ -8,10 +8,13 @@ export const estimateTokens = text => { const cjk = (text.match(CJK) ?? []).leng
 
 export const emptyTranscript = () => ({ messages: [], live: null, tools: {}, loaded: false, error: null });
 
+// How a tool call ended. One the person stopped (Stop, or a message sent while the agent worked) was
+// cancelled, not a failure of the tool.
+const endedAs = (isError, details) => !isError ? 'done' : details?.interrupted ? 'cancelled' : 'error';
 function toolsFromMessages(messages) {
   const tools = {};
   for (const message of messages) {
-    if (message.role === 'toolResult') tools[message.toolCallId] = { status: message.isError ? 'error' : 'done', ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), ...(message.__history?.truncated ? { historyRef: message.__history.ref } : {}), result: { content: message.content, details: message.details } };
+    if (message.role === 'toolResult') tools[message.toolCallId] = { status: endedAs(message.isError, message.details), ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), ...(message.__history?.truncated ? { historyRef: message.__history.ref } : {}), result: { content: message.content, details: message.details } };
   }
   return tools;
 }
@@ -337,7 +340,7 @@ export function applyEvent(t, event) {
     case 'tool_execution_update':
       return { ...t, tools: { ...t.tools, [event.toolCallId]: { ...t.tools[event.toolCallId], status: 'running', result: event.partialResult } } };
     case 'tool_execution_end':
-      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: event.isError ? 'error' : 'done', result: event.result, durationMs: event.durationMs } } };
+      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: endedAs(event.isError, event.result?.details), result: event.result, durationMs: event.durationMs } } };
     default:
       return t;
   }
@@ -485,7 +488,11 @@ export function displayBlocks(t) {
         sawThinking = true;
         // Far fewer characters than reasoning tokens: the provider sent a summary, not the full reasoning.
         const summary = reasoning > 0 && block.thinking.length / 4 < reasoning * 0.5;
-        blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, text: block.thinking, streaming: message === t.live, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null, historyRef });
+        // Still being thought only while it is the last thing in the reply being written. An agent that reports
+        // a whole turn as one reply (Antigravity: thought, tool, thought, tool…) has finished every thought
+        // that something follows; marked as running, each kept its spinner until the turn ended.
+        const thinking = message === t.live && bi === message.content.length - 1;
+        blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, text: block.thinking, streaming: thinking, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null, historyRef });
       }
     });
     // Reasoning that was billed but never shown (OpenAI o-series, hidden thinking): say so.

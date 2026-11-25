@@ -287,7 +287,6 @@ try {
   await waitText('.markdown', 'Tool result: hi-from-pi');
   check('YOLO: command ran without any approval prompt', !(await page.locator('.question-card, .approval-card').count()));
   await page.click('.tool-group-head:has-text("Ran 1 command")');
-  await page.click('.tool-call-head');
   check('tool output visible when expanded', (await page.locator('.tool-output').last().innerText()).includes(localProject.replace('/tmp', '')));
   await waitNew('.markdown', 'Tool result: described', () => send('[[bash:echo described]] [[desc:Say hello]]'));
   check('a command with a description shows the description, not the raw command', await page.locator('.tool-group-head', { hasText: 'Say hello' }).count() >= 1);
@@ -554,7 +553,6 @@ try {
 
   await waitNew('.markdown', 'Tool result', () => send('[[bash:hostname && pwd]]'));
   await page.click('.tool-group-head:has-text("Ran 1 command")');
-  await page.click('.tool-call-head');
   check('remote command ran in the remote folder', (await page.locator('.tool-output').last().innerText()).includes('api-server'));
   await S('08-remote-session');
   await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
@@ -591,14 +589,12 @@ try {
   check('completed subagent replies have the same copy action as main replies', await inspector().getByRole('button', { name: 'Copy reply', exact: true }).count() === 1);
   await S('08b1-subagent-conversation-folded');
   await inspector().locator('.tool-group.work .tool-group-head').click();
-  await inspector().locator('.tool-call-head').click();
   await inspector().locator('.tool-output', { hasText: 'api-server' }).waitFor();
   check('clicking a subagent shows its actual command and output', (await inspector().locator('.tool-command').innerText()).includes('pwd'));
   check('Latest stays hidden when all execution details fit', await inspector().getByRole('button', { name: 'Jump to latest', exact: true }).count() === 0);
   await S('08b-subagent-execution');
   await delegation().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
   await inspector().locator('.tool-group.work .tool-group-head').click();
-  await inspector().locator('.tool-call-head').click();
   await inspector().locator('.step-open', { hasText: 'Open subagent-result.txt' }).click();
   await page.locator('.file-pane .fp-source', { hasText: 'created by subagent' }).waitFor();
   check('delegated files open from the execution trace without an Outputs card', existsSync(join(remoteProject, 'subagent-result.txt')));
@@ -647,8 +643,7 @@ try {
     await mainTranscript().locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Delayed task 1' }).click();
     await inspector().locator('.tool-group.work .tool-group-head').click();
     await inspector().locator('.tool-call.running').waitFor({ timeout: 15000 });
-    await inspector().locator('.tool-call-head').click();
-    check('running subagent commands are inspectable but cannot be cleared',
+      check('running subagent commands are inspectable but cannot be cleared',
       await inspector().locator('.subagent-inspector-meta', { hasText: 'Running' }).count() === 1 &&
       (await inspector().locator('.tool-command').innerText()).includes('background-subagent-1.txt') &&
       await inspector().getByRole('button', { name: 'Clear this subagent record', exact: true }).isDisabled());
@@ -658,7 +653,7 @@ try {
   await page.locator('.subagent-inspector-meta', { hasText: 'Completed' }).waitFor();
   check('the selected execution view updates after reconnecting without folding the open command',
     await inspector().locator('.tool-call.done').count() === 1 &&
-    await inspector().locator('.tool-call-head').getAttribute('aria-expanded') === 'true' &&
+    await inspector().locator('.tool-call-head').count() === 0 && // (the only step of its group: shown open, with no row of its own)
     (await inspector().locator('.tool-command').innerText()).includes('background-subagent-1.txt'));
   await S('08d-subagent-reconnected');
   await page.getByRole('button', { name: 'Back to subagents' }).click();
@@ -846,7 +841,6 @@ try {
   await revealHistory('.session-main .subagent-task-row', 'Write delegated file');
   await mainTranscript().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
   await inspector().locator('.tool-group.work .tool-group-head').click();
-  await inspector().locator('.tool-call-head').click();
   await inspector().locator('.tool-output').waitFor();
   check('remaining subagent command/output history remains inspectable after an app restart',
     (await inspector().locator('.tool-command').innerText()).includes('subagent-result.txt') &&

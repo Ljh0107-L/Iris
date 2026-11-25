@@ -169,7 +169,9 @@ test('Antigravity runs through the local relay, gates permissions and reopens th
   assert.equal(prewarmed.initialState.cli.standby, true);
   assert.equal(manager.store.sessions.length, 0, 'prewarm must not create a conversation');
   assert.equal(existsSync(join(f.dir, 'sessions')), false);
-  assert.deepEqual(trace().filter(row => row.method).map(row => row.method), ['initialize']);
+  // The waiting CLI is asked for its sessions, nothing more: that makes it sign in before the first message.
+  for (let i = 0; i < 200 && !trace().some(row => row.method === 'session/list'); i++) await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(trace().filter(row => row.method).map(row => row.method), ['initialize', 'session/list']);
   const session = await manager.create({ ...args, environmentId: 'local' });
   assert.equal(session.id, spare.id);
   assert.equal(await manager.ensureStarted(session.id), prewarmed, 'reuse both the ACP child and the relay attachment');
@@ -250,7 +252,41 @@ test('a pre-warmed No-folder Antigravity opens in the first prompt’s workspace
   assert.equal(record.noFolder, true);
   const trace = readFileSync(join(parent, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(trace[0].boot.cwd, root);
-  assert.deepEqual(trace.filter(r => r.method).map(r => [r.method, r.params?.cwd]), [['initialize', undefined], ['session/new', record.cwd]]);
+  // (session/list: what the waiting CLI is asked, so that it has signed in before the first message.)
+  assert.deepEqual(trace.filter(r => r.method).map(r => [r.method, r.params?.cwd]), [['initialize', undefined], ['session/list', undefined], ['session/new', record.cwd]]);
+});
+
+test('Antigravity: a message sent while it works stops the turn and starts on the message, and a model chosen meanwhile is used from then on', { timeout: 20000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(join(cwd, '.iris-agy-scenario.json'), '{}');
+  writeFileSync(join(cwd, '.iris-fake-agy-cache.json'), JSON.stringify({ signedIn: true }));
+  const manager = managerFor(t, f, {}, { locateCli: () => bin });
+  manager.store.settings.defaults = {}; manager.store.saveSettings = () => {};
+  const record = await manager.create({ environmentId: 'local', cwd, engine: 'antigravity' });
+  const calls = () => readFileSync(join(cwd, '.iris-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.method).map(r => r.method === 'session/prompt' ? `prompt:${r.params.prompt[0].text}` : r.method === 'session/set_config_option' ? `set:${r.params.configId}=${r.params.value}` : r.method);
+  await manager.prompt(record.id, 'long');
+  const runtime = manager.runtimes.get(record.id);
+  for (let i = 0; i < 200 && !runtime.streaming; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(runtime.streaming, true);
+  // Asked to wait its turn (a queued message), it is still refused: Antigravity cannot take one while it works.
+  await assert.rejects(manager.prompt(record.id, 'second'), /Wait for the current Antigravity operation/);
+  // A model can be chosen while it works. The turn keeps its model; the choice shows at once and is kept.
+  await manager.cliSetConfig(record.id, 'model', 'mock-gemini-pro');
+  assert.deepEqual(manager.list().find(s => s.id === record.id).cliChoices, { model: 'mock-gemini-pro' });
+  assert.ok(!calls().some(c => c.startsWith('set:')), 'nothing is changed in the CLI in the middle of its turn');
+  await assert.rejects(manager.cliSetConfig(record.id, 'model', 'no-such-model'), /not available/);
+  // Sent to interrupt: the turn is cancelled, the choice is made, and the message goes to the CLI.
+  assert.equal((await manager.prompt(record.id, 'simple', [], { interrupt: true })).disposition, 'started');
+  for (let i = 0; i < 300 && calls().at(-1) !== 'prompt:simple'; i++) await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(calls().slice(-4), ['prompt:long', 'session/cancel', 'set:model=mock-gemini-pro', 'prompt:simple']);
+  for (let i = 0; i < 300 && runtime.streaming; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(manager.list().find(s => s.id === record.id).cliChoices, undefined, 'the choice has been made');
+  const history = (await manager.historyPage(record.id)).messages;
+  assert.deepEqual(history.filter(m => m.role === 'user').map(m => m.content[0].text), ['long', 'simple']);
+  assert.deepEqual(history.filter(m => m.role === 'assistant').map(m => m.stopReason), ['aborted', 'stop']);
 });
 
 test('Antigravity discards an unused standby if its permission launch mode changed', { timeout: 12000 }, async t => {

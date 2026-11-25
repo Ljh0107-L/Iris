@@ -18,7 +18,7 @@ const OPEN_MS = 70000;
 const MENUS_MS = 20000; // inside the time an account check is given
 const LOGIN_MS = 120000;
 const ABORT_MS = 6000;
-const STANDBY_MS = 120000; // safety net if Desktop exits without stopping its SSH spare
+const STANDBY_MS = 10.5 * 60000; // safety net if Desktop exits without stopping its spare (which it keeps for ten minutes)
 const MAX_LINE = 8 * 1024 * 1024;
 const has = (obj, key) => Object.hasOwn(obj, key);
 const text = value => typeof value === 'string' && value.length > 0;
@@ -333,6 +333,22 @@ function agentOf(tool) {
   return { name: 'Task', arguments: { description: (text(raw.Role) ? raw.Role : raw.Prompt.split('\n')[0]).slice(0, 120), prompt: raw.Prompt.slice(0, 4000),
     subagent_type: text(raw.TypeName) && raw.TypeName !== 'self' ? raw.TypeName.slice(0, 40) : 'Agent', ...(text(raw.Model) ? { model: raw.Model.slice(0, 60) } : {}) } };
 }
+// The CLI's ordinary tools, shown the way Pi's and Claude Code's are: a command, a file read or written, a web
+// search. The CLI names the kind of each and gives its input (CommandLine, Path, query); anything else keeps
+// the CLI's own title. Only those fields are read: the rest of a tool's input is not passed on.
+function toolOf(tool) {
+  const raw = tool.raw ?? {};
+  const path = tool.paths[0] ?? (text(raw.Path) && isAbsolute(raw.Path) ? raw.Path : null);
+  if (tool.kind === 'execute') {
+    const command = text(raw.CommandLine) ? raw.CommandLine : tool.title;
+    return text(command) ? { name: 'bash', arguments: { command: command.slice(0, 20000), ...(text(raw.toolSummary) ? { description: raw.toolSummary.slice(0, 200) } : {}) } } : null;
+  }
+  if (tool.kind === 'read' && path) return { name: 'read', arguments: { path } };
+  if (tool.kind === 'edit' && path) return typeof raw.Content === 'string' ? { name: 'write', arguments: { path, content: raw.Content.slice(0, 200000) } } : { name: 'edit', arguments: { path } };
+  if (tool.kind === 'search' && text(raw.query)) return { name: 'WebSearch', arguments: { query: raw.query.slice(0, 500) } };
+  if (tool.kind === 'fetch' && text(raw.Url ?? raw.url)) return { name: 'WebFetch', arguments: { url: String(raw.Url ?? raw.url).slice(0, 2000) } };
+  return null;
+}
 // What the CLI reports for a finished turn: tokens read, read from cache (counted apart: its total is the sum of
 // input, cached and output), written, and of those written, thought.
 function turnUsage(usage) {
@@ -347,8 +363,15 @@ const PERMISSIONS = new Map([['allow_once', 'Allow once'], ['allow_always', 'All
 const cancelled = { outcome: { outcome: 'cancelled' } };
 const TIMED_OUT = Symbol('timed out');
 const NEW_SESSION_ATTEMPTS = 3; // unconfirmed session/new requests before a conversation stops trying
+// What a command printed, without the lines the CLI puts around it ("Created At: …", "Completed At: …",
+// "Command exited with code 0.", "Command output:"). A command that failed keeps the line that says so.
+const commandOutput = printed => {
+  const wrapped = /^Created At: [^\n]*\n(?:Completed At: [^\n]*\n)?(?:Command exited with code (\d+)\.\n)?\s*Command output:\n?([\s\S]*)$/.exec(printed);
+  if (!wrapped) return printed;
+  return wrapped[1] && wrapped[1] !== '0' ? `${wrapped[2]}${wrapped[2] && !wrapped[2].endsWith('\n') ? '\n' : ''}Exited with code ${wrapped[1]}.` : wrapped[2];
+};
 const shownContent = content => (Array.isArray(content) ? content : []).flatMap(block =>
-  block?.type === 'content' && block.content?.type === 'text' && typeof block.content.text === 'string' ? [{ type: 'text', text: block.content.text }] : []);
+  block?.type === 'content' && block.content?.type === 'text' && typeof block.content.text === 'string' ? [{ type: 'text', text: commandOutput(block.content.text) }] : []);
 const shownPaths = locations => (Array.isArray(locations) ? locations : []).flatMap(location => text(location?.path) ? [location.path] : []);
 const image = block => block?.type === 'image' && /^image\/(?:png|jpeg|gif|webp)$/.test(block.mimeType) && text(block.data);
 const slashCommands = list => (Array.isArray(list) ? list : []).slice(0, 256).flatMap(c =>
@@ -411,7 +434,7 @@ export class AntigravityAdapter {
         };
         if (this.peer && !this.peer.closed && (this.sessionId || this.authRequired)) return ready();
         return this.#serial(async () => {
-          if (this.standby) await this.#initialize();
+          if (this.standby) { await this.#initialize(); this.#warm(); }
           else await this.#ensureReady();
           return ready();
         });
@@ -510,6 +533,17 @@ export class AntigravityAdapter {
     this.capabilities = init.agentCapabilities ?? {};
     this.canSignIn = !this.config.remote && personalAuth(init);
     return this.capabilities;
+  }
+
+  // A CLI waiting for the first message gets its slow start out of the way. The CLI signs in, and asks Google
+  // for the account and its models, only when it is first asked something: left for session/new, that is
+  // about two seconds between sending the first message and the model seeing it (more through a proxy).
+  // session/list sets it off and changes nothing; what it returns is not used.
+  #warm() {
+    const peer = this.peer;
+    if (!peer || peer.closed || this.warmed === peer || !object(this.capabilities?.sessionCapabilities?.list)) return;
+    this.warmed = peer;
+    peer.request('session/list', {}, MENUS_MS).catch(() => {}); // not signed in, or no answer: the first message finds out
   }
 
   async #activate(cwd) {
@@ -678,10 +712,11 @@ export class AntigravityAdapter {
     if (Array.isArray(update.locations)) tool.paths = shownPaths(update.locations);
     if (Array.isArray(update.content)) tool.result = shownContent(update.content);
     // Its task list and the agents it starts are shown as Claude Code's are: a Tasks card, and a task with its brief.
-    const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } } : agentOf(tool);
+    const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } } : agentOf(tool) ?? toolOf(tool);
     const call = known ? { type: 'toolCall', id: tool.id, ...known } : { type: 'toolCall', id: tool.id, name: tool.title ?? tool.kind ?? 'Antigravity tool',
       arguments: tool.paths.length ? { path: tool.paths[0], ...(tool.paths.length > 1 ? { paths: tool.paths } : {}) } : {} };
-    if (known) tool.fallback = known.name === 'TodoWrite' ? 'Tasks updated.' : 'The agent was started; it reports back to Antigravity.';
+    if (known?.name === 'TodoWrite') tool.fallback = 'Tasks updated.';
+    else if (known?.name === 'Task') tool.fallback = 'The agent was started; it reports back to Antigravity.';
     turn.content[tool.index] = call;
     if (!tool.call) this.#delta({ type: 'toolcall_start', contentIndex: tool.index, id: call.id, toolName: call.name });
     this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: call });
@@ -701,7 +736,8 @@ export class AntigravityAdapter {
   }
   #toolEnd(tool, isError, fallback) {
     const content = tool.result.length ? tool.result : [{ type: 'text', text: fallback }];
-    const details = { engine: ENGINE };
+    // Stopped by the person (Stop, or a message sent while it worked) is not the tool failing.
+    const details = { engine: ENGINE, ...(fallback === 'Interrupted.' ? { interrupted: true } : {}) };
     const durationMs = Date.now() - tool.start;
     tool.message = { role: 'toolResult', toolCallId: tool.id, toolName: tool.call.name, content, details, isError, timestamp: Date.now() };
     this.write({ type: 'tool_execution_end', toolCallId: tool.id, toolName: tool.call.name, result: { content, details }, isError, durationMs });

@@ -2,6 +2,27 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.6
+
+**Fixed**
+
+- **The first message to Antigravity starts sooner.** The CLI that waits on the new-conversation screen now signs in and reads the account and its models while it waits, instead of when the first message arrives: that step took about two seconds on a Mac and longer on a host behind a proxy. The waiting CLI is kept for ten minutes, not ninety seconds, so a first message that takes a while to write does not fall back to a full start.
+- **Antigravity's finished thoughts no longer keep a spinner.** Only the step that is running now has one.
+- **Antigravity's tools read as what they are**: a command, a file read or written, a web search, as with the other agents, instead of a title followed by `{}` or the tool's input as JSON. A command's output no longer carries the lines the CLI wraps around it.
+- **A command you stopped says "Interrupted"** and is not counted as failed.
+
+**New and changed**
+
+- **Sending a message opens the conversation at once.** Its title, machine and message box are there from the moment you send, and the wait is shown as Thinking, timed from when you sent it. Setting up a host or uploading to it still says what it is doing.
+- **A message sent while Antigravity works stops what it is doing and starts on the message**, as with Pi. (Codex still reads it before its next step.)
+- **A model or effort can be chosen while the agent works**; it is used from the next message on.
+- **Steps are quieter.** Nothing is filled in when a step is hovered or open, a command and what it printed are plain text under a thin rule, and a file is its name rather than a chip. A group with one step opens to what that step did, without repeating its line.
+- **The working indicator is the app's own mark**, a prompt with a blinking cursor, in place of the small bar.
+
+**Known limits:** Antigravity does not send its thinking until it has finished thinking, so the first step of a turn can take ten seconds or more to appear; that time shows as Thinking. After a turn is interrupted, its task list still shows the task that was under way as in progress.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.5
 
 **Fixed**

@@ -147,7 +147,7 @@ test('Antigravity startup progress and failure stay with the saved conversation 
   receive({ channel: 'status', payload: { id: 'saved', status: 'connected', phase: null } });
   assert.ok(!calls.some(([method]) => method === 'prompt'), 'reconnect must not send a draft');
   await store.sendPrompt('saved', 'first draft', [file]);
-  assert.deepEqual(calls.at(-1), ['prompt', 'saved', 'first draft', [file]]);
+  assert.deepEqual(calls.at(-1), ['prompt', 'saved', 'first draft', [file], { interrupt: false }], 'sent as an ordinary message: nothing is running to interrupt');
   assert.equal(calls.filter(([method]) => method === 'createSession').length, 1);
 });
 

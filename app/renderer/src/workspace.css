@@ -65,9 +65,8 @@
   --green: #2f7a3d;
   --red: #b3362b;
   --amber: #8a6100;
-  /* The mark's six colours. The looping one starts and ends on the same colour, so it can slide without a seam. */
+  /* The mark's six colours. */
   --spectrum: linear-gradient(90deg, #ff5e57, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de);
-  --spectrum-loop: linear-gradient(90deg, #ff5e57, #ff9500, #ffcc00, #34c759, #0a84ff, #af52de, #ff5e57);
   --specular: none;
   --shadow-pop: 0 16px 40px rgba(17, 17, 20, 0.12), 0 2px 8px rgba(17, 17, 20, 0.06);
   --shadow-card: none;
@@ -1811,8 +1810,8 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 [data-theme="dark"] .subagent-summary { background: var(--surface); }
 .agent-reports, .file-cards, .compaction { margin: 0; }
 .working { font-size: var(--fs-base); gap: 8px; color: var(--muted); }
-.working-dot { width: 14px; height: 4px; margin: 7px 10px 0 0; border-radius: 2px; background: var(--spectrum-loop) 0 0 / 28px 100% repeat-x; animation: spectrum-run 1.1s linear infinite; }
-@keyframes spectrum-run { to { background-position: -28px 0; } }
+/* The agent at work: the app's own mark, a prompt whose cursor blinks. */
+.working-mark { flex-shrink: 0; margin-right: 2px; }
 .working-meta { font-size: var(--fs-base); }
 .shimmer { background-image: linear-gradient(90deg, var(--faint), var(--text), var(--faint)); }
 
@@ -2312,3 +2311,53 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 body.window-inactive .session-engine-logo, body.window-inactive .title-engine-logo { opacity: 0.6; }
 
 .palette-note { padding: 8px 16px 10px; font-size: var(--fs-xs); color: var(--faint); }
+
+/* A conversation still being opened: its header and message box are in place, not yet usable. */
+.title-button.opening { cursor: default; }
+.title-button.opening:hover { background: transparent; }
+.composer.opening textarea { cursor: default; }
+.composer.opening .composer-plus { opacity: 0.45; }
+.composer.opening .composer-toolbar { min-height: 30px; }
+
+/* ---- Steps, quiet. What the agent did is a grey line among its words, as in Claude and Codex: the text
+   darkens under the pointer and nothing is filled in, when hovered or when open. A command and what it
+   printed are plain mono text under a thin rule, not a box; a file is its name, not a chip. */
+.tool-group-head,
+.thinking .tool-group-head,
+.work .tool-group-head {
+  font-family: var(--sans);
+  font-size: var(--fs-md);
+  min-height: 24px;
+  padding: 2px 0;
+  margin-left: 0;
+  gap: 6px;
+  border-radius: 0;
+}
+.tool-group-head:hover:not(.static),
+.thinking .tool-group-head:hover:not(.static),
+.work .tool-group-head:hover:not(.static),
+.step-head:hover { background: transparent; color: var(--text); }
+.step-head:hover .step-verb, .step-head:hover .step-subject { color: var(--text); }
+.tool-group-head:focus-visible, .step-head:focus-visible { outline: 2px solid var(--signal-soft); outline-offset: 2px; border-radius: var(--r-sm); }
+.step-head { min-height: 24px; padding: 2px 0; margin-left: 0; gap: 6px; border-radius: 0; transition: color .12s; }
+.step-verb + .step-subject { color: var(--muted); }
+.step-subject.mono { font-family: var(--mono); font-size: 12px; }
+.work-body, .thinking-body { margin: 2px 0 6px 5px; padding-left: 12px; border-left: 1px solid var(--hairline); }
+.step-detail { padding: 2px 0 8px; }
+.step .file-ref-inline, .tool-group-head .file-ref-inline { display: inline; margin: 0; padding: 0; border: 0; background: transparent; box-shadow: none; color: inherit; font: inherit; }
+.step .file-ref-inline::before, .tool-group-head .file-ref-inline::before { display: none; }
+.step .file-ref-inline:hover, .tool-group-head .file-ref-inline:hover { text-decoration: underline; background: transparent; }
+.tool-command, .tool-output, .tool-console, .tool-console .tool-command, .tool-console .tool-output, .tool-output.boxed,
+[data-theme="dark"] .tool-command, [data-theme="dark"] .tool-output, [data-theme="dark"] .tool-console {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+.tool-console, .step-detail > .tool-command, .step-detail > .tool-output { margin: 2px 0 4px; padding-left: 12px; border-left: 1px solid var(--hairline); }
+.tool-console .tool-command { padding: 1px 0; color: var(--text-2); }
+.tool-console .tool-output { padding: 1px 0; border-top: 0; color: var(--muted); max-height: 280px; }
+.tool-console .tool-running { padding: 1px 0; border-top: 0; }
+.tool-command .prompt { color: var(--faint); }
+/* (Inside an opened group the group's own rule is enough.) */
+.work-body .tool-console, .work-body .step-detail > .tool-command, .work-body .step-detail > .tool-output { padding-left: 0; border-left: 0; }

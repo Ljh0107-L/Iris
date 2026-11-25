@@ -125,7 +125,9 @@ const sameModel = (a, b) => a?.provider === b?.provider && a?.id === b?.id;
 // Process lifecycle: a Pi is kept running while it may be needed soon, and stopped when it is not.
 const IDLE_STOP_MS = 20 * 60 * 1000; // an idle Pi nobody has looked at for this long is stopped
 const MAX_IDLE_PER_ENV = 6;          // and at most this many idle Pis stay up per machine (least recently used go first)
-const AGY_DATA_DIR = 'iris'; // Antigravity's data directory for Iris, under ~/.gemini
+// Antigravity's data directory for Iris, under ~/.gemini. (IRIS_AGY_DATA_DIR: a run that tries the real CLI
+// keeps its conversations out of the ones Iris has there.)
+const AGY_DATA_DIR = /^[\w-]{1,40}$/.test(process.env.IRIS_AGY_DATA_DIR ?? '') ? process.env.IRIS_AGY_DATA_DIR : 'iris';
 const SWEEP_MS = 60 * 1000;
 
 export class SessionManager extends EventEmitter {
@@ -711,6 +713,20 @@ export class SessionManager extends EventEmitter {
     return this.#cliAction(id, 'cli_login', {}, 240000);
   }
   async cliSetConfig(id, configId, value) {
+    // While the CLI works, a model or effort can still be chosen: the turn under way keeps what it started
+    // with, and the choice is made in the CLI before the next message goes to it (#applyCliChoices).
+    const working = this.runtimes.get(id);
+    if (isCliSession(this.record(id)) && working?.streaming) {
+      const record = this.record(id), option = working.cli?.options?.find(o => o.id === configId);
+      if (!option?.options?.some(choice => choice.value === value)) throw new Error('That choice is not available in this conversation.');
+      record.cliChoices = { ...(option.category === 'model' ? {} : record.cliChoices), [configId]: value };
+      this.store.saveSessions();
+      const choices = this.store.settings.cliChoices ??= {};
+      choices[record.engine] = { ...(option.category === 'model' ? {} : choices[record.engine]), [configId]: value };
+      try { this.store.saveSettings(); } catch { /* remembered until the app quits */ }
+      this.emit('sessions');
+      return working.cli;
+    }
     const state = await this.#cliAction(id, 'cli_set_config', { configId, value }, 30000);
     // Remembered per CLI: the next conversation starts with the same model and effort.
     const record = this.record(id), option = state?.options?.find(o => o.id === configId);
@@ -851,7 +867,7 @@ export class SessionManager extends EventEmitter {
   // the model first, since it decides which efforts exist.
   async #applyCliChoices(record, runtime, session) {
     const wanted = record.cliChoices;
-    if (!wanted) return;
+    if (!wanted || runtime.streaming) return; // (a choice made while the CLI works waits for the turn to end)
     delete record.cliChoices;
     this.#save(record, {});
     for (const model of [true, false]) {
@@ -1021,7 +1037,9 @@ export class SessionManager extends EventEmitter {
     const cli = isCliSession(spare.record);
     if (cli && spare.timer) return; // the adapter also has a fixed lifetime while in standby
     clearTimeout(spare.timer);
-    spare.timer = setTimeout(() => this.#dropSpare(key), cli ? 90000 : 10 * 60 * 1000);
+    // Ten minutes for either kind: a first message takes a while to write, and a CLI whose 90 seconds had run
+    // out meant a full start (the CLI, its sign-in, the account and models) after pressing Send.
+    spare.timer = setTimeout(() => this.#dropSpare(key), 10 * 60 * 1000);
     spare.timer.unref?.();
   }
   #dropSpare(key) {
@@ -1641,8 +1659,17 @@ export class SessionManager extends EventEmitter {
       this.#assertCurrent(record, runtime);
       if (runtime.session !== session || this.stopping.has(id)) throw new Error('The Antigravity connection changed. No message was sent.');
       if (runtime.cli?.authRequired) throw new Error('Sign in with Google before sending a message to Antigravity.');
-      // Codex takes a message while it works (it reads it before its next model call); Antigravity cannot.
+      // Codex takes a message while it works (it reads it before its next model call). Antigravity cannot,
+      // so a message sent while it works stops what it is doing and starts on the message, as with Pi.
       const steers = record.engine === CODEX_ENGINE;
+      if (runtime.streaming && !steers && interrupt && !runtime.cliRequest) {
+        await this.abort(id);
+        // The turn has ended once the CLI confirms the stop; the note of it arrives on the same connection.
+        for (const end = Date.now() + 5000; runtime.streaming && Date.now() < end;) await new Promise(resolve => setTimeout(resolve, 20));
+        session = await this.ensureStarted(id);
+        runtime = this.runtimes.get(id);
+        this.#assertCurrent(record, runtime);
+      }
       if ((runtime.streaming && !steers) || runtime.cliRequest) throw new Error(`Wait for the current ${cliEngine(record.engine).label} operation to finish.`);
       // Existing SSH adapters keep their launch flags. Apply the new default on
       // the next turn without replaying old prompts or interrupting active tools.

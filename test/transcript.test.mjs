@@ -92,3 +92,22 @@ const writeUsage = usageOf([writeCall]);
 assert.equal(writeUsage.speedTokensEstimated, false);
 assert.equal(writeUsage.output, 100); assert.equal(writeUsage.genOut, 100); assert.equal(writeUsage.tps, 40);
 console.log('PASS  tool-call TPS: complete request output without inflating reported counts');
+
+// A thought is still being thought only while nothing follows it in the reply being written.
+{
+  // Antigravity reports a whole turn as one reply: thought, tool, thought, tool. Each thought that something
+  // follows is finished; shown as running, every one kept its spinner until the turn ended.
+  const live = { role: 'assistant', content: [
+    { type: 'thinking', thinking: 'First the command.' }, { type: 'toolCall', id: 't-1', name: 'bash', arguments: { command: 'ls' } },
+    { type: 'thinking', thinking: 'Then the file.' }, { type: 'toolCall', id: 't-2', name: 'read', arguments: { path: '/work/notes.txt' } },
+    { type: 'thinking', thinking: 'And now' }] };
+  const t = { ...emptyTranscript(), messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }], timestamp: 1 }], live, tools: { 't-1': { status: 'done' }, 't-2': { status: 'done' } } };
+  const thoughts = displayBlocks(t).flatMap(block => block.kind === 'work' ? block.items : [block]).filter(item => item.kind === 'thinking');
+  assert.deepEqual(thoughts.map(item => [item.text, item.streaming]), [['First the command.', false], ['Then the file.', false], ['And now', true]]);
+}
+
+// A tool the person stopped was cancelled, not a failure.
+{
+  const ended = (isError, details) => applyEvent({ ...emptyTranscript(), tools: { a: { status: 'running' } } }, { type: 'tool_execution_end', toolCallId: 'a', isError, result: { content: [], details } }).tools.a.status;
+  assert.deepEqual([ended(false, {}), ended(true, {}), ended(true, { engine: 'antigravity', interrupted: true })], ['done', 'error', 'cancelled']);
+}

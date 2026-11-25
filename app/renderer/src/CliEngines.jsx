@@ -95,7 +95,9 @@ export function CliLogin({ session }) {
 export function SessionCliOptions({ session }) {
   const [changing, setChanging] = useState(false);
   const state = session.cli;
-  const options = state?.authRequired ? [] : state?.options ?? [];
+  // A choice made while the agent works is shown at once; it takes effect with the next message.
+  const waiting = session.cliChoices ?? {};
+  const options = (state?.authRequired ? [] : state?.options ?? []).map(option => typeof waiting[option.id] === 'string' && option.options?.some(choice => choice.value === waiting[option.id]) ? { ...option, currentValue: waiting[option.id] } : option);
   const change = async (configId, value) => {
     setChanging(true);
     try { await api('cliSetConfig', session.id, configId, value); }
@@ -104,7 +106,7 @@ export function SessionCliOptions({ session }) {
   };
   return <>
     {options.map(option => <Trigger key={option.id} label={option.name} title={option.name} width={280} placement="top-start"
-      disabled={changing || session.streaming || session.status !== 'connected'}
+      disabled={changing || session.status !== 'connected'}
       menu={close => <MenuSection title={option.name}>
         {option.options.map(choice => <MenuItem key={choice.value} label={choice.name} title={choice.description} checked={choice.value === option.currentValue}
           onClick={() => { close(); if (choice.value !== option.currentValue) void change(option.id, choice.value); }} />)}

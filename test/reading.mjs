@@ -40,16 +40,10 @@ export async function checkReading({ app, page, id }) {
     step('open the command group');
     await page.locator('.tool-group-head', { hasText: 'Inspect test log' }).click();
     const row = page.locator('[data-tool-id="reading-test-call"]');
-    step('open the command row');
-    const probe = async () => row.locator('.tool-call-head').evaluate(el => {
-      const r = el.getBoundingClientRect(), top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-      return { expanded: el.getAttribute('aria-expanded'), hit: top === el || el.contains(top) ? 'self' : `${top?.tagName}.${top?.className}`, follow: document.querySelectorAll('.transcript-follow').length };
-    });
-    const beforeClick = await probe();
-    await row.locator('.tool-call-head').click();
-    await page.waitForTimeout(150);
-    const afterClick = await probe();
-    if (afterClick.expanded !== 'true') throw new Error(`row did not open: before ${JSON.stringify(beforeClick)} after ${JSON.stringify(afterClick)}`);
+    // The only step in its group: opening the group shows what the command printed, with no second row to open.
+    step('the command output is there');
+    await row.locator('.tool-output').waitFor();
+    assert.equal(await row.locator('.tool-call-head').count(), 0, 'the group line is not repeated inside it');
     step('scroll the command output');
     await row.locator('.tool-output').evaluate(el => { el.scrollTop = 72; window.__readingRow = el.closest('.tool-call'); });
     step('API call ends');
@@ -57,7 +51,7 @@ export async function checkReading({ app, page, id }) {
     assert.match(await page.locator('.usage-speed-value b').innerText(), /^~\d/, 'receipt-only completion still shows a speed');
     assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request TPS', 'stored request duration takes precedence over receipt timing');
     assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
-    assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
+    assert.equal(await row.locator('.tool-output').count(), 1, 'the command stays open');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
     assert.equal(await page.locator('.reasoning-tokens', { hasText: '200 tokens' }).count(), 1, 'hidden reasoning usage is visible even with no reasoning text');
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true);
@@ -77,7 +71,7 @@ export async function checkReading({ app, page, id }) {
       { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 1 } },
       { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: answer } },
     ]);
-    assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
+    assert.equal(await row.locator('.tool-output').count(), 1, 'the command stays open');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
     assert.ok(Math.abs(await page.locator('.transcript').evaluate(el => el.scrollTop) - before) < 2, 'streaming must not drag the transcript to the bottom');
     const sourceTiming = { source: 'agent', complete: true, requestStart: stamp, start: stamp + 400, first: stamp + 500, last: stamp + 1500, end: stamp + 2000,

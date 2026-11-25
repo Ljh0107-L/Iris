@@ -140,7 +140,10 @@ test('standby negotiates once and only creates a transcript and ACP session on a
   assert.equal(a.cli.standby, true);
   assert.equal(a.sessionFile, null);
   assert.equal(existsSync(f.config.sessionsDir), false);
-  assert.deepEqual(f.log().filter(r => r.method).map(r => r.method), ['initialize']);
+  // While it waits, the CLI is asked one thing that changes nothing (its list of sessions), so that it signs in
+  // and reads the account and models now, not when the first message arrives.
+  await until(() => f.calls('session/list').length === 1, 'the standby warm-up');
+  assert.deepEqual(f.log().filter(r => r.method).map(r => r.method), ['initialize', 'session/list']);
   assert.match((await peer.rpc('prompt', { message: 'must not send' })).error, /Open the Antigravity conversation first/);
   assert.match((await peer.rpc('cli_activate', { cwd: 'relative' })).error, /Invalid Antigravity workspace/);
   const [active, same] = await Promise.all([
@@ -150,7 +153,7 @@ test('standby negotiates once and only creates a transcript and ACP session on a
   assert.equal(active.cli.standby, undefined);
   assert.equal(fileEntries(active.sessionFile)[0].cwd, cwd);
   assert.equal(f.log()[0].boot.cwd, f.cwd);
-  assert.deepEqual(f.log().filter(r => r.method).map(r => r.method), ['initialize', 'session/new']);
+  assert.deepEqual(f.log().filter(r => r.method).map(r => r.method), ['initialize', 'session/list', 'session/new']);
   assert.equal(f.calls('session/new')[0].params.cwd, cwd);
 });
 
@@ -200,6 +203,28 @@ test('the task list is one Tasks card kept current, and an agent Antigravity sta
   assert.deepEqual(calls[1].arguments, { description: 'Greeter', prompt: 'Reply with the word hi', subagent_type: 'Agent', model: 'flash_lite' });
   const ended = peer.events.filter(event('tool_execution_end'));
   assert.deepEqual(ended.map(e => [e.toolName, e.isError]), [['TodoWrite', false], ['Task', false]], 'each ends once');
+});
+
+test('the CLI’s ordinary tools are a command, a file read or written and a web search, not a name and its input as JSON', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'tools' });
+  await peer.next(event('agent_settled'));
+  const reply = lastAssistant((await readHistory(state.sessionFile)).messages);
+  assert.deepEqual(reply.content.filter(block => block.type === 'toolCall').map(call => [call.name, call.arguments]), [
+    ['bash', { command: 'echo hi && ls', description: 'Run echo and ls' }],
+    ['read', { path: '/work/notes.txt' }],
+    ['write', { path: '/work/out.txt', content: 'done\n' }],
+    ['WebSearch', { query: 'Iris versicolor' }],
+    ['Run something_else', {}], // a tool this app has no words for keeps the CLI's title
+  ]);
+  // Only the fields that are shown are read from a tool's input: nothing else in it is passed on or saved.
+  assert.doesNotMatch(JSON.stringify(peer.events) + readFileSync(state.sessionFile, 'utf8'), /fixture-private-raw-input/);
+  // Its thoughts are separate blocks in the one reply, each closed before the tool that follows it.
+  assert.deepEqual(reply.content.map(block => block.type), ['thinking', 'toolCall', 'thinking', 'toolCall', 'toolCall', 'toolCall', 'toolCall', 'text']);
+  const output = peer.events.filter(event('tool_execution_end')).find(e => e.toolName === 'bash');
+  assert.equal(output.result.content[0].text, 'hi\nnotes.txt');
 });
 
 test('a turn carries the token counts the CLI reports: input, cached, output, and thought', { timeout: 12000 }, async t => {
