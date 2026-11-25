@@ -312,19 +312,27 @@ test('relay bounds live and replay socket queues while healthy readers catch up'
       return result;
     };
   `);
-  const count = 512;
+  // The relay keeps a bounded log and drops a reader that falls a whole log behind. A reader that keeps up must
+  // never be dropped, however slow the machine: so the writer waits for the reader after every batch (about
+  // 2 MB), instead of the test hoping the reader is fast enough. (Unpaced, the reader of a loaded CI machine
+  // sometimes fell 16 MB behind, was dropped, and the test timed out waiting for the end of the burst.)
+  const count = 512, batch = 32;
   const healthy = await f.attach('stream', `
     const { createInterface } = require('node:readline');
     const { once } = require('node:events');
+    let acks = 0, waiting = null;
     console.log(JSON.stringify({ type: 'extension_ui_request', id: 'ask', method: 'confirm' }));
     createInterface({ input: process.stdin }).on('line', async line => {
       const r = JSON.parse(line);
       if (r.cmd === 'burst') {
         for (let i = 0; i < ${count}; i++) {
           if (!process.stdout.write(JSON.stringify({ type: 'chunk', i, data: '界'.repeat(20000) }) + '\\n')) await once(process.stdout, 'drain');
+          // The reader says when it has each batch: the writer never runs further ahead of it than one batch.
+          if (i % ${batch} === ${batch} - 1) while (acks <= Math.floor(i / ${batch})) await new Promise(resolve => { waiting = resolve; });
         }
         console.log(JSON.stringify({ type: 'finished' }));
-      } else if (r.cmd === 'tail') console.log(JSON.stringify({ type: 'tail', data: '界'.repeat(50000) }));
+      } else if (r.cmd === 'ack') { acks++; waiting?.(); waiting = null; }
+      else if (r.cmd === 'tail') console.log(JSON.stringify({ type: 'tail', data: '界'.repeat(50000) }));
       else if (r.type === 'extension_ui_response') console.log(JSON.stringify({ type: 'answer', id: r.id, confirmed: r.confirmed }));
     });
   `);
@@ -334,6 +342,11 @@ test('relay bounds live and replay socket queues while healthy readers catch up'
   await waitFor(() => slow.records.length, 'slow attach');
   slow.socket.pause();
   healthy.write({ cmd: 'burst' });
+  let acked = 0, seen = 0;
+  const pace = setInterval(() => {
+    while (seen < healthy.records.length) { if (healthy.records[seen].type === 'chunk' && healthy.records[seen].i % batch === batch - 1) { healthy.write({ cmd: 'ack' }); acked++; } seen++; }
+  }, 5);
+  t.after(() => clearInterval(pace));
   // About 30 MB through the relay: what is checked is that all of it arrives and the queues stay bounded, not
   // how fast. Beside the other test files on a small CI machine it takes longer than the usual five seconds.
   await waitFor(() => healthy.records.some(r => r.type === 'finished'), 'healthy client to receive burst', 1600);
