@@ -481,6 +481,10 @@ export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
     steered.set(reply, [...(steered.get(reply) ?? []), { at: message.steer.at, message }]);
     return false;
   });
+  // Where the agent's run under way began: after the last message that ended a run (a reply not followed by its
+  // tools' results: done, stopped, failed) or that started one (your message). A task list written since is the
+  // plan it is carrying out now; one written before is where an earlier run left it.
+  const runFrom = all.findLastIndex(m => (m.role === 'assistant' && m !== t.live && m.stopReason !== 'toolUse') || m.role === 'user') + 1;
   const declaredCalls = new Set(all.flatMap(m => m.role === 'assistant' && Array.isArray(m.content) ? m.content.filter(b => b?.type === 'toolCall').map(b => b.id) : []));
   let group = null;
   const flush = () => { if (group) { blocks.push(group); group = null; } };
@@ -597,7 +601,7 @@ export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
       if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mk}-${bi}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && (block.name === 'Task' || t.tools[block.id]?.result?.details?.kind === 'claude-code-agent')) { flush(); blocks.push({ kind: 'ccTask', key: `cc-task:${block.id}`, call: block }); return; }
-      if (block.type === 'toolCall' && block.name === 'TodoWrite') { flush(); blocks.push({ kind: 'ccTodo', key: `cc-todo:${block.id}`, call: block, ...(message === t.live ? { live: true } : {}) }); return; }
+      if (block.type === 'toolCall' && block.name === 'TodoWrite') { flush(); blocks.push({ kind: 'ccTodo', key: `cc-todo:${block.id}`, call: block, ...(mi >= runFrom ? { current: true } : {}) }); return; }
       // Files handed to the user are cards in the conversation, not a folded tool step.
       if (block.type === 'toolCall' && block.name === 'report_progress') { flush(); blocks.push({ kind: 'progress', key: `progress:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'present_files') { flush(); blocks.push({ kind: 'files', key: `files:${block.id}`, call: block }); return; }
@@ -717,23 +721,30 @@ export function collapseWork(blocks) {
 // DOM, disclosure and reading anchors do not become a different group on prepend.
 // A turn's task list stands at the end of the turn, under what was done and said (as the latest state of the
 // work, it reads last), and once: a list updated again in the same turn is shown as it stands now. Once all
-// its steps are done, it is not shown at all. A message
-// sent into the turn under way (steered) is part of the turn.
+// its steps are done, it is not shown at all. A message sent into the turn under way (steered) is part of the turn.
+// The latest list, while steps of it are left (a turn stopped half-way, say), is the plan as it stands: it is
+// carried to the end of the latest turn (as Claude Code shows its list again), not left behind where it was written.
 export function listsAtTurnEnd(blocks) {
+  const opens = block => (block.kind === 'user' && !block.steer) || block.kind === 'goal';
+  const todosOf = list => list?.call?.arguments?.todos;
+  const done = list => { const todos = todosOf(list); return Array.isArray(todos) && todos.length > 0 && todos.every(todo => todo?.status === 'completed'); };
+  const lastTurn = blocks.findLastIndex(opens) + 1;
+  const latest = blocks.findLastIndex(b => b.kind === 'ccTodo');
+  // (A list not read yet, of an earlier page, is left where it is: whether steps of it are left is not known.)
+  const carried = latest >= 0 && latest < lastTurn && Array.isArray(todosOf(blocks[latest])) && !done(blocks[latest]) ? blocks[latest] : null;
   const out = [];
   let start = 0;
   const flush = end => {
-    const turn = blocks.slice(start, end), lists = turn.filter(b => b.kind === 'ccTodo');
-    if (!lists.length) { out.push(...turn); return; }
-    const rest = turn.filter(b => b.kind !== 'ccTodo'), list = lists.at(-1);
+    const turn = blocks.slice(start, end), rest = turn.filter(b => b.kind !== 'ccTodo');
+    const own = turn.findLast(b => b.kind === 'ccTodo');
+    const list = start === lastTurn && carried ? carried : own === carried ? null : own;
     // A list whose every step is done has served its purpose: it goes (as the agent's plan does once carried out).
-    const todos = list.call?.arguments?.todos;
-    if (Array.isArray(todos) && todos.length && todos.every(todo => todo?.status === 'completed')) { out.push(...rest); return; }
+    if (!list || done(list)) { out.push(...rest); return; }
     const footer = rest.findIndex(b => b.kind === 'usage');
     if (footer < 0) out.push(...rest, list); else out.push(...rest.slice(0, footer), list, ...rest.slice(footer));
   };
   blocks.forEach((block, i) => {
-    if ((block.kind === 'user' && !block.steer) || block.kind === 'goal') { flush(i); out.push(block); start = i + 1; }
+    if (opens(block)) { flush(i); out.push(block); start = i + 1; }
   });
   flush(blocks.length);
   return out;

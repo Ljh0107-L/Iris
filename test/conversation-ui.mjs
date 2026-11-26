@@ -415,6 +415,35 @@ try {
   await fire([done('pytest', 'bash'), { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'toolCall', id: 'pytest', name: 'bash', arguments: { command: longCommand } }, { type: 'text', text: 'The tests run; meanwhile the routing is checked.' }] } },
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
 
+  // The plan the stopped run left is the plan as it stands: once you write again it stands under your message, at the
+  // end of the latest turn (as Claude Code shows its list again), still: no moving mark, the step's ring at rest.
+  // (Read with motion on: the page is run with reduced motion, which stops every animation.)
+  const dots = async locator => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    try { return await locator.locator('.cc-todo-dot.active').evaluateAll(els => els.map(el => getComputedStyle(el).animationName)); }
+    finally { await page.emulateMedia({ reducedMotion: 'reduce' }); }
+  };
+  assert.deepEqual(await dots(oldPlan), ['none'], 'the step under way of a stopped plan is at rest');
+  await fire([{ type: 'message_end', message: { role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: 'Reply in Chinese from now on' }] } },
+    { status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } }]);
+  await page.locator('.user-bubble', { hasText: 'Reply in Chinese from now on' }).waitFor();
+  await settle();
+  assert.equal(await page.evaluate(() => {
+    const bubble = [...document.querySelectorAll('.user-bubble')].findLast(el => el.textContent.includes('Reply in Chinese from now on'));
+    const plans = [...document.querySelectorAll('.cc-todo-card')];
+    return plans.length === 1 && plans[0].dataset.toolId === 'old-plan' && !!(bubble.compareDocumentPosition(plans[0]) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }), true, 'the plan is shown once, under the latest message');
+  assert.equal(await oldPlan.locator('.spinner').count(), 0, 'a run that is not carrying it out does not turn it');
+  assert.deepEqual(await dots(oldPlan), ['none']);
+  // The agent takes the plan up again: its new list is the one being carried out, and turns while it works.
+  await fire([...call('new-plan', 'TodoWrite', { todos: [{ content: 'Check the build', status: 'completed' }, { content: 'Run the benchmark', status: 'in_progress', activeForm: 'Running the benchmark' }] }, 0)]);
+  const newPlan = page.locator('.cc-todo-card[data-tool-id="new-plan"]');
+  await newPlan.locator('.spinner').waitFor();
+  await fire([done('new-plan', 'TodoWrite'), { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'aborted', content: [{ type: 'toolCall', id: 'new-plan', name: 'TodoWrite', arguments: { todos: [{ content: 'Check the build', status: 'completed' }, { content: 'Run the benchmark', status: 'in_progress' }] } }] } },
+    { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
+  await page.waitForFunction(() => !document.querySelector('.cc-todo-card[data-tool-id="new-plan"] .spinner'));
+  assert.deepEqual(await dots(newPlan), ['none'], 'stopped: at rest');
+
   assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS built renderer: streamed reply applied once per frame, queued message with Option+Enter, Find in conversation across unrendered rows and folded steps');
 } catch (error) {

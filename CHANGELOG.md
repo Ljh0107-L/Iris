@@ -2,6 +2,14 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.5
+
+**Fixed**
+
+- **A stopped turn's task list no longer turns for ever, and is shown again where you are.** The step it was on is at rest (only the plan an agent is carrying out moves, while it works), and the plan as it stands, with steps of it left, stands at the end of the latest turn, under your next message, as Claude Code shows its list again; once the agent writes a new list or finishes every step, that is what is shown.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.4
 
 **New**

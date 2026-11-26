@@ -1607,13 +1607,9 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
   border-radius: 50%;
   border: 1.4px dashed var(--muted);
 }
-.cc-todo-dot.active {
+.cc-todo-dot.active { /* a step under way, not being worked on now (its run was stopped): still, a whole ring */
   border-style: solid;
-  border-color: var(--border-strong);
-  border-top-color: var(--text);
-  background: none;
-  box-shadow: none;
-  animation: spin .9s linear infinite;
+  border-color: var(--text-2);
 }
 .cc-todo-item.completed { color: var(--muted); }
 .cc-todo-item.completed .cc-todo-mark { color: var(--muted); }

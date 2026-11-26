@@ -1225,7 +1225,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     await loadEarlierHistory(session.id);
   };
   const lastUsage = blocks.findLast(b => b.kind === 'usage');
-  const lastListKey = blocks.findLast(b => b.kind === 'ccTodo')?.key;
+  // The plan as it stands: the list at the end of the latest turn (listsAtTurnEnd carries an unfinished one there).
+  const lastOpen = blocks.findLastIndex(b => (b.kind === 'user' && !b.steer) || b.kind === 'goal');
+  const currentList = blocks.findLast((b, i) => b.kind === 'ccTodo' && i > lastOpen);
   const liveAgents = useStore(s => session?.id ? s.agents[session.id] : null);
   const agentsWorking = useMemo(() => readOnly ? 0 : conversationAgents(session, transcript, liveAgents ?? {}).filter(a => a.status === 'running' || a.status === 'queued').length, [readOnly, session, transcript, liveAgents]);
   // Groups of steps that the agent wrote on after (text, a visual, a card): a step of theirs still running is not
@@ -1341,7 +1343,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} behind={behind.has(block.key)} />;
             case 'subagents': return renderSubagents?.(block);
             case 'ccTask': return <ClaudeTaskCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} />;
-            case 'ccTodo': return <ClaudeTodoCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={working && !!block.live} agents={block.key === lastListKey ? agentsWorking : 0} />; // (a list of a turn that is over does not turn)
+            case 'ccTodo': return <ClaudeTodoCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={working && block.key === currentList?.key && !!block.current} agents={block.key === currentList?.key ? agentsWorking : 0} />; // (only the plan being carried out turns: not one an earlier, stopped run left)
             case 'progress': return <ProgressReport key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} live={!!transcript.live} />;
             case 'visual': return <VisualCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={!!transcript.live} superseded={!!block.superseded} />;
             case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
