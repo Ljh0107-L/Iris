@@ -94,7 +94,10 @@ export function UsageMetrics({ transcript, antigravity, turnRequests }) {
 }
 
 function UsageCard({ transcript, antigravity, turnRequests }) {
-  const body = UsageMetrics({ transcript, antigravity, turnRequests });
+  // Worked out from the saved replies and the turn's requests: not again for every word a reply streams.
+  const live = !!transcript?.live, provider = transcript?.live?.provider, model = transcript?.live?.model;
+  const body = useMemo(() => UsageMetrics({ transcript, antigravity, turnRequests }), // eslint-disable-line react-hooks/exhaustive-deps
+    [transcript?.messages, transcript?.tools, live, provider, model, antigravity, turnRequests]);
   if (!body) return null;
   return <Card title="Usage">{body}</Card>;
 }

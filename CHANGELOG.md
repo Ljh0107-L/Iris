@@ -2,6 +2,19 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.3
+
+**Fixed**
+
+- **Iris no longer works the GPU while an agent works.** The marks of something under way (the dots, the breathing text, the pulsing dot in the sidebar) made the window be drawn anew at every refresh of the screen, 60 or 120 times a second: on a large screen, while an agent worked, about a quarter of a core in the window and a third of one in the GPU process. They now move on fifteen times a second, with nothing drawn in between: about 3% and 6%. The text of something under way breathes instead of a moving gradient.
+- **Long conversations stream and scroll with less work**: where the conversation was is found from what is on screen, not by measuring every entry; a line of text is measured when it changes, not on every render; an edit's diff is worked out once; usage is not worked out again for every word. About a third less script time while a reply streams and while scrolling.
+
+**Changed**
+
+- **One button in the message box while the agent works**: Stop, and Send in its place once something is written (sending stops the turn and starts the message's own; Option+Enter adds it after the step under way).
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.2
 
 **New**

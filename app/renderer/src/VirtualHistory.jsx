@@ -11,8 +11,11 @@ export function VirtualHistory({ items, scroller, renderItem, onMeasure }) {
     // Cache real heights before an immediate scroll can unmount newly shown rows.
     // Waiting for ResizeObserver leaves a frame where a large row can collapse to
     // its estimate and clamp the viewport, even with a correct reading bookmark.
+    // Only rows not measured yet and the last few (where a reply grows) are read here: the others keep their
+    // height from the ResizeObserver below, and reading every row after every render is a layout each time.
+    const recent = new Set(items.slice(-3).map(item => item.key));
     for (const [key, node] of nodes.current) {
-      if (node.dataset.mounted === 'true') heights.current.set(key, node.getBoundingClientRect().height);
+      if (node.dataset.mounted === 'true' && (!heights.current.has(key) || recent.has(key))) heights.current.set(key, node.getBoundingClientRect().height);
     }
     measureCallback.current?.();
   });
@@ -36,7 +39,7 @@ export function VirtualHistory({ items, scroller, renderItem, onMeasure }) {
       let changed = false;
       for (const entry of entries) {
         const key = entry.target.dataset.historyKey;
-        const height = entry.target.getBoundingClientRect().height;
+        const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height; // (given: no layout to read it)
         if (entry.target.dataset.mounted === 'true' && height >= 0 && heights.current.get(key) !== height) {
           heights.current.set(key, height); changed = true;
         }

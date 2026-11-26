@@ -283,9 +283,14 @@ try {
   await msgInput.press('Enter');
   assert.equal(await msgInput.inputValue(), 'Check @example.js ');
   await page.evaluate(() => window.fixtureEvent({ channel: 'status', payload: { id: 'review-ui', status: 'connected', streaming: true } }));
+  // One button: with something written, Send (it interrupts) in place of Stop; with nothing, Stop.
+  await page.locator('.send-button.ready').waitFor();
+  assert.equal(await page.locator('.send-button.stop').count(), 0, 'Send takes Stop’s place while something is written');
+  const written = await msgInput.inputValue();
+  await msgInput.fill('');
   await page.locator('.send-button.stop').waitFor();
-  assert.equal(await page.locator('.send-button.ready').count(), 1, 'Send stays available to interrupt while Stop remains visible');
-  assert.equal(await page.locator('.send-button.stop').count(), 1, 'Stop remains visible while typing during streaming');
+  assert.equal(await page.locator('.composer-actions .send-button').count(), 1, 'never both');
+  await msgInput.fill(written);
   await page.evaluate(() => window.fixtureEvent({ channel: 'status', payload: { id: 'review-ui', status: 'connected', streaming: false } }));
   await msgInput.fill('');
   await page.screenshot({ path: join(screenshots, 'workspace-conversation.png') });

@@ -320,8 +320,11 @@ code, pre, kbd { font-family: var(--mono); }
 
 .working { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14.5px; padding: 2px 0; }
 @keyframes spin-square { 50% { transform: rotate(90deg) scale(.75); border-radius: 50%; } }
-.shimmer { background: linear-gradient(90deg, #8f8d88 0%, #ecebe6 50%, #8f8d88 100%); background-size: 200% 100%; -webkit-background-clip: text; color: transparent; animation: shimmer 1.8s linear infinite; }
-@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+/* Text of something under way breathes (its opacity, which the compositor animates alone): a moving gradient
+   repainted the text every frame, and with it the window, on a large screen a third of a core or more. */
+.shimmer { color: var(--text-2); animation: shimmer 1.8s ease-in-out infinite; will-change: opacity; } /* (moved on by slow-animations.js) */
+@keyframes shimmer { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .shimmer { animation: none; } }
 .block-error { display: flex; align-items: flex-start; gap: 8px; color: var(--red); background: rgba(240, 112, 112, .07); border: 0.5px solid rgba(240, 112, 112, .28); border-radius: 12px; padding: 9px 12px; font-size: 13.5px; white-space: pre-wrap; }
 .block-notice { font-size: 13px; color: var(--faint); }
 

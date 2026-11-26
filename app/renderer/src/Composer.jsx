@@ -529,7 +529,9 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   };
   const canSend = !blocked && !!(text.trim() || attachments.length);
   const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={22} stroke={1.45} /></button>;
-  const stopButton = working && !onCancel
+  // One button: while the agent works, Stop; once something is written, Send in its place (sending stops the
+  // turn and starts the message's own, or with Option adds it after the step under way).
+  const stopButton = working && !onCancel && !canSend
     ? <button type="button" className="send-button stop" onClick={() => {
       clearQueued(session.id);
       api('abort', session.id).catch(error => notify(error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'));

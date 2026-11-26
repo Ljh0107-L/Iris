@@ -49,15 +49,18 @@ const shortCommand = command => {
 function FadeText({ className = '', children, title }) {
   const ref = useRef(null);
   const [clipped, setClipped] = useState(false);
-  useLayoutEffect(() => {
+  // Measured when it is laid out anew (its size or its text changed), once a frame at most: not on every render
+  // (a streaming reply renders every frame, and a measure each time is a layout each time).
+  useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const measure = () => setClipped(el.scrollWidth > el.clientWidth + 1);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [children]);
+    let frame = 0;
+    const measure = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; setClipped(el.scrollWidth > el.clientWidth + 1); }); };
+    const resized = new ResizeObserver(measure), changed = new MutationObserver(measure);
+    resized.observe(el);
+    changed.observe(el, { childList: true, characterData: true, subtree: true });
+    return () => { resized.disconnect(); changed.disconnect(); cancelAnimationFrame(frame); };
+  }, []);
   return <span ref={ref} className={`fade-text ${clipped ? 'clipped' : ''} ${className}`} title={title}>{children}</span>;
 }
 
@@ -1187,11 +1190,14 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     const el = scroller.current;
     if (el) setFollowing(stick.current || el.scrollHeight - el.scrollTop - el.clientHeight < 40);
   };
+  // What is on screen now (kept as it was when nothing could be found: the conversation covered by a panel, say).
+  const bookmarkFrame = useRef(0);
+  const takeBookmark = useCallback(() => { const next = historyBookmark(scroller.current); if (next.length) bookmark.current = next; }, []);
   const pauseFollowing = useCallback(() => {
     stick.current = false;
     scrollIntent.current = false;
-    bookmark.current = historyBookmark(scroller.current);
-  }, []);
+    takeBookmark();
+  }, [takeBookmark]);
   const followLatest = () => {
     stick.current = true;
     setFollowing(true);
@@ -1239,16 +1245,17 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     previousTop.current = el.scrollTop;
     if (moved) {
       stick.current = atBottom;
-      if (!atBottom) bookmark.current = historyBookmark(el);
+      // Taken once a frame at most, however many scroll events come.
+      if (!atBottom && !bookmarkFrame.current) bookmarkFrame.current = requestAnimationFrame(() => { bookmarkFrame.current = 0; takeBookmark(); });
     }
     if (el.scrollTop < el.clientHeight * 3 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
     scrollIntent.current = false;
     updateLatest();
   };
+  // (Following the end, there is nothing to keep in place: the bookmark is taken when following stops.)
   const retainPosition = () => {
     if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
     else restoreHistoryBookmark(scroller.current, bookmark.current);
-    if (stick.current) bookmark.current = historyBookmark(scroller.current);
     previousTop.current = scroller.current?.scrollTop ?? 0;
     updateLatest();
   };
