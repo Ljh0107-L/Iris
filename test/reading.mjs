@@ -96,8 +96,8 @@ export async function checkReading({ app, page, id }) {
     await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
     // Receipt timing without a source start or stored duration cannot establish a speed.
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '~180', 'missing timing shows the earlier usable speed');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Output TPS');
-    assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply of this model/);
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Output TPS · 1 request ago', 'and says it is not the latest request’s');
+    assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier request of this model/);
 
     step('hidden reasoning is left out of the speed, with the time it took');
     const answerWindow = { first: stamp + 4000, last: stamp + 5000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 };
@@ -114,7 +114,7 @@ export async function checkReading({ app, page, id }) {
       __timing: { ...hiddenAnswer.__timing, answer: { ...answerWindow, firstWeight: undefined } } } }]);
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '~9.0', 'the latest short reply has its own speed, from its first token');
     assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Output TPS');
-    assert.doesNotMatch(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply/);
+    assert.doesNotMatch(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier request/);
     assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /wait for the first token \(TTFT\) is not counted/);
 
     step('LaTeX math renders with its fonts');

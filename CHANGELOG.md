@@ -2,6 +2,24 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.13
+
+**New**
+
+- **Cursor on an SSH host asks Cursor through this Mac.** Cursor offers the models of the region it is asked from, and a server's region can offer few of them. Requests to Cursor's own domains now go over the SSH connection and out through the Mac, so the host is offered the same models as the Mac; everything else the agent does on the host (its commands, the host's own network and proxy) goes out as before. When the Mac cannot be reached, Cursor goes straight out from the host. The host's model list is read again once after updating; a Cursor conversation already running keeps its old route until a new one is started.
+- **Settings → Translation chooses how much the translation model thinks** (Off unless you choose otherwise), from the levels the model offers in a conversation.
+
+**Changed**
+
+- **A translation is sent as a conversation with that model sends it** (Pi's own request, with the model's API, headers and thinking settings), and a refusal shows the provider's own message.
+- **Thinking is translated a few paragraphs at a time** rather than one request a paragraph: the paragraphs finished since the last request go together once there are enough of them, once the first has waited a second and a half (a slow model is not kept waiting), or when the thought ends. While two requests are out, what follows piles up for the next one.
+- **Try it in Settings → Translation** shows a sample of thinking, which you can edit, beside its translation as the Thinking card shows it, with the time it took, the model and its thinking, or why it was not translated.
+- **The Usage card says when its speed is from an earlier request** ("3 requests ago"). A request that only calls a tool gives no first token to time from (Codex shows nothing of it until it ends), so the figure stays on the last request that could be timed.
+
+**Known limits:** Cursor through the Mac was tried with a local SSH server and Cursor's real CLI, not yet on a remote host.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.12
 
 **Fixed**

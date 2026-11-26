@@ -10,6 +10,8 @@
 // conversations do.
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { main, PROFILES, selectConfig } from './iris-antigravity.mjs';
@@ -131,8 +133,97 @@ async function login(bin) {
   return check(bin);
 }
 
+// On an SSH host, Cursor's own requests go out through the Mac Iris runs on. Cursor offers the models of the
+// region it is asked from, and a server's region can offer few of them; from the Mac it offers what the Cursor
+// app there does. IRIS_CURSOR_EGRESS names a port on this host that the SSH connection carries to Iris's egress
+// proxy on the Mac (which lets through Cursor's domains only). The CLI is given a proxy here, in this process,
+// that sends Cursor's domains there and everything else as it went before: straight out, or through the host's
+// own proxy. (The commands the agent runs inherit the proxy settings, so they pass through it too.) When the
+// Mac cannot be reached (Iris is closed, the Mac asleep), Cursor's requests go straight out as well.
+export const CURSOR_DOMAINS = /(^|\.)(cursor\.sh|cursor\.com|cursorapi\.com)$/i;
+const PROXY_KEYS = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
+export async function routeThroughMac(env = process.env) {
+  const egress = /^127\.0\.0\.1:(\d{1,5})$/.exec(env.IRIS_CURSOR_EGRESS ?? '');
+  if (!egress) return null;
+  // The host's own proxy, if it has one: the rest goes on through it. One this proxy cannot speak to (HTTPS,
+  // SOCKS) is left as it is, and so is Cursor's traffic.
+  const before = PROXY_KEYS.map(key => env[key]).find(text);
+  let upstream = null;
+  if (before) {
+    let url; try { url = new URL(before); } catch { return null; }
+    if (url.protocol !== 'http:') return null;
+    upstream = { host: url.hostname.replace(/^\[|\]$/g, ''), port: Number(url.port || 80),
+      auth: url.username ? `Basic ${Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString('base64')}` : null };
+  }
+  const noProxy = String(env.NO_PROXY ?? env.no_proxy ?? '').split(/[\s,]+/).map(p => p.replace(/:\d+$/, '').replace(/^\*?\./, '').toLowerCase()).filter(Boolean);
+  const bypass = host => noProxy.some(p => p === '*' || host === p || host.endsWith(`.${p}`));
+  const mac = { host: '127.0.0.1', port: Number(egress[1]), auth: null };
+  // A tunnel to host:port: through a proxy (via) with CONNECT, or straight (via null).
+  const open = (via, host, port) => new Promise((resolve, reject) => {
+    const socket = net.connect(via ? via.port : port, via ? via.host : host);
+    const fail = error => { socket.destroy(); reject(error); };
+    socket.on('error', () => {}); // (after the tunnel is handed over, its end is handled there)
+    socket.once('error', fail);
+    socket.setTimeout(20000, () => fail(new Error('timed out')));
+    if (!via) { socket.once('connect', () => { socket.setTimeout(0); socket.off('error', fail); resolve({ socket, rest: null }); }); return; }
+    const name = host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+    socket.once('connect', () => socket.write(`CONNECT ${name} HTTP/1.1\r\nHost: ${name}\r\n${via.auth ? `Proxy-Authorization: ${via.auth}\r\n` : ''}\r\n`));
+    let head = Buffer.alloc(0);
+    const read = data => {
+      head = Buffer.concat([head, data]);
+      const end = head.indexOf('\r\n\r\n');
+      if (end < 0) { if (head.length > 16384) fail(new Error('bad proxy reply')); return; }
+      socket.off('data', read);
+      if (!/^HTTP\/1\.[01] 2\d\d/.test(head.subarray(0, end).toString('latin1'))) { fail(new Error('refused')); return; }
+      socket.setTimeout(0); socket.off('error', fail);
+      resolve({ socket, rest: head.subarray(end + 4) });
+    };
+    socket.on('data', read);
+  });
+  const sockets = new Set();
+  const server = http.createServer((req, res) => {
+    // Plain HTTP, never Cursor's: as it went before.
+    let url; try { url = new URL(req.url ?? ''); } catch { url = null; }
+    if (url?.protocol !== 'http:') { res.writeHead(400).end(); return; }
+    const host = url.hostname.replace(/^\[|\]$/g, ''), via = upstream && !bypass(host.toLowerCase()) ? upstream : null;
+    const headers = { ...req.headers };
+    delete headers['proxy-connection']; delete headers['proxy-authorization'];
+    if (via?.auth) headers['proxy-authorization'] = via.auth;
+    const out = http.request(via ? { host: via.host, port: via.port, method: req.method, path: req.url, headers }
+      : { host, port: Number(url.port || 80), method: req.method, path: `${url.pathname}${url.search}`, headers }, answer => { res.writeHead(answer.statusCode ?? 502, answer.headers); answer.pipe(res); });
+    out.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
+    res.on('close', () => { if (!res.writableEnded) out.destroy(); });
+    req.pipe(out);
+  });
+  server.on('connect', async (req, client, head) => {
+    sockets.add(client); client.once('close', () => sockets.delete(client));
+    client.on('error', () => {});
+    const match = /^(\[[0-9a-f:.]+\]|[a-z0-9_.-]+):(\d{1,5})$/i.exec(String(req.url ?? ''));
+    if (!match) { client.end('HTTP/1.1 400 Bad Request\r\n\r\n'); return; }
+    const host = match[1].replace(/^\[|\]$/g, '').toLowerCase(), port = Number(match[2]);
+    const routes = [...(CURSOR_DOMAINS.test(host) ? [mac] : []), upstream && !bypass(host) ? upstream : null];
+    for (const via of routes) {
+      let tunnel; try { tunnel = await open(via, host, port); } catch { continue; }
+      if (client.destroyed) { tunnel.socket.destroy(); return; }
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (tunnel.rest?.length) client.write(tunnel.rest);
+      if (head?.length) tunnel.socket.write(head);
+      tunnel.socket.on('error', () => client.destroy()); client.on('close', () => tunnel.socket.destroy()); tunnel.socket.on('close', () => client.destroy());
+      tunnel.socket.pipe(client); client.pipe(tunnel.socket);
+      return;
+    }
+    client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  server.unref();
+  const proxy = `http://127.0.0.1:${server.address().port}`;
+  for (const key of PROXY_KEYS) env[key] = proxy;
+  return { proxy, close: () => new Promise(resolve => { server.close(resolve); for (const socket of sockets) socket.destroy(); }) };
+}
+
 let isMain = false;
 try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { /* imported */ }
+if (isMain) await routeThroughMac().catch(() => null);
 if (isMain && ['--account-check', '--account-login', '--account-logout'].includes(process.argv[2])) {
   const bin = process.argv[3];
   if (isAbsolute(process.argv[5] ?? '')) { home = process.argv[5]; try { mkdirSync(home, { recursive: true, mode: 0o700 }); } catch { /* the CLI says what is wrong */ } }

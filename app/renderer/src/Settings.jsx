@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
 import { CursorSettings, SubscriptionSettings } from './CliEngines.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, Trigger } from './ui.jsx';
-import { ModelMenu } from './Composer.jsx';
+import { ModelMenu, effortLabel } from './Composer.jsx';
+import { effortsFor } from './model-catalog.js';
 import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
 import { toRow, fromRow, pickedRows } from './model-settings.js';
@@ -471,21 +472,29 @@ function UsagePage() {
 
 // ---------------------------------------------------------------- page
 // Translation of the agent's thinking in the right panel: off or on, into which language, by which of the models
-// already set up in Settings → Models (chosen from the same menu as the model of a conversation). Every change
-// is saved as it is made and says so; "Try it" sends one sentence through the chosen model and shows what came
-// back, or why nothing did.
+// already set up in Settings → Models (chosen from the same menu as the model of a conversation), and how much
+// that model thinks first (off unless chosen: the request is the one a conversation with it sends at that
+// level). Every change is saved as it is made and says so. "Try it" translates a sample of thinking (or what
+// the person writes there) as the right panel would, and shows the translation beside it, or why there is none.
 export const TRANSLATION_LANGUAGES = [['Simplified Chinese', '简体中文'], ['Traditional Chinese', '繁體中文'], ['English', 'English'], ['Japanese', '日本語'], ['Korean', '한국어'], ['Spanish', 'Español'], ['French', 'Français'], ['German', 'Deutsch']];
-const TRIAL_SENTENCE = 'The tests pass. Next I will read the adapter.';
+const TRIAL_TEXT = '**Checking the adapter**\n\nThe tests pass, but the speed card still shows the first request. I will read `agent/iris-codex.mjs` to see when a request is counted.';
 function TranslationPage() {
-  const saved = useStore(s => s.settings?.translation) ?? { on: false, provider: '', model: '', language: 'Simplified Chinese' };
+  const saved = useStore(s => s.settings?.translation) ?? { on: false, provider: '', model: '', language: 'Simplified Chinese', thinking: 'off' };
   const catalog = useStore(s => s.catalog);
   const catalogLoading = useStore(s => s.catalogLoading);
   const [confirmed, setConfirmed] = useState(null); // the control whose change was just saved
-  const [trial, setTrial] = useState(null);         // { busy } | { text, ms } | { error }
+  const [trial, setTrial] = useState(null);         // { busy, started } | { text, ms, by } | { error, by }
+  const [sample, setSample] = useState(TRIAL_TEXT);
+  const [, tick] = useState(0);
   useEffect(() => { loadCatalog(); }, []);
+  useEffect(() => { if (!trial?.busy) return; const timer = setInterval(() => tick(n => n + 1), 100); return () => clearInterval(timer); }, [trial?.busy]);
   const models = useMemo(() => [...new Map((catalog ?? []).map(m => [`${m.provider}\n${m.id}`, m])).values()], [catalog]);
   const chosen = models.find(m => m.provider === saved.provider && m.id === saved.model);
   const language = TRANSLATION_LANGUAGES.find(([name]) => name === saved.language)?.[1] ?? saved.language;
+  // The levels the chosen model offers (as in a conversation's menu); a saved level it does not offer shows as
+  // the one it becomes.
+  const levels = chosen?.reasoning ? effortsFor(chosen) : [];
+  const thinking = levels.includes(saved.thinking ?? 'off') ? saved.thinking ?? 'off' : levels.includes('off') ? 'off' : levels[0] ?? 'off';
   const clean = error => error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
   const save = async (change, control) => {
     try {
@@ -494,17 +503,23 @@ function TranslationPage() {
       setTimeout(() => setConfirmed(now => now === control ? null : now), 1800);
     } catch (error) { setTrial({ error: clean(error) }); }
   };
+  const by = chosen ? `${chosen.name ?? chosen.id}${levels.length ? ` · Thinking ${effortLabel(thinking).toLowerCase()}` : ''}` : '';
   const tryIt = async () => {
     const started = Date.now();
-    setTrial({ busy: true });
-    try { setTrial({ text: await api('testTranslation', saved), ms: Date.now() - started }); }
-    catch (error) { setTrial({ error: clean(error) }); }
+    setTrial({ busy: true, started });
+    try { setTrial({ text: await api('testTranslation', { ...saved, thinking }, sample), ms: Date.now() - started, by }); }
+    catch (error) { setTrial({ error: clean(error), by }); }
   };
   const Saved = ({ control }) => confirmed === control ? <span className="saved-tick" role="status"><Icon name="check" size={12} /> Saved</span> : null;
   const state = !saved.on ? 'Off: thinking is shown as the model wrote it.'
     : !chosen ? 'On, but no model is chosen yet. Pick one below.'
     : `On: thinking in the right panel is shown in ${language}.`;
   const modelLabel = chosen ? chosen.name ?? chosen.id : catalogLoading && !models.length ? 'Reading your models…' : models.length ? 'Choose a model' : 'No models yet';
+  // Paragraphs as the Thinking card shows them: a "**Title**" paragraph is a heading.
+  const paragraphs = text => String(text).split(/\n{2,}/).map(p => p.trim()).filter(Boolean).map((p, i) => {
+    const heading = /^\*\*([^*\n]+)\*\*$/.exec(p);
+    return <p key={i} className={heading ? 'heading' : ''}>{heading ? heading[1] : p}</p>;
+  });
   return <>
     <section className="section" aria-label="Translation">
       <ul className="rows">
@@ -539,27 +554,45 @@ function TranslationPage() {
               </Trigger>
             </div>
           </div>
+          {levels.length > 0 && <div className="row-head">
+            <div className="setting-text">
+              <span className="row-name">Thinking <Saved control="thinking" /></span>
+              <span className="row-meta">How much the model thinks before translating. Off is quickest.</span>
+            </div>
+            <div className="row-actions">
+              <Trigger className="setting-select" label="Thinking" width={200} placement="bottom-end"
+                menu={close => <MenuSection>{levels.map(level => <MenuItem key={level} label={effortLabel(level)} checked={thinking === level}
+                  onClick={() => { close(); if (thinking !== level) save({ thinking: level }, 'thinking'); }} />)}</MenuSection>}>
+                <span>{effortLabel(thinking)}</span><Icon name="chevronDown" size={11} />
+              </Trigger>
+            </div>
+          </div>}
         </li>
       </ul>
     </section>
     <section className="section" aria-label="Try it">
       <div className="section-head"><h2 className="section-title">Try it</h2></div>
-      <ul className="rows">
-        <li className="row-card setting-rows">
-          <div className="row-head">
-            <div className="setting-text"><span className="row-meta">One sentence through the chosen model, to see that it answers.</span></div>
-            <div className="row-actions">
-              <button type="button" className="button small" disabled={!chosen || trial?.busy} onClick={tryIt}>{trial?.busy ? <><Spinner size={12} /> Translating…</> : 'Translate a sentence'}</button>
-            </div>
+      <div className="trial">
+        <div className="trial-panes">
+          <label className="trial-pane">
+            <span className="trial-pane-head">Thinking, as written</span>
+            <textarea className="trial-source" value={sample} spellCheck={false} aria-label="Text to translate"
+              onChange={e => { setSample(e.target.value); if (!trial?.busy) setTrial(null); }} />
+          </label>
+          <div className={`trial-pane trial-result ${trial?.error ? 'failed' : ''}`} role="status">
+            <span className="trial-pane-head">{language}</span>
+            {trial?.busy ? <div className="trial-placeholder"><Spinner size={14} kind="orbit" /><span>Translating… {((Date.now() - trial.started) / 1000).toFixed(1)}s</span></div>
+              : trial?.error ? <div className="trial-error"><span className="trial-error-title"><Icon name="alert" size={13} /> Not translated</span><span className="trial-error-text">{trial.error}</span></div>
+              : trial?.text ? <div className="trial-text">{paragraphs(trial.text)}</div>
+              : <div className="trial-placeholder"><Icon name="globe" size={16} /><span>{chosen ? 'The translation shows here.' : 'Choose a model above first.'}</span></div>}
           </div>
-          <div className="translation-trial-row"><span className="translation-trial-label">English</span><span>{TRIAL_SENTENCE}</span></div>
-          <div className={`translation-trial-row ${trial?.error ? 'failed' : trial?.text ? 'done' : ''}`} role="status">
-            <span className="translation-trial-label">{language}</span>
-            <span>{trial?.busy ? 'Waiting for the model…' : trial?.error ? trial.error : trial?.text ? trial.text : chosen ? 'Not tried yet.' : 'Choose a model first.'}</span>
-            {trial?.text && <span className="translation-trial-time">{(trial.ms / 1000).toFixed(1)}s</span>}
-          </div>
-        </li>
-      </ul>
+        </div>
+        <div className="trial-bar">
+          <span className="trial-meta">{trial?.text ? `${(trial.ms / 1000).toFixed(1)}s · ${trial.by}` : by}</span>
+          <button type="button" className="button small primary" disabled={!chosen || trial?.busy || !sample.trim()} onClick={tryIt}>
+            {trial?.busy ? 'Translating…' : trial?.text || trial?.error ? 'Translate again' : 'Translate'}</button>
+        </div>
+      </div>
     </section>
   </>;
 }

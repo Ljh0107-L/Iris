@@ -204,7 +204,7 @@ test('a reply too short to time from its first token leaves the last one that co
   }
   const untimed = message({ __timing: undefined });
   assert.equal(speedReply([first, untimed]), first);
-  assert.match(speedDisplay(usageOf([first]), { earlier: true }).title, /no usable output or timing, or was too short to time/);
+  assert.match(speedDisplay(usageOf([first]), { earlier: true }).title, /could not be timed from their first token .*, or were too short to time/);
   const other = { ...untimed, model: 'other-model' };
   assert.equal(speedReply([first, other]), other, 'never borrow another model\'s speed');
   assert.equal(speedReply([]), undefined);

@@ -290,7 +290,7 @@ export function speedDisplay(usage, { earlier = false } = {}) {
       + (usage.speedTimeEstimated ? ' Older history uses the source message timestamp as an approximate request start.' : '')
       + ' Provider token totals remain unchanged.'
       + (usage.speedPartial ? ' Only calls with usable timing and output are included.' : '')
-      + (earlier ? ' From an earlier reply of this model: the last one has no usable output or timing, or was too short to time.' : ''),
+      + (earlier ? ' From an earlier request of this model: the ones after it could not be timed from their first token (a request that only calls a tool shows nothing until it ends), or were too short to time.' : ''),
   };
 }
 

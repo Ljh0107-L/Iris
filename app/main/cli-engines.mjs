@@ -28,8 +28,11 @@ export const CLI_ENGINES = {
     install: 'Install it with npm install -g @openai/codex (or brew install codex), then try again.' },
   // Cursor's CLI is `cursor-agent` (its installer also names it `agent`, a name other tools use as well). Its
   // sign-in is the user's own Cursor account, kept by the CLI; Iris opens the page its login names (signInPage).
+  // On SSH hosts its requests to Cursor go out through this Mac (egress, see routeThroughMac in the adapter):
+  // Cursor offers the models of the region it is asked from.
   cursor: { id: 'cursor', label: 'Cursor', bin: 'cursor-agent', adapter: 'iris-cursor.mjs', signInPage: true, login: () => ['login'],
-    install: 'Install it from Settings → Subscriptions, then try again.' },
+    install: 'Install it from Settings → Subscriptions, then try again.',
+    egress: ['cursor.sh:443', '.cursor.sh:443', 'cursor.com:443', '.cursor.com:443', 'cursorapi.com:443', '.cursorapi.com:443'] },
 };
 export const isCliEngineId = id => typeof id === 'string' && Object.hasOwn(CLI_ENGINES, id);
 export const cliEngine = id => CLI_ENGINES[isCliEngineId(id) ? id : 'antigravity'];
@@ -57,7 +60,8 @@ export function cliBoot(bin, record, sessionsDir, remote = false, bypassPermissi
 
 // menusDir: where the CLI may open one empty conversation to say what a new one can choose from (Antigravity
 // has no other way to ask); given only while Iris has no menus for that CLI on that machine.
-export async function cliAccountStatus(env, { bin, local, facts, login = false, logout = false, engine, home = null, menusDir = null, run = runSsh, invoke = exec }) {
+// forward (on a host, for a CLI with egress): the port that carries its requests to this Mac (runSsh's forward).
+export async function cliAccountStatus(env, { bin, local, facts, login = false, logout = false, engine, home = null, menusDir = null, forward = null, run = runSsh, invoke = exec }) {
   if (login && env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
   const args = [login ? '--account-login' : logout ? '--account-logout' : '--account-check', bin, app.version, ...(home ? [home] : [])];
   const timeout = login ? 145000 : 35000;
@@ -66,7 +70,8 @@ export async function cliAccountStatus(env, { bin, local, facts, login = false, 
     ({ stdout: out } = await invoke(local.node, [cliAdapterPath(engine), ...args], { cwd: homedir(), env: { ...process.env, ...local.extraEnv, ...(menusDir ? { IRIS_CLI_MENUS_DIR: menusDir } : {}) }, timeout }));
   } else {
     const cmd = [facts.node, remoteCliAdapter(facts, engine), ...args].map(shellQuote).join(' ');
-    out = await run(env, `cd "$HOME" && ${menusDir ? `IRIS_CLI_MENUS_DIR=${shellQuote(menusDir)} ` : ''}exec ${cmd}`, { timeout });
+    const vars = [...(menusDir ? [`IRIS_CLI_MENUS_DIR=${shellQuote(menusDir)}`] : []), ...(forward ? [`IRIS_CURSOR_EGRESS=127.0.0.1:${forward.remotePort}`] : [])];
+    out = await run(env, `cd "$HOME" && ${vars.map(v => `${v} `).join('')}exec ${cmd}`, { timeout, ...(forward ? { forward } : {}) });
   }
   const line = out.trim().split('\n').at(-1);
   let result;

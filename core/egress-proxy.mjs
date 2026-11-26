@@ -11,6 +11,15 @@ import net from 'node:net';
 
 export function startEgressProxy({ allow = [], port = 0 } = {}) {
   const allowed = new Set(allow.map(entry => entry.toLowerCase()));
+  // An entry may name a domain with all its subdomains: ".cursor.sh:443" allows "api2.cursor.sh:443".
+  const permits = target => {
+    if (allowed.has(target)) return true;
+    const port = target.slice(target.lastIndexOf(':'));
+    for (let host = target.slice(0, -port.length), i = host.indexOf('.'); i >= 0; i = host.indexOf('.', i + 1)) {
+      if (allowed.has(host.slice(i) + port)) return true;
+    }
+    return false;
+  };
   const stats = { tunnels: 0, rejected: [] };
   const sockets = new Set();
   const track = socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); return socket; };
@@ -22,7 +31,7 @@ export function startEgressProxy({ allow = [], port = 0 } = {}) {
     if (targetUrl.protocol !== 'http:') { res.writeHead(405).end('Use CONNECT for HTTPS'); return; }
     const port = Number(targetUrl.port || 80);
     const target = `${targetUrl.hostname}:${port}`.toLowerCase();
-    if (port === 0 || !allowed.has(target)) {
+    if (port === 0 || !permits(target)) {
       stats.rejected.push(target);
       if (stats.rejected.length > 100) stats.rejected.shift();
       res.writeHead(403).end('Forbidden');
@@ -50,7 +59,7 @@ export function startEgressProxy({ allow = [], port = 0 } = {}) {
   server.on('connect', (req, clientSocket, head) => {
     const target = String(req.url ?? '').toLowerCase();
     const match = /^(\[[0-9a-f:]+\]|[a-z0-9.-]+):(\d{1,5})$/.exec(target);
-    if (!match || !allowed.has(target)) {
+    if (!match || !permits(target)) {
       stats.rejected.push(target);
       if (stats.rejected.length > 100) stats.rejected.shift();
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');

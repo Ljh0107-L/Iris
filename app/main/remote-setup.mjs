@@ -38,10 +38,14 @@ export function sshBaseArgs(env) {
   return ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', ...sshMuxArgs(), ...(env.sshArgs ?? [])];
 }
 
-export function runSsh(env, script, { input, upload, timeout = 120000, onUpload } = {}) {
+// forward: { remotePort, localPort } carries a port on the host's loopback to one on this Mac's. Over a shared
+// connection the forward is set up once on it and stays as long as it does (asking again is a no-op); a port
+// already taken on the host fails the command with "remote port forwarding failed".
+export function runSsh(env, script, { input, upload, timeout = 120000, onUpload, forward = null } = {}) {
   return new Promise((resolve, reject) => {
+    const reverse = forward ? ['-o', 'ExitOnForwardFailure=yes', '-R', `127.0.0.1:${forward.remotePort}:127.0.0.1:${forward.localPort}`] : [];
     // Always POSIX sh: the login shell may be zsh/fish, where e.g. unmatched globs are errors.
-    const child = spawn('ssh', [...sshBaseArgs(env), env.host, `sh -c ${shellQuote(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('ssh', [...sshBaseArgs(env), ...reverse, env.host, `sh -c ${shellQuote(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`${env.label ?? env.host}: timed out`)); }, timeout);
     // Decode as a stream: a multi-byte character split across two chunks must not become U+FFFD.

@@ -356,7 +356,7 @@ export class SessionManager extends EventEmitter {
         const providerById = new Map(this.store.settings.providers.map(p => [p.id, p]));
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
         return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
-          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m, providerById.get(m.provider)) ? ['pi', CLAUDE_ENGINE] : ['pi'], ...(m.environments ? { environments: m.environments } : {}) }));
+          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, ...(m.compat ? { compat: m.compat } : {}), contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m, providerById.get(m.provider)) ? ['pi', CLAUDE_ENGINE] : ['pi'], ...(m.environments ? { environments: m.environments } : {}) }));
       } finally { await session.stop(); }
     })();
     const cached = this.catalogCache;
@@ -525,6 +525,17 @@ export class SessionManager extends EventEmitter {
     return entry.promise;
   }
 
+  // A CLI whose requests go out through this Mac on SSH hosts (its engine's egress): a port on the host that the
+  // shared SSH connection carries to the egress proxy here. One per host while Iris runs; fresh: it was taken.
+  async #cliForward(env, engine, fresh = false) {
+    const hosts = cliEngine(engine).egress;
+    if (env.kind !== 'ssh' || !hosts?.length) return null;
+    const proxy = await this.#egressFor(hosts);
+    const ports = this.cliForwards ??= new Map();
+    if (fresh || !ports.has(env.id)) ports.set(env.id, 30000 + Math.floor(Math.random() * 30000));
+    return { localPort: proxy.port, remotePort: ports.get(env.id) };
+  }
+
   async #egressFor(hosts, { required = false } = {}) {
     if (!hosts.length && !required) return null;
     if (!this.egress) {
@@ -616,7 +627,8 @@ export class SessionManager extends EventEmitter {
     const env = this.env(environmentId);
     // The Subscriptions page also wants Antigravity's plan and menus, which it only names when asked (see askCliOptions).
     const menus = !login && !logout && (engine === ANTIGRAVITY_ENGINE ? !(this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length && this.store.settings.cliPlans?.[`${engine}:${env.id}`])
-      : engine === CURSOR_ENGINE && !this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length);
+      // Cursor's models on a host read before its requests went out through this Mac are read again, once.
+      : engine === CURSOR_ENGINE && (!this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length || (env.kind === 'ssh' && !this.store.settings.cliOptionsRouted?.[`${engine}:${env.id}`])));
     const result = await this.#readCliAccount(env, login, engine, logout, account, menus);
     if (result.signedIn && (login || logout)) {
       // Only an explicit account action should invalidate standby/reconnect an open chat.
@@ -696,10 +708,22 @@ export class SessionManager extends EventEmitter {
       // Antigravity names its models only in a conversation, so to learn them it opens an empty one in this folder.
       // Cursor lists its models over ACP, which costs seconds: only when asked too (the folder is not used).
       const menusDir = menus && (engine === ANTIGRAVITY_ENGINE || engine === CURSOR_ENGINE) ? (env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-menus') : `${facts.root}/cli-menus`) : null;
-      const { options, ...result } = await cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account), menusDir, run: this.runRemote });
+      // On a host, Cursor answers as it will in a conversation there: through this Mac (#cliForward).
+      const ask = forward => cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account), menusDir, forward, run: this.runRemote });
+      const forward = await this.#cliForward(env, engine);
+      let status;
+      try { status = await ask(forward); } catch (error) {
+        if (!forward || !/remote port forwarding failed/i.test(`${error?.message ?? ''}\n${error?.stderr ?? ''}`)) throw error;
+        status = await ask(await this.#cliForward(env, engine, true)); // that port was taken on the host
+      }
+      const { options, ...result } = status;
       // The CLI also said what a new conversation can choose from: its menus exist before the first one opens,
       // and follow the account (a plan change shows at the next check).
       if (options) this.#rememberCliOptions({ engine, environmentId: env.id, cliAccount: account }, { options });
+      if (options && forward) {
+        const routed = this.store.settings.cliOptionsRouted ??= {};
+        if (!routed[`${engine}:${env.id}`]) { routed[`${engine}:${env.id}`] = true; try { this.store.saveSettings(); } catch { /* read again next time */ } }
+      }
       this.#rememberIdentity(engine, account, result);
       // Antigravity names the plan only together with its menus: kept for the checks that do not ask for them.
       if (engine === ANTIGRAVITY_ENGINE) {
@@ -1380,8 +1404,10 @@ export class SessionManager extends EventEmitter {
       const layout = claude ? await this.prepareClaude(env.id, claudeProgress) : null;
       // A running relay Pi retains its proxy environment. Even if a fresh probe now says the
       // endpoint is reachable, reconnect the old fixed forward rather than strand that Pi.
-      const hosts = cli ? [] : record.egressPort ? [...new Set([...(facts.unreachable ?? []), ...await this.providerHosts()])] : facts.unreachable ?? [];
-      const egressProxy = cli ? null : await this.#egressFor(hosts, { required: !!record.egressPort });
+      // A CLI with egress (Cursor) sends its requests through this Mac, over the session's own connection.
+      const routed = cli ? cliEngine(record.engine).egress ?? [] : [];
+      const hosts = cli ? routed : record.egressPort ? [...new Set([...(facts.unreachable ?? []), ...await this.providerHosts()])] : facts.unreachable ?? [];
+      const egressProxy = cli && !routed.length ? null : await this.#egressFor(hosts, { required: !!record.egressPort });
       this.#assertCurrent(record, runtime);
       // The remote port is fixed per session: the relay's Pi keeps HTTPS_PROXY across reconnects.
       if (egressProxy && !record.egressPort) this.#save(record, { egressPort: 30000 + Math.floor(Math.random() * 30000) });
@@ -1390,7 +1416,7 @@ export class SessionManager extends EventEmitter {
       if (cli) {
         // Only remote paths and the conversation identity cross SSH; agy uses the host's own login.
         boot = cliBoot(agy, record, `${facts.agentDir}/sessions`, true, bypass, this.#cliHome(env, facts, record.engine, record.cliAccount));
-        spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir }, argv: [facts.node, remoteCliAdapter(facts, record.engine)] };
+        spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir, ...(egress && routed.length ? { IRIS_CURSOR_EGRESS: `127.0.0.1:${egress.remotePort}` } : {}) }, argv: [facts.node, remoteCliAdapter(facts, record.engine)] };
       } else if (claude) {
         boot = { claudeCode: { ...claudeConfig, bin: layout.bin, configDir: layout.configDir, sessionsDir: `${facts.agentDir}/sessions`, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, env: this.claudeEnv } };
         spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir, ...(egress ? egressEnv(egress.remotePort) : {}) }, argv: [facts.node, `${facts.root}/ext/iris-claude.mjs`] };

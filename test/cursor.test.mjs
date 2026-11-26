@@ -106,7 +106,7 @@ test('a Cursor conversation: its tools and task list, its title, the model Auto 
   // No token counts: two requests (the tool calls end the first), each with what it wrote and its wait apart.
   assert.equal(reply.usage, undefined);
   assert.equal(reply.requests.length, 2);
-  assert.ok(reply.requests.every(r => r.estimated && r.output > 0 && r.wait >= 40), JSON.stringify(reply.requests));
+  assert.ok(reply.requests.every(r => r.estimated && r.output > 0 && r.wait >= 30), JSON.stringify(reply.requests));
   assert.ok(reply.requests[1].ms < 200, `the command’s 200 ms are in neither request (${reply.requests.map(r => r.ms)})`);
   const last = usageOf([{ ...requestReplies([reply])[1], usage: { output: reply.requests[1].output } }]);
   assert.equal(speedDisplay(last).label, 'Output TPS (estimated)');

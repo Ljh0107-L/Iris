@@ -157,18 +157,19 @@ function syncCompactionReserves() {
 }
 
 const TRANSLATION_KEY = 'iris-translation'; // (0.1.9 kept a key of its own for translation; removed when the setting is next saved)
-// Translate with a model from Settings → Models: the model's own API and address, its provider's key and headers.
+// Translate with a model from Settings → Models, as a conversation with it asks it (its provider's key and
+// headers), thinking as much as Settings → Translation says (off unless chosen).
 async function translateWith(choice, text, timeoutMs) {
   if (!choice?.provider || !choice?.model) throw new Error('Choose a model for translation in Settings → Translation.');
   const provider = store.settings.providers.find(p => p.id === choice.provider);
   const model = (await manager.catalog().catch(() => [])).find(m => m.provider === choice.provider && m.id === choice.model);
   if (!provider || !model) throw new Error('The model chosen for translation is no longer in Settings → Models. Choose another in Settings → Translation.');
-  return translateText({ api: model.api, baseUrl: model.baseUrl, headers: provider.headers, apiKey: store.getKey(provider.id), model: model.id, text, language: choice.language || 'Simplified Chinese', ...(timeoutMs ? { timeoutMs } : {}) });
+  return translateText({ model, headers: provider.headers, apiKey: store.getKey(provider.id), text, language: choice.language || 'Simplified Chinese', thinking: choice.thinking || 'off', ...(timeoutMs ? { timeoutMs } : {}) });
 }
 function publicSettings() {
   const providers = store.settings.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) }));
   return { ...store.settings, providers, builtinProviders: BUILTIN_PROVIDERS,
-    ...(store.settings.translation ? { translation: { on: store.settings.translation.on === true, provider: store.settings.translation.provider ?? '', model: store.settings.translation.model ?? '', language: store.settings.translation.language ?? 'Simplified Chinese' } } : {}) };
+    ...(store.settings.translation ? { translation: { on: store.settings.translation.on === true, provider: store.settings.translation.provider ?? '', model: store.settings.translation.model ?? '', language: store.settings.translation.language ?? 'Simplified Chinese', thinking: store.settings.translation.thinking ?? 'off' } } : {}) };
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('iris:event', { channel, payload }); };
@@ -469,7 +470,8 @@ const api = {
   // one of the models already set up in Settings → Models (its provider, address and key are used as they are).
   setTranslation(choice) {
     const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
-    store.settings.translation = { on: choice?.on === true, provider: text(choice?.provider, 120), model: text(choice?.model, 200), language: text(choice?.language, 60) || 'Simplified Chinese' };
+    const thinking = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(choice?.thinking) ? choice.thinking : 'off';
+    store.settings.translation = { on: choice?.on === true, provider: text(choice?.provider, 120), model: text(choice?.model, 200), language: text(choice?.language, 60) || 'Simplified Chinese', thinking };
     if (store.hasKey(TRANSLATION_KEY)) store.setKey(TRANSLATION_KEY, null); // the key of the separate API that 0.1.9 asked for
     store.saveSettings();
     return publicSettings();
@@ -480,7 +482,7 @@ const api = {
     return translateWith(choice, text);
   },
   // One sentence through the chosen model, so a model that cannot be reached shows at once.
-  testTranslation: choice => translateWith(choice, 'The tests pass. Next I will read the adapter.', 30000),
+  testTranslation: (choice, text) => translateWith(choice, typeof text === 'string' && text.trim() ? text.slice(0, 2000) : 'The tests pass. Next I will read the adapter.', 30000),
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
   searchFiles: (target, query = '') => typeof target === 'string'

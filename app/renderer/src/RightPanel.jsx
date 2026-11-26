@@ -7,6 +7,7 @@ import { api, openSettings, stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
 import { backgroundElapsed, sortedBackgroundJobs } from './background-jobs.js';
+import { BATCH_WAIT_MS, batchesOf, nextBatches, translatedParagraphs } from './thought-batches.js';
 
 function Card({ title, children, open: initial = true, aside, collapsible = true }) {
   const [open, setOpen] = useState(initial);
@@ -63,7 +64,11 @@ export function UsageMetrics({ transcript, antigravity, turnRequests }) {
   // Compare one provider/model and matching token/timing provenance.
   const recent = messages.slice(-14).filter(m => m.provider === speedMessage.provider && (m.responseModel ?? m.model) === (speedMessage.responseModel ?? speedMessage.model))
     .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === timed.speedBasis && u.speedTokensEstimated === timed.speedTokensEstimated && u.speedTimeEstimated === timed.speedTimeEstimated).map(u => u.tps);
-  const speed = speedDisplay(timed, { earlier: speedMessage !== messages.at(-1) });
+  // The requests after the one shown could not be timed from their first token (one that only calls a tool
+  // shows nothing until it ends, with Codex): how many there have been is said, so a figure that stays is not
+  // taken for the latest one.
+  const behind = messages.length - 1 - messages.lastIndexOf(speedMessage);
+  const speed = speedDisplay(timed, { earlier: behind > 0 });
   const tier = speedTier(speedMessage);
   const peak = Math.max(...recent, 1);
   const rows = last ? [
@@ -77,7 +82,7 @@ export function UsageMetrics({ transcript, antigravity, turnRequests }) {
       <div className="usage-speed">
         <div className="usage-speed-metric" title={speed.title}>
           <div className="usage-speed-value"><b>{speed.value}</b><span>tok/s</span></div>
-          <span className="usage-speed-kind">{speed.label}{tier && <span className={`usage-speed-tier ${tier.slower ? 'slower' : ''}`} title={tier.title}>{tier.label}</span>}</span>
+          <span className="usage-speed-kind">{speed.label}{behind > 0 && <span className="usage-speed-ago"> · {behind === 1 ? '1 request ago' : `${behind} requests ago`}</span>}{tier && <span className={`usage-speed-tier ${tier.slower ? 'slower' : ''}`} title={tier.title}>{tier.label}</span>}</span>
         </div>
         {recent.length > 1 && <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>}
       </div>
@@ -219,21 +224,28 @@ function EngineAgents({ transcript }) {
 }
 
 // Thinking shown in the reader's language: only when translation is on in Settings → Translation, by the model
-// chosen there. A thought is translated a paragraph at a time: each paragraph as soon as it is finished, and
-// the one still being written once it has stood still for a moment (Antigravity sends a whole thought at
-// once, and it is then "the last thing written" until the next step begins). A paragraph is never sent twice.
+// chosen there. A thought is translated in batches of its paragraphs (see thought-batches.js): each paragraph
+// counts once it is finished, and the one still being written once it has stood still for a moment (Antigravity
+// sends a whole thought at once, and it is then "the last thing written" until the next step begins). A batch
+// is never sent twice.
 const LANGUAGE_NAMES = { 'Simplified Chinese': '简体中文', 'Traditional Chinese': '繁體中文', English: 'English', Japanese: '日本語', Korean: '한국어', Spanish: 'Español', French: 'Français', German: 'Deutsch' };
 const translations = new Map(); // "provider\nmodel\nlanguage\nparagraph" -> { pending } | { text } | { error, at }
 const translationWatchers = new Set();
-// Only what the card shows is worth translating. A fast model goes through a thought a second: paragraphs still
+// Only what the card shows is worth translating. A fast model goes through a thought a second: batches still
 // waiting when their thought has left the card are dropped, not translated one after another while the thought
 // on show waits behind them. A few go out at a time, in the order they are read.
-const TRANSLATE_AT_ONCE = 3, TRANSLATE_LIMIT = 6, RETRY_MS = 20000;
+const TRANSLATE_AT_ONCE = 2, TRANSLATE_LIMIT = 6, RETRY_MS = 20000;
 const translationQueue = []; // { key, paragraph }, not yet asked for
 const translationsOut = new Set(); // keys asked for and not yet answered
 let translationsWanted = new Map(); // what the card shows now: key -> paragraph
 // Requests already sent for a thought that has since left are not waited for (up to a limit on all of them):
 // the thought on show starts at once.
+// How many more batches of the thought on show may go out now (those asked for or waiting count).
+const translationSlots = () => {
+  let busy = 0;
+  for (const key of translationsWanted.keys()) if (translationsOut.has(key) || translationQueue.some(q => q.key === key)) busy++;
+  return Math.max(0, TRANSLATE_AT_ONCE - busy);
+};
 function pumpTranslations() {
   const shown = () => { let n = 0; for (const key of translationsOut) if (translationsWanted.has(key)) n++; return n; };
   while (translationQueue.length && translationsOut.size < TRANSLATE_LIMIT && shown() < TRANSLATE_AT_ONCE) {
@@ -282,24 +294,49 @@ function ThinkingCard({ transcript, working }) {
   const [shown, setShown] = useState(null); // the thought that has been on the card long enough to be read
   useEffect(() => { const key = thought?.key ?? null; const timer = setTimeout(() => setShown(key), SHOWN_MS); return () => clearTimeout(timer); }, [thought?.key]);
   const finished = shown !== (thought?.key ?? null) ? [] : live && settled !== thought?.text ? paragraphs.slice(0, -1) : paragraphs;
-  const translated = useTranslation(finished, choice);
+  const on = !!(choice?.on && choice.provider && choice.model);
+  // The batches of this thought so far (where each ends). A paragraph taken in while it stood still and that
+  // grew again takes its batch back out, to go again when it is done.
+  const [cut, setCut] = useState({ key: null, ends: [] });
+  const ends = cut.key === thought?.key ? cut.ends.filter(end => end <= finished.length) : [];
+  const batches = batchesOf(finished, ends);
+  const translated = useTranslation(batches.map(batch => batch.text), choice);
+  const tail = useRef({ key: null, start: -1, at: 0 }), [, tick] = useState(0);
+  useEffect(() => {
+    const start = ends.at(-1) ?? 0;
+    if (!on || !thought || finished.length <= start) return;
+    if (tail.current.key !== thought.key || tail.current.start !== start) tail.current = { key: thought.key, start, at: Date.now() };
+    const waited = Date.now() - tail.current.at;
+    const next = nextBatches({ finished, ends, complete: !live && finished.length === paragraphs.length, waited, slots: translationSlots() });
+    if (next.length !== ends.length) { setCut({ key: thought.key, ends: next }); return; }
+    // Not yet: when the first of these has waited long enough (or when a request ends, which redraws the card).
+    if (waited < BATCH_WAIT_MS) { const timer = setTimeout(() => tick(n => n + 1), BATCH_WAIT_MS - waited + 20); return () => clearTimeout(timer); }
+  });
   const [original, setOriginal] = useState(false);
   useEffect(() => { setOriginal(false); }, [thought?.key]);
   const feed = useRef(null), following = useRef(true);
   useLayoutEffect(() => { following.current = true; }, [thought?.key]);
   useLayoutEffect(() => { const el = feed.current; if (el && following.current) el.scrollTop = el.scrollHeight; });
-  const on = !!(choice?.on && choice.provider && choice.model);
   if (!thought) return <Card title="Thinking" collapsible={false} aside={<span>{working ? 'Nothing yet' : 'None this turn'}</span>} />;
-  const results = finished.map(translated);
-  const failed = results.find(result => result?.error), pending = on && (results.some(result => result?.pending) || finished.length < paragraphs.length);
+  const results = batches.map(batch => translated(batch.text));
+  const failed = results.find(result => result?.error), pending = on && (results.some(result => result?.pending) || ends.length === 0 || (ends.at(-1) ?? 0) < paragraphs.length);
   const language = LANGUAGE_NAMES[choice?.language] ?? choice?.language;
+  // Each paragraph as it is shown: its translation, or the batch's whole translation in its first paragraph's place.
+  const shownText = paragraphs.map(paragraph => ({ text: paragraph, pending: false }));
+  if (!original) batches.forEach((batch, i) => {
+    const result = results[i];
+    if (result?.text) translatedParagraphs(batch, result.text).forEach((text, k) => { shownText[batch.from + k] = text == null ? null : { text, pending: false }; });
+    else if (result?.pending) for (let k = batch.from; k < batch.to; k++) shownText[k] = { text: paragraphs[k], pending: true };
+  });
   return <Card title="Thinking" aside={live ? <span className="panel-pill">Live</span> : null}>
     <div className="thinking-feed" ref={feed} onScroll={e => { const el = e.currentTarget; following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>
-      {paragraphs.map((paragraph, index) => {
-        const result = !original && index < finished.length ? translated(paragraph) : null;
+      {shownText.flatMap((item, index) => {
+        if (!item) return [];
         // A thought's heading, as Cursor's and Codex's summaries open theirs ("**Considering the tests**"): bold, not asterisks.
-        const shown = result?.text ?? paragraph, heading = /^\*\*([^*\n]+)\*\*$/.exec(shown.trim());
-        return <p key={index} className={`${live && index === paragraphs.length - 1 ? 'live' : ''} ${result?.pending ? 'pending' : ''} ${heading ? 'heading' : ''}`}>{heading ? heading[1] : shown}</p>;
+        return item.text.split(/\n{2,}/).map((text, k) => {
+          const heading = /^\*\*([^*\n]+)\*\*$/.exec(text.trim());
+          return <p key={`${index}:${k}`} className={`${live && index === paragraphs.length - 1 ? 'live' : ''} ${item.pending ? 'pending' : ''} ${heading ? 'heading' : ''}`}>{heading ? heading[1] : text}</p>;
+        });
       })}
     </div>
     {on && <div className={`thinking-foot ${failed ? 'failed' : ''}`} role="status">

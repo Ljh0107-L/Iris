@@ -1,6 +1,6 @@
 {
   "name": "iris",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "One desktop app for your coding agents: Pi, Claude Code, Codex and Antigravity, on this Mac and over SSH",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,7 @@
   "type": "module",
   "private": true,
   "dependencies": {
+    "@earendil-works/pi-ai": "^1.4.0",
     "@earendil-works/pi-coding-agent": "^1.4.0",
     "node-pty": "^1.1.0",
     "yaml": "2.9.0"

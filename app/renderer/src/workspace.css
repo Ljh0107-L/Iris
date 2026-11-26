@@ -2495,12 +2495,29 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .trigger.setting-select.unset { color: var(--muted); }
 .setting-rows .button.small { display: inline-flex; align-items: center; gap: 6px; }
 .saved-tick { display: inline-flex; align-items: center; gap: 3px; font-size: var(--fs-xs); font-weight: 400; color: var(--green, #34c759); animation: rise .18s var(--ease, ease-out); }
-.setting-rows > .translation-trial-row { display: flex; align-items: baseline; gap: 12px; padding: 10px 0; font-size: var(--fs-md); line-height: 1.5; color: var(--muted); }
-.translation-trial-row.done { color: var(--text); }
-.translation-trial-row.failed { color: var(--red); }
-.translation-trial-label { flex-shrink: 0; width: 76px; font-size: var(--fs-xs); color: var(--faint); }
-.translation-trial-row > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.translation-trial-time { flex-shrink: 0; font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
+/* Settings → Translation, "Try it": the thinking as written and its translation side by side (one above the
+   other when narrow), as the Thinking card would show it; what it took, and the button, along the bottom. */
+.trial { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised); overflow: hidden; }
+.trial-panes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.trial-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 168px; padding: 14px 16px; }
+.trial-pane + .trial-pane { border-left: 1px solid var(--hairline); }
+.trial-pane-head { font-size: var(--fs-xs); font-weight: 500; color: var(--faint); letter-spacing: .01em; }
+.trial-source { flex: 1; min-height: 120px; resize: vertical; border: 0; outline: none; padding: 0; background: transparent; color: var(--text-2); font: inherit; font-size: var(--fs-sm); line-height: 1.55; }
+.trial-source:focus-visible { box-shadow: none; }
+.trial-text { font-size: var(--fs-sm); line-height: 1.55; color: var(--text); overflow-wrap: anywhere; }
+.trial-text p { margin: 0 0 9px; white-space: pre-wrap; }
+.trial-text p:last-child { margin-bottom: 0; }
+.trial-text p.heading { font-weight: 600; margin-bottom: 4px; }
+.trial-placeholder { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--faint); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-align: center; }
+.trial-result { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+.trial-result.failed { background: color-mix(in srgb, var(--red) 7%, transparent); }
+.trial-error { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.trial-error-title { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--red); }
+.trial-error-text { font-family: var(--mono, ui-monospace, monospace); font-size: var(--fs-xs); line-height: 1.5; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; max-height: 160px; overflow: auto; }
+.trial-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 10px 16px; border-top: 1px solid var(--hairline); }
+.trial-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
+.trial-bar .button { flex-shrink: 0; }
+@media (max-width: 720px) { .trial-pane + .trial-pane { border-left: 0; border-top: 1px solid var(--hairline); } }
 
 /* Settings → Cursor: its models, each with a switch, under a search field. */
 .cursor-model-search { width: 100%; height: 32px; margin: 2px 0 0; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raised); color: var(--text); font: inherit; font-size: var(--fs-md); }
