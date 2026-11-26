@@ -77,7 +77,9 @@ function handle(m) {
       }
       // A visual (Iris's MCP tool): the page is the file FAKE_CODEX_VISUAL_FILE (read each time), FAKE_CODEX_VISUAL, or a small one of its own.
       if (text.includes('show a visual')) {
-        const item = { type: 'mcpToolCall', id: 'vis-' + turn, server: 'iris', tool: 'show_visual', arguments: { title: 'Polygon and circle', html: (process.env.FAKE_CODEX_VISUAL_FILE ? fs.readFileSync(process.env.FAKE_CODEX_VISUAL_FILE, 'utf8') : process.env.FAKE_CODEX_VISUAL) || '<div style="padding:24px;font:16px sans-serif;color:#ddd">A small page<div style="height:180px;background:#2a5"></div></div>' } };
+        // (FAKE_CODEX_VISUAL_ARGS_FILE, read each time too: more of the call's arguments, such as its id or height.)
+        const more = process.env.FAKE_CODEX_VISUAL_ARGS_FILE && fs.existsSync(process.env.FAKE_CODEX_VISUAL_ARGS_FILE) ? JSON.parse(fs.readFileSync(process.env.FAKE_CODEX_VISUAL_ARGS_FILE, 'utf8')) : {};
+        const item = { type: 'mcpToolCall', id: 'vis-' + turn, server: 'iris', tool: 'show_visual', arguments: { title: 'Polygon and circle', html: (process.env.FAKE_CODEX_VISUAL_FILE ? fs.readFileSync(process.env.FAKE_CODEX_VISUAL_FILE, 'utf8') : process.env.FAKE_CODEX_VISUAL) || '<div style="padding:24px;font:16px sans-serif;color:#ddd">A small page<div style="height:180px;background:#2a5"></div></div>', ...more } };
         send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { ...item, status: 'inProgress' } } });
         send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { ...item, status: 'completed', result: { content: [{ type: 'text', text: 'Shown.' }] } } } });
         send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { type: 'agentMessage', id: 'vis-msg-' + turn, text: 'Here it is.' } } });

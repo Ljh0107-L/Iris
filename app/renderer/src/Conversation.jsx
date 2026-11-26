@@ -341,6 +341,8 @@ function VisualCard({ call, tool, live, superseded = false }) {
         });
         return;
       }
+      // Esc pressed inside the page (the keys go to it once it is clicked): it leaves the full window.
+      if (event.data?.iris === 'key' && event.data.key === 'Escape' && fullView) { setFull(false); return; }
       // The page handing the person a message to send (iris.send): it goes in their message box, for them to send.
       if (event.data?.iris !== 'send' || !sessionId) return;
       const text = String(event.data.text ?? '').trim().slice(0, 4000);

@@ -162,6 +162,13 @@ lines.on('line', line => {
         if (scenario().goalHold === goalTurns) { turn = { id: r.id, text }; chunk('Working on the goal'); break; } // (a turn to stop)
         chunk(`Progress ${goalTurns}.`); reply(r.id, { stopReason: 'end_turn' }); break;
       }
+      // Iris's visual tool, as an MCP call the CLI names by its server and tool: a fragment, with no <html> or <canvas>
+      // to know it by (only the tool's name says what it is).
+      if (text === 'visual') {
+        const call = { toolCallId: 'v-1', kind: 'other', title: 'mcp__iris__show_visual', rawInput: { title: 'Bubble sort', html: '<h3>Pass 1</h3><p>3 1 2</p>', height: 300, id: 'sort' } };
+        update('tool_call', { ...call, status: 'in_progress' }); update('tool_call_update', { ...call, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Shown to the person in Iris as "Bubble sort".' } }] });
+        chunk('Here it is.'); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
       if (text === 'expire') {
         save({ ...cache(), signedIn: false });
         authRequired(r.id); break;

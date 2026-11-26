@@ -68,7 +68,9 @@ const VISUAL_POLICY = (() => {
     `font-src data: ${cdn} https://fonts.gstatic.com`, `img-src data: blob: ${cdn}`, `media-src data: blob:`, `worker-src blob:`, `connect-src ${cdn}`, `frame-src 'none'`, `form-action 'none'`].join('; ');
 })();
 function visualUrl(html) {
-  if (typeof html !== 'string' || !html.trim() || Buffer.byteLength(html) > VISUAL_MAX_BYTES) throw new Error('This visual cannot be shown.');
+  if (typeof html !== 'string' || !html.trim()) throw new Error('the agent gave no page.');
+  const bytes = Buffer.byteLength(html);
+  if (bytes > VISUAL_MAX_BYTES) throw new Error(`the page is ${Math.round(bytes / 1024)} KB; a visual can be up to ${VISUAL_MAX_BYTES / 1024} KB.`);
   const hash = createHash('sha256').update(html).digest('hex').slice(0, 32);
   visuals.delete(hash); visuals.set(hash, html); // most recent last
   while (visuals.size > 200) visuals.delete(visuals.keys().next().value);

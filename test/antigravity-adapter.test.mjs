@@ -190,6 +190,17 @@ async function ask(peer, message) {
 
 const answer = (peer, question, payload) => peer.send({ type: 'extension_ui_response', id: question.id, ...payload });
 
+test('a visual Antigravity shows (Iris’s show_visual, by its MCP name) is Iris’s visual card, with its page, height and id', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'visual' });
+  await peer.next(event('agent_settled'));
+  const call = lastAssistant((await readHistory(state.sessionFile)).messages).content.find(b => b.type === 'toolCall');
+  assert.deepEqual([call.name, call.arguments], ['mcp__iris__show_visual', { title: 'Bubble sort', html: '<h3>Pass 1</h3><p>3 1 2</p>', height: 300, id: 'sort' }]);
+  assert.deepEqual(peer.events.filter(event('tool_execution_end')).map(e => [e.toolName, e.isError]), [['mcp__iris__show_visual', false]]);
+});
+
 const goals = peer => peer.events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-goal').map(e => e.statusText ? JSON.parse(e.statusText) : null);
 
 test('/goal: the agent keeps working, turn after turn, until it marks the goal achieved with Iris’s update_goal tool', { timeout: 15000 }, async t => {

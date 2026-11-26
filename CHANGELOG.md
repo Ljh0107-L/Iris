@@ -23,6 +23,7 @@ The section for a version becomes the notes of its GitHub release.
 - **Files**: an empty folder says so instead of showing nothing; Copy path in the tree copies the whole path, as the pane's menu does.
 - **Git review**: its wrap, refresh and close buttons say what they do on hover, and wrap has the same icon as in Files.
 - **Antigravity: picking another model for a new conversation keeps its thinking menu.** Antigravity lists the efforts of the model in use only, so the menu went as soon as another model was picked; what each model has is now learned as it is used, and shown when it is picked again.
+- **Visuals**: a page whose text has margins (a heading, a paragraph) is no longer cut off at the top and bottom; a page that names no typeface is in the conversation's, not the browser's Times; Esc leaves the full window after clicking into the page too (unless the page uses Esc itself); and a page too large to show says how large it is and what the limit is.
 
 **Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
 

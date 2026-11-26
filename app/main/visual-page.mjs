@@ -7,10 +7,14 @@
 // - It takes the conversation's colour scheme (light or dark), so the frame is see-through: a page that paints no
 //   background of its own sits on the conversation, as text does. (A frame whose page has another scheme than the
 //   frame itself gets an opaque white or black backdrop.)
-// - It has no margin of its own: the page lines up with the conversation's text.
+// - It is written in the conversation's typeface unless it names one of its own (not the browser's Times).
+// - It has no margin of its own: the page lines up with the conversation's text. Its body holds its children's
+//   margins (a flow root), so a heading's or a paragraph's margin is measured with the page, not cut off. (A page
+//   that sets its body's display has its own way: its rule comes after these.)
 // - It tells the conversation how tall it is, whenever that changes, so the frame is as tall as the page.
 // - iris.send(text) puts a message in the person's message box (the conversation decides what to do with it).
-const helper = theme => `<meta name="color-scheme" content="${theme}"><style>html,body{margin:0}:root{color-scheme:${theme}}</style><script>(()=>{
+// - Esc inside the page, that the page does not use itself, is passed on (it leaves the full window).
+const helper = theme => `<meta name="color-scheme" content="${theme}"><style>html,body{margin:0}body{display:flow-root}:root{color-scheme:${theme};font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif}</style><script>(()=>{
 window.iris={send(text){parent.postMessage({iris:'send',text:String(text??'').slice(0,4000)},'*')}};
 let last=0;
 const measure=()=>{const b=document.body;if(!b)return;const s=getComputedStyle(b);
@@ -19,6 +23,7 @@ if(h>0&&Math.abs(h-last)>1){last=h;parent.postMessage({iris:'size',height:h},'*'
 const watch=()=>{measure();if(document.body)new ResizeObserver(measure).observe(document.body)};
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',watch);else watch();
 addEventListener('load',measure);
+addEventListener('keydown',e=>{if(e.key==='Escape')setTimeout(()=>{if(!e.defaultPrevented)parent.postMessage({iris:'key',key:'Escape'},'*')})});
 })();</script>`;
 
 export function visualPage(page, theme) {

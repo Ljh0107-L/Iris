@@ -22,6 +22,12 @@ const PAGES = {
   plain: '<h3>Plain</h3><p>No background of its own.</p>',
   // A page as tall as its frame (100vh) and a little more: it must not grow without end.
   tall: '<canvas style="display:block;width:100%;height:100vh"></canvas><p>below</p>',
+  // Text with the margins its elements have (a paragraph's, a heading's): all of it in the frame, none cut off.
+  margins: '<h3>Heading</h3><p>A paragraph, and its margin below.</p>',
+  // A field to click into: Esc from inside the page still leaves the full window.
+  field: '<input id="field" placeholder="type here"><div style="height:200px"></div>',
+  // More than a visual may be: it says so, and why.
+  huge: '<p>' + 'x'.repeat(420 * 1024) + '</p>',
 };
 writeFileSync(pageFile, PAGES.dark);
 const { app, page } = await launch({ userData: dir, width: 1300, height: 900, env: { IRIS_TEST_CLI_DIR: bin } });
@@ -48,6 +54,10 @@ try {
   assert.ok(await frameHeight() < 160, `a short page, a short frame: ${await frameHeight()}`);
   assert.equal(await plain.locator('html').evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'dark', 'the conversation’s colours');
   assert.equal(await plain.locator('body').evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgba(0, 0, 0, 0)', 'nothing painted behind it');
+  await show('margins');
+  const clipped = await page.frameLocator('.visual-card iframe').last().locator('html').evaluate(() => document.documentElement.scrollHeight - innerHeight);
+  assert.ok(clipped <= 1, `nothing of the page is cut off: ${clipped}px are`);
+  assert.doesNotMatch(await page.frameLocator('.visual-card iframe').last().locator('p').evaluate(p => getComputedStyle(p).fontFamily), /times/i, 'the conversation’s typeface, not the browser’s');
   await show('tall');
   const tall = await frameHeight();
   await page.waitForTimeout(1500);
@@ -59,6 +69,16 @@ try {
   assert.ok(sheet.left <= sheet.width * 0.05 && sheet.right <= sheet.width * 0.05 && sheet.covers, JSON.stringify(sheet));
   await page.keyboard.press('Escape');
   await page.locator('.visual-overlay').waitFor({ state: 'detached' });
+  // Esc after clicking into the page (the keys go to the page then) leaves the full window too.
+  await show('field');
+  await page.locator('.visual-card').last().getByRole('button', { name: 'Fill the window' }).click();
+  await page.frameLocator('.visual-sheet-frame').locator('#field').click();
+  await page.keyboard.press('Escape');
+  await page.locator('.visual-overlay').waitFor({ state: 'detached', timeout: 3000 });
+  // A page too large to show says why.
+  writeFileSync(pageFile, PAGES.huge);
+  await box.fill('show a visual'); await box.press('Enter');
+  await page.locator('.visual-note.error', { hasText: '400 KB' }).waitFor({ timeout: 30000 });
   console.log('PASS visuals in the app: as tall as the page, no frame, the conversation’s colours, a 100vh page that stops growing, filling the window');
 } finally {
   await app.close().catch(() => {});
