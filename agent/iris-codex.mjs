@@ -388,7 +388,8 @@ export class CodexAdapter {
   }
   #command(r) {
     switch (r.type) {
-      case 'get_state': return this.#serial(async () => { if (this.standby) await this.#connect(); else await this.#ensureReady(); this.write({ type: 'cli_permissions', ids: [...this.permissions.keys()] }); return this.#state(); });
+      // (Asked by Iris when it attaches: the background commands still running are said again, for its list.)
+      case 'get_state': return this.#serial(async () => { if (this.standby) await this.#connect(); else await this.#ensureReady(); this.write({ type: 'cli_permissions', ids: [...this.permissions.keys()] }); if (this.jobs.jobs.size) setTimeout(() => this.jobs.publish(true), 0); return this.#state(); });
       case 'cli_activate': return this.#serial(() => this.#activate(r.cwd));
       case 'cli_login': throw new Error(this.config.remote ? 'Run codex login --device-auth in the SSH host’s terminal, then reconnect.' : 'Sign in to Codex from Settings → Subscriptions, then reconnect.');
       case 'cli_set_config': return this.#serial(() => this.#setConfig(r.configId, r.value));
@@ -489,6 +490,7 @@ export class CodexAdapter {
     if (!text(threadId)) throw new Error('Codex did not return a conversation ID.');
     if (!saved) tr.bind({ threadId });
     this.threadId = threadId;
+    this.#settleOrphans();
     void this.#readGoal();
     const kept = tr.settings ?? {};
     this.model = (this.models.some(m => m.id === kept.model) ? kept.model : null) ?? (this.models.some(m => m.id === opened.model) ? opened.model : this.models[0]?.id ?? opened.model ?? null);
@@ -850,6 +852,20 @@ export class CodexAdapter {
     // the last count belongs to the request still being answered, and does not move its start.)
     if (this.turn && tool.start <= this.turn.counted) { this.turn.from = tool.end; this.turn.first = null; }
     this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError, durationMs: tool.end - tool.start });
+  }
+  // Background commands of an earlier run of this adapter: their end can no longer be seen (what followed them went
+  // with that process). Their steps say so, instead of "still running" for ever.
+  #settleOrphans() {
+    const results = new Map();
+    for (const message of this.transcript?.messages() ?? []) if (message?.role === 'toolResult') results.set(message.toolCallId, message);
+    for (const [id, last] of results) {
+      if (last.details?.background !== 'running' || [...this.background.values()].some(tool => tool.call.id === id)) continue;
+      const content = [{ type: 'text', text: 'Iris restarted while this command ran in the background, so how it ended was not seen.' }];
+      const details = { engine: ENGINE, background: 'unknown' };
+      const message = { role: 'toolResult', toolCallId: id, toolName: last.toolName, content, details, isError: false, timestamp: Date.now() };
+      try { this.transcript.append([{ type: 'message', message }]); } catch { continue; }
+      this.write({ type: 'tool_execution_end', toolCallId: id, toolName: last.toolName, result: { content, details }, isError: false });
+    }
   }
   // A background command's output, and its end: its step is saved again with what it printed and how it exited.
   #backgroundEvent(method, params) {

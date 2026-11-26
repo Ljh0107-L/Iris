@@ -60,7 +60,7 @@ function AgentReport({ sessionId, agent }) {
   </button>;
 }
 
-function AgentMessageForm({ sessionId, agentId, name }) {
+export function AgentMessageForm({ sessionId, agentId, name }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const send = async event => {

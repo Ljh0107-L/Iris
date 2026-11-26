@@ -467,7 +467,7 @@ export function ultraProgress(call, tool) {
 }
 
 // Display blocks: user bubbles, assistant text/thinking, and groups of consecutive tool calls.
-export function displayBlocks(t) {
+export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
   const blocks = [];
   const listed = t.live ? [...t.messages, t.live] : t.messages;
   // A message handed to a turn under way (Option+Enter: Codex reads it before its next model call) is saved
@@ -497,7 +497,7 @@ export function displayBlocks(t) {
     }
     turn = [];
   };
-  let ordinal = 0, unread = false;
+  let ordinal = firstOrdinal, unread = false;
   const userBlock = (message, mk, ref, steer = false) => {
     const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
     let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
@@ -737,6 +737,25 @@ export function listsAtTurnEnd(blocks) {
   });
   flush(blocks.length);
   return out;
+}
+
+// The same blocks as displayBlocks, with what comes before the turn under way worked out once: while a reply
+// streams, only its own turn is worked out again for each frame (in a long conversation, the rest was most of
+// the time a frame took). `cache` is kept by the caller between calls.
+export function displayBlocksCached(t, cache) {
+  const messages = t.messages;
+  let split = -1;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'user' && !Number.isInteger(messages[i].steer?.at)) { split = i; break; }
+  if (!cache || !t.live || split <= 0) return displayBlocks(t);
+  if (cache.messages !== messages || cache.tools !== t.tools || cache.split !== split || cache.retry !== t.retry) {
+    const before = displayBlocks({ ...t, messages: messages.slice(0, split), live: null });
+    Object.assign(cache, { messages, tools: t.tools, split, retry: t.retry, before, users: before.filter(b => b.kind === 'user').length });
+  }
+  const turn = displayBlocks({ ...t, messages: messages.slice(split) }, { ordinal: cache.users });
+  // A visual of this turn shown again under an id of an earlier one: the earlier fold away (as displayBlocks does).
+  const ids = new Set(turn.filter(b => b.kind === 'visual' && b.call.arguments?.id).map(b => b.call.arguments.id));
+  const before = ids.size ? cache.before.map(b => b.kind === 'visual' && ids.has(b.call.arguments?.id) && !b.superseded ? { ...b, superseded: true } : b) : cache.before;
+  return [...before, ...turn];
 }
 
 export function retainWorkKeys(previous, next) {

@@ -68,6 +68,9 @@ export function agentStep(call, id) {
   return step(name || 'tool', shown);
 }
 
+// What a step returned, without the times the CLI puts at its head ("Created At: …", "Completed At: …").
+const resultText = entry => String(entry.content ?? entry.error ?? '').replace(/^(?:(?:Created|Completed) At: [^\n]*\n)+/, '').trim();
+
 // What an agent's conversation shows now: its steps, its report, whether it is done, its tokens. `stopped`:
 // when the parent was told that its agents were stopped (a cancel, or Antigravity's server restarting).
 export function readAgent(data, conversation, parent, { stopped = null } = {}) {
@@ -77,15 +80,26 @@ export function readAgent(data, conversation, parent, { stopped = null } = {}) {
   const lines = raw.split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   const steps = [];
   let report = null, input = 0, output = 0, cacheRead = 0, model = null, turns = 0, last = null;
+  // The results of a request's tool calls are the steps that follow it, one for each call, in order.
+  let awaiting = [];
   for (const entry of lines) {
-    if (entry.type !== 'PLANNER_RESPONSE') { if (entry.created_at) last = entry; continue; }
-    last = entry; turns++;
+    if (entry.type !== 'PLANNER_RESPONSE') {
+      if (entry.created_at) last = entry;
+      if (entry.type === 'GENERIC' && awaiting.length) {
+        const step = awaiting.shift();
+        if (step) Object.assign(step, { output: clip(resultText(entry), 1500), ...(entry.status === 'ERROR' ? { isError: true } : {}) });
+      }
+      continue;
+    }
+    last = entry; turns++; awaiting = [];
     input += Number(entry.input_tokens) || 0; output += Number(entry.output_tokens) || 0; cacheRead += Number(entry.cache_read_tokens) || 0;
     if (text(entry.model)) model = entry.model;
-    if (text(entry.content)) steps.push({ type: 'text', text: clip(entry.content.trim(), 2000) });
+    if (text(entry.thinking)) steps.push({ type: 'thinking', text: clip(entry.thinking.trim(), 4000) });
+    if (text(entry.content)) steps.push({ type: 'text', text: clip(entry.content.trim(), 4000) });
     for (const [i, call] of (Array.isArray(entry.tool_calls) ? entry.tool_calls : []).entries()) {
-      if (call?.name === 'send_message') { const message = call.args?.Message ?? call.args?.message; if (text(message)) report = message; continue; }
-      steps.push(agentStep(call, `${conversation}:${entry.step_index}:${i}`));
+      if (call?.name === 'send_message') { const message = call.args?.Message ?? call.args?.message; if (text(message)) report = message; awaiting.push(null); continue; }
+      const step = agentStep(call, `${conversation}:${entry.step_index}:${i}`);
+      steps.push(step); awaiting.push(step);
     }
   }
   // Its report as the parent received it, when there is one (it is the one the parent acts on).

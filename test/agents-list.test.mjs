@@ -30,3 +30,14 @@ test('every engine’s agents are listed, the live reply’s too, with what they
   assert.deepEqual(agentsSummary(agents), { running: 1, total: 2, label: '1 agent running' });
   assert.equal(agentsSummary([agents[0]]).label, '1 agent');
 });
+
+test('an engine’s agent reads as a conversation: its brief, its thoughts, its steps with what they returned, its report', async () => {
+  const { engineAgentTranscript } = await import('../app/renderer/src/agents.js');
+  const steps = [{ type: 'thinking', text: 'Look first.' }, { type: 'tool', id: 's1', name: 'bash', arguments: { command: 'ls' }, output: 'a b' }, { type: 'tool', id: 's2', name: 'read', arguments: { path: '/w/x' }, isError: true, output: 'file does not exist' },
+    { type: 'thinking', text: 'Now report.' }, { type: 'text', text: 'Two files.' }];
+  const done = engineAgentTranscript({ call: { id: 'c', arguments: { prompt: 'Audit /w' } }, tool: { status: 'done', result: { content: [{ type: 'text', text: 'Found two files: a and b.' }], details: { steps } } }, status: 'completed' });
+  assert.deepEqual(done.messages.map(m => [m.role, (m.content ?? []).map(c => c.type).join('+')]), [['user', 'text'], ['assistant', 'thinking+toolCall+toolCall'], ['toolResult', 'text'], ['toolResult', 'text'], ['assistant', 'thinking+text'], ['assistant', 'text']]);
+  assert.deepEqual([done.tools.s1.status, done.tools.s2.status], ['done', 'error']);
+  const working = engineAgentTranscript({ call: { id: 'c', arguments: { prompt: 'Audit /w' } }, tool: { status: 'running', result: { details: { steps: [{ type: 'tool', id: 'x', name: 'bash', arguments: { command: 'make' } }] } } }, status: 'running' });
+  assert.equal(working.tools.x.status, 'running', 'its step under way is running');
+});

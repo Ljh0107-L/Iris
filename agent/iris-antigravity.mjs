@@ -566,6 +566,7 @@ export class AntigravityAdapter {
       case 'get_state': {
         const ready = () => {
           this.write({ type: 'cli_permissions', ids: [...this.permissions.keys()] });
+          if (this.jobs.jobs.size) setTimeout(() => this.jobs.publish(true), 0); // (for Iris attaching again)
           return this.#state();
         };
         if (this.peer && !this.peer.closed && (this.sessionId || this.authRequired)) return ready();
@@ -1295,7 +1296,7 @@ export class AntigravityAdapter {
   }
   #agentChanged(agent, info) {
     const final = info.status !== 'running', isError = info.status === 'failed';
-    const details = { engine: this.p.engine, kind: 'claude-code-agent', agentStatus: info.status, stepCount: info.steps.filter(step => step.type === 'tool').length, steps: info.steps.slice(-200), agentConversation: info.conversation,
+    const details = { engine: this.p.engine, kind: 'claude-code-agent', agentStatus: info.status, stepCount: info.steps.filter(step => step.type === 'tool').length, steps: info.steps.slice(-150), agentConversation: info.conversation,
       ...(info.usage.totalTokens ? { agentRuns: [{ key: `antigravity-agent:${info.conversation}`, at: info.startedAt, model: info.model, usage: info.usage, turns: info.turns }] } : {}),
       ...(info.startedAt && info.lastAt ? { agentMs: Math.max(0, info.lastAt - info.startedAt) } : {}) };
     const latest = info.steps.at(-1);

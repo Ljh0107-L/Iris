@@ -445,13 +445,15 @@ try {
   await page.locator('.agents-pill').click();
   assert.deepEqual(await page.locator('.agents-panel .agents-row-name').allInnerTexts(), ['Inspect parser module']);
   assert.match(await page.locator('.agents-panel .agents-row-caption').innerText(), /^Explore · Completed · 2 steps · 480 tok$/);
+  // One of them, in the conversation's place: the same view as the conversation's, named in the title bar.
   await page.locator('.agents-panel .agents-row').click();
-  await page.locator('.agents-panel .agent-detail', { hasText: 'Read example.js and summarize.' }).waitFor();
+  await page.locator('.agent-crumb', { hasText: 'Inspect parser module' }).waitFor();
+  await page.locator('.session-main .user-bubble', { hasText: 'Read example.js and summarize.' }).waitFor();
+  assert.equal(await page.locator('.dock textarea[aria-label="Message"]').count(), 0, 'the agent is read, not written to (Claude Code’s)');
   await page.screenshot({ path: join(screenshots, 'agents-claude-code.png') });
-  await page.getByRole('button', { name: 'Back to agents' }).click();
-  await page.locator('.agents-panel .agents-list').waitFor();
-  await page.keyboard.press('Escape');
-  await page.locator('.agents-panel').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Back to the conversation' }).first().click();
+  await page.locator('.agent-crumb').waitFor({ state: 'detached' });
+  await page.locator('.dock textarea[aria-label="Message"]').waitFor();
   await page.screenshot({ path: join(screenshots, 'right-panel-claude-code.png') });
   // Codex: token counts and the turn's speed, the context it reports, and an agent it started.
   const codexSession = { ...session, id: 'codex-ui', title: 'Delegate with Codex', engine: 'codex', model: null, cli: { options: [], contextUsage: { tokens: 52000, contextWindow: 400000, percent: 13 } } };

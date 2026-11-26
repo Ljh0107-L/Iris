@@ -5,6 +5,7 @@
 // An engine's task is working while its call is, and also after, when its result says so (details.agentStatus):
 // Antigravity's agents carry on after the call that starts them returns, and their end comes later.
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
+import { fromHistory } from './transcript.js';
 
 const STATUS = { pending: 'running', queued: 'queued', running: 'running', retrying: 'running', completed: 'completed', failed: 'failed', timed_out: 'failed', cancelled: 'cancelled' };
 export const agentStatusLabel = status => ({ running: 'Running', queued: 'Queued', completed: 'Completed', failed: 'Failed', cancelled: 'Stopped' })[status] ?? 'Running';
@@ -47,4 +48,37 @@ export function conversationAgents(session, transcript, live = {}) {
 export function agentsSummary(agents) {
   const running = agents.filter(agent => agent.status === 'running' || agent.status === 'queued').length;
   return { running, total: agents.length, label: running ? `${running} ${running === 1 ? 'agent' : 'agents'} running` : `${agents.length} ${agents.length === 1 ? 'agent' : 'agents'}` };
+}
+
+// An engine's agent as a conversation of its own, for its view (the same as the conversation's): what it was asked,
+// then what it thought, did (each step with what it returned, where the CLI says) and wrote, then its report.
+const textOfResult = result => (result?.content ?? []).filter(c => c?.type === 'text').map(c => c.text ?? '').join('\n').trim();
+export function engineAgentTranscript(agent) {
+  const { call, tool, status } = agent, a = call.arguments ?? {}, details = tool?.result?.details ?? {};
+  const steps = Array.isArray(details.steps) ? details.steps.filter(Boolean) : [];
+  const key = part => `agent:${call.id}:${part}`;
+  const messages = [];
+  let at = 1, content = [], results = [], running = null;
+  if (String(a.prompt ?? '').trim()) messages.push({ __entryId: key('brief'), role: 'user', timestamp: at++, content: [{ type: 'text', text: a.prompt }] });
+  const flush = () => {
+    if (content.length) messages.push({ __entryId: key(`a${at}`), role: 'assistant', timestamp: at++, stopReason: 'stop', content }, ...results);
+    content = []; results = [];
+  };
+  steps.forEach((step, i) => {
+    // A thought after what was done or said begins the next request of the agent.
+    if (step.type === 'thinking') { if (content.some(c => c.type !== 'thinking')) flush(); content.push({ type: 'thinking', thinking: step.text ?? '' }); return; }
+    if (step.type === 'text') { if (String(step.text ?? '').trim()) content.push({ type: 'text', text: step.text }); return; }
+    if (step.type !== 'tool') return;
+    const id = step.id ?? key(`t${i}`);
+    content.push({ type: 'toolCall', id, name: step.name, arguments: step.arguments ?? {} });
+    if (typeof step.output === 'string' || step.isError) results.push({ __entryId: key(`r${i}`), role: 'toolResult', toolCallId: id, toolName: step.name, timestamp: at, content: [{ type: 'text', text: step.output ?? '' }], isError: !!step.isError });
+    else if (status === 'running' && i === steps.length - 1) running = id;
+  });
+  flush();
+  const report = status === 'running' ? '' : textOfResult(tool?.result);
+  const said = messages.flatMap(m => m.role === 'assistant' ? m.content.filter(c => c.type === 'text').map(c => c.text.trim()) : []);
+  if (report && !said.some(text => text && report.startsWith(text.replace(/…$/, '')) && text.length > report.length * 0.8))
+    messages.push({ __entryId: key('report'), role: 'assistant', timestamp: at++, stopReason: status === 'failed' ? 'error' : 'stop', content: [{ type: 'text', text: report }] });
+  const t = fromHistory(messages);
+  return running ? { ...t, tools: { ...t.tools, [running]: { status: 'running' } } } : t;
 }

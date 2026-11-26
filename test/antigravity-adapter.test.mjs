@@ -217,7 +217,8 @@ test('an agent Antigravity starts is followed in its files: its steps while it w
   const saved = (await readHistory(state.sessionFile)).messages.filter(m => m.role === 'toolResult' && m.toolCallId === call.id);
   assert.equal(saved.at(-1).details.agentStatus, 'running', 'the turn ends with the agent still working, and says so');
   const working = await peer.next(e => e.type === 'tool_execution_update' && e.toolCallId === call.id && e.partialResult?.details?.steps?.length);
-  assert.deepEqual(working.partialResult.details.steps.map(step => [step.name, step.arguments]), [['bash', { command: 'rg -n TODO src', description: 'Find TODOs' }], ['read', { path: '/work/src/a.js' }]]);
+  assert.deepEqual(working.partialResult.details.steps.filter(step => step.type === 'tool').map(step => [step.name, step.arguments]), [['bash', { command: 'rg -n TODO src', description: 'Find TODOs' }], ['read', { path: '/work/src/a.js' }]]);
+  assert.equal(working.partialResult.details.steps.find(step => step.name === 'bash').output, 'Command output', 'what a step returned is kept with it');
   const done = await peer.next(e => e.type === 'tool_execution_end' && e.toolCallId === call.id && e.result?.details?.agentStatus !== 'running');
   assert.equal(done.result.details.agentStatus, 'completed');
   assert.equal(done.result.content[0].text, 'Found two dead files: a.js and b.js.');

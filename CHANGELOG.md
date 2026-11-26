@@ -2,6 +2,22 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.4
+
+**New**
+
+- **An agent opens in the conversation's place, as a conversation.** Choose it in the title bar's Agents (or **Open** on its card): what it was asked, what it thought, each step with what it returned, what it wrote and reported, drawn as the conversation itself is. The title bar names it (conversation › agent); its ✕, **Back to conversation**, or Esc go back. Iris's own agents can be stopped and written to from there.
+- **Antigravity's agents show what each step returned** (a command's output, a file read, an error), and what they thought.
+
+**Fixed**
+
+- **A Codex command left running in the background no longer reads "still running" for ever** once Iris was restarted without it: its step says its end was not seen. And when Iris attaches again to a Codex or Antigravity conversation still running on a host, its background commands are listed again.
+- **Streaming in a long conversation works out only its own turn again** for each frame; the turns before it are kept (about 12% less script time while a reply streams).
+
+- **A long command no longer spreads over the line under the turn.** What is being done is one line, cut where it does not fit, with its time and tokens beside it; and a command is named the way it reads: "OMP_NUM_THREADS=4 PYTHONPATH=… /home/me/env/bin/python -m pytest" is "python -m pytest" (all of it in the tooltip, and in the step).
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.3
 
 **Fixed**

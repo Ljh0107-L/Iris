@@ -1812,7 +1812,9 @@ body.window-inactive .nav-item:not(:hover):not(:focus-visible) .nav-shortcut { o
 .working { font-size: var(--fs-base); gap: 8px; color: var(--muted); }
 /* The agent at work: the app's own mark, a prompt whose cursor blinks. */
 .working-mark { flex-shrink: 0; margin-right: 2px; }
-.working-meta { font-size: var(--fs-base); }
+.working-meta { font-size: var(--fs-base); flex-shrink: 0; white-space: nowrap; }
+/* What is being done is one line, cut where it does not fit: a long command does not wrap under the mark. */
+.working > .shimmer { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ------------------------------------------------------------ Right panel: flat sections split by hairlines */
 /* ------------------------------------------------------------ Right panel: what this conversation runs on and what it is doing.
@@ -2684,3 +2686,21 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 @media (prefers-reduced-motion: reduce) { .md-fresh { animation: none; } }
 /* A thought that is over: one quiet line. */
 .thinking-head .thinking-gist { min-width: 0; color: var(--muted); }
+
+/* An agent in the conversation's place: the title bar says which (with ✕ back), the bar under it what it is. */
+.agent-crumb { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 34%; flex-shrink: 1; height: 22px; padding: 0 4px 0 2px; border-radius: var(--r-sm); font-size: var(--fs-sm); color: var(--text); }
+.agent-crumb-sep { flex-shrink: 0; color: var(--faint); }
+.agent-crumb-mark { flex-shrink: 0; display: grid; place-items: center; color: var(--muted); }
+.agent-crumb-mark.completed { color: var(--green); } .agent-crumb-mark.failed { color: var(--red); }
+.agent-crumb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.agent-crumb-close { flex-shrink: 0; width: 20px; height: 20px; display: grid; place-items: center; border-radius: var(--r-sm); color: var(--faint); }
+.agent-crumb-close:hover { background: var(--row-hover); color: var(--text); }
+.agents-row.current { background: var(--row-hover); }
+.agents-row.back .agents-row-name { font-weight: 400; color: var(--muted); }
+.agent-dock { padding-top: 8px; }
+.agent-dock-bar { display: flex; align-items: center; gap: 8px; padding: 8px 4px 12px; border-top: 1px solid var(--hairline); }
+.agent-dock-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--muted); }
+.agent-dock-bar .button.small { display: inline-flex; align-items: center; gap: 5px; }
+
+.cc-task-open { flex-shrink: 0; padding: 1px 8px; border-radius: var(--r-sm); font-size: var(--fs-xs); color: var(--muted); border: 1px solid var(--border); }
+.cc-task-open:hover { color: var(--text); background: var(--row-hover); }

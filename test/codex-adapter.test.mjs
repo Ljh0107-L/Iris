@@ -452,3 +452,22 @@ test('a command Codex leaves running when its turn ends is a background task unt
   const results = readFileSync(state.sessionFile, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.message?.role === 'toolResult' && e.message.toolCallId === saved.toolCallId);
   assert.deepEqual(results.map(e => e.message.details.background), ['running', 'done'], 'its end is saved with the conversation');
 });
+
+test('a background command is said again when Iris attaches again, and one whose end can no longer be seen says so', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'run it in the background' });
+  await a.next(settled);
+  const lists = () => a.events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-background').length;
+  const before = lists();
+  const state = (await a.rpc('get_state')).data;
+  await a.next(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-background' && lists() > before);
+  // The adapter goes before the command ends; another opens the conversation.
+  await a.adapter.close();
+  const b = f.start(state.sessionFile);
+  await b.rpc('get_state');
+  const unknown = await b.next(e => e.type === 'tool_execution_end' && e.result.details.background === 'unknown');
+  assert.match(unknown.result.content[0].text, /how it ended was not seen/);
+  const saved = readFileSync(state.sessionFile, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.message?.toolCallId === unknown.toolCallId).map(e => e.message.details.background);
+  assert.deepEqual(saved, ['running', 'unknown']);
+});

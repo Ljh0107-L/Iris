@@ -13,7 +13,8 @@ import { GitReview } from './GitReview.jsx';
 import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
 import { Modal, Popover, Spinner, Trigger, baseName } from './ui.jsx';
-import { AgentsBar } from './AgentsBar.jsx';
+import { AgentsBar, useAgents } from './AgentsBar.jsx';
+import { AgentView } from './AgentView.jsx';
 import { antigravityTurnSpeed, emptyTranscript, findBlocks, formatTokens } from './transcript.js';
 import { sortedBackgroundJobs } from './background-jobs.js';
 import { ENGINE_ORDER } from './handoff.js';
@@ -253,6 +254,7 @@ function SessionView({ session }) {
   const filePaneOpen = useStore(s => s.filePaneOpen);
   const terminalOpen = useStore(s => s.terminalOpen);
   const filePaneMax = useStore(s => s.filePaneMax) && filePaneOpen;
+  const { shown: shownAgent } = useAgents(session);
   const [findOpen, setFindOpen] = useState(false);
   // ⌘K found this conversation by a message in it: open Find with those words.
   const findRequest = useStore(s => s.findRequest?.id === session.id ? s.findRequest : null);
@@ -291,6 +293,8 @@ function SessionView({ session }) {
     <div className={`session-view ${filePaneMax ? 'files-max' : ''}`}>
       <div className="session-main">
         {findOpen && <SessionFindBar key={findQuery} sessionId={session.id} initialQuery={findQuery} partial={!!transcript.history?.next} onClose={() => { setFindOpen(false); setFindQuery(''); }} />}
+        {/* An agent of the conversation, in its place (chosen in the title bar's Agents, or from its card). */}
+        {shownAgent ? <AgentView key={shownAgent.key} session={session} agent={shownAgent} /> : <>
         {!transcript.messages.length && !transcript.live && !session.streaming && session.status === 'connected' && !questions.length ?
           <div className="code-empty" aria-label="Ready to code">
             <EngineMark engine={session.engine} />
@@ -306,6 +310,7 @@ function SessionView({ session }) {
             <Composer session={session} autoFocus placeholder={placeholder} onSubmit={(text, attachments, options) => sendPrompt(session.id, text, attachments, options)} footer={<ComposerBar session={session} />} />
           </div>
         </div>
+        </>}
         {terminalOpen && <TerminalPanel session={session} />}
       </div>
       {gitReviewOpen ? <GitReview key={session.id} session={session} /> : filePaneOpen ? <FilePane key={session.id} session={session} /> : rightPanel && <RightPanel session={session} />}

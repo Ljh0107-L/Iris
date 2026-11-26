@@ -562,7 +562,8 @@ export const setView = patch => set(patch);
 export function openSubagent(id, callId, taskIndex = null) {
   const result = transcriptOf(id).messages.find(m => m.role === 'toolResult' && m.toolCallId === callId && m.__history?.truncated);
   if (result) loadHistoryEntry(id, result.__history.ref).catch(error => notify(error.message, 'error'));
-  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, agentsOpen: id }));
+  // One agent: shown in the conversation's place (AgentView). A batch of Iris's (no task named): the list of agents.
+  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, agentsOpen: taskIndex == null ? id : null }));
 }
 // The inspector's controls for an agent running in this session's Pi.
 export function stopAgent(id, agentId) {
@@ -584,7 +585,11 @@ export function messageAgent(id, agentId, text) {
 export function closeSubagent(id) {
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: null } }));
 }
-// The title bar's Agents: the list, or (with a selection) one agent.
+// One agent in the conversation's place (from the title bar's list, or its card in the conversation).
+export function viewAgent(id, callId, taskIndex = null) {
+  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex, view: true } }, agentsOpen: null }));
+}
+// The title bar's Agents: the list of the conversation's agents.
 export const openAgents = id => set({ agentsOpen: id });
 export const closeAgents = () => set({ agentsOpen: null });
 

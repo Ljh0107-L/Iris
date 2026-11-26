@@ -399,6 +399,22 @@ try {
   await fire([done('bench', 'bash'), { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'toolCall', id: 'bench', name: 'bash', arguments: { command: 'python bench.py --cards 64', description: 'Run the 64-card benchmark' } }, { type: 'text', text: 'Started the benchmark; results follow.' }] } },
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
 
+  // A long command, with settings before it and a program by its full path: named short, on one line, with the
+  // time beside it.
+  const longCommand = 'OMP_NUM_THREADS=4 LPKERNELS_REPO=/home/me/AgentLP/LPKernels PYTHONPATH=.:../lpdecode-prefill-transfer:/home/me/ds41-critical/python-check /home/me/AgentLP/build/runtime-qwen-demo-20261101/bin/python -m pytest -q -rs tests/test_transfer.py tests/test_cache.py';
+  await fire([{ status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } },
+    ...call('pytest', 'bash', { command: longCommand }, 0),
+    { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 1 } }, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: 'The tests run; meanwhile the routing is checked.' } },
+    { type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 1, content: 'The tests run; meanwhile the routing is checked.' } }]);
+  await page.waitForTimeout(3200);
+  const line = page.locator('.session-main .working');
+  await page.waitForFunction(() => /python -m pytest/.test(document.querySelector('.session-main .working')?.innerText ?? ''), undefined, { timeout: 5000 });
+  assert.match(await line.innerText(), /^Running python -m pytest -q -rs/, 'the settings before it and the program’s folder are left out');
+  const lineBox = await line.evaluate(el => ({ label: el.querySelector('.shimmer').getBoundingClientRect().height, meta: Math.max(...[...el.querySelectorAll('.working-meta')].map(m => m.getBoundingClientRect().height)) }));
+  assert.ok(lineBox.label < 30 && lineBox.meta < 30, `the command and its time each on one line (${JSON.stringify(lineBox)})`);
+  await fire([done('pytest', 'bash'), { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'toolCall', id: 'pytest', name: 'bash', arguments: { command: longCommand } }, { type: 'text', text: 'The tests run; meanwhile the routing is checked.' }] } },
+    { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
+
   assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS built renderer: streamed reply applied once per frame, queued message with Option+Enter, Find in conversation across unrendered rows and folded steps');
 } catch (error) {

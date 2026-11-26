@@ -4,8 +4,8 @@ import { engineLabel, isCliEngine } from './engines.js';
 import { conversationAgents, engineAgentStatus } from './agents.js';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
-import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, listsAtTurnEnd, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
-import { api, editMessage, firstSentAt, lastActivityAt, restartConversation, setComposerDraft, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
+import { changesOf, displayBlocks, displayBlocksCached, failureTitle, formatTokens, isAbortText, listsAtTurnEnd, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
+import { api, viewAgent, editMessage, firstSentAt, lastActivityAt, restartConversation, setComposerDraft, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
 import { ImagePreview } from './ImagePreview.jsx';
@@ -43,6 +43,10 @@ const shortCommand = command => {
   let c = parts[0].replace(/\s+/g, ' ').trim();
   if (parts.length > 1) c = c.replace(/\s+-$/, '') + ' script'; // "python3 - <<'EOF' …" reads "python3 script"
   c = c.replace(/^(?:(?:cd\s+(?:"[^"]*"|'[^']*'|\S+)|export\s+[^;&]+|set\s+-\w+)\s*(?:&&|;)\s*)+/, '');
+  // "OMP_NUM_THREADS=4 PYTHONPATH=… /home/me/env/bin/python -m pytest" reads "python -m pytest": the settings
+  // before a command, and the folder of the program, are in the full command (its tooltip).
+  c = c.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/, '');
+  c = c.replace(/^(?:env\s+)?\/(?:[^\s/]+\/)+([^\s/]+)/, '$1');
   return c || full;
 };
 // Text that fades out at the right edge when it does not fit (as in Claude), instead of an ellipsis.
@@ -609,6 +613,7 @@ function ClaudeTaskCard({ call, tool, sessionId }) {
         {stepCount > 0 && <span className="cc-task-meta">{stepCount} {stepCount === 1 ? 'step' : 'steps'}</span>}
         {agentRun?.usage?.totalTokens > 0 && <span className="cc-task-meta">{formatTokens(agentRun.usage.totalTokens)} tok</span>}
         {tool?.durationMs != null && <span className="cc-task-meta">{tool.durationMs < 1000 ? '<1s' : seconds(tool.durationMs)}</span>}
+        {sessionId && !String(sessionId).startsWith('agent:') && <span role="button" tabIndex={0} className="cc-task-open" title="Open this agent: what it did, as a conversation" onClick={e => { e.stopPropagation(); viewAgent(sessionId, call.id); }} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); viewAgent(sessionId, call.id); } }}>Open</span>}
         <Caret open={open} />
       </button>
       {running && !open && liveLine && (
@@ -1204,7 +1209,8 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   };
   const committed = useRef({ sessionId: session?.id, blocks: [] });
-  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], listsAtTurnEnd(displayBlocks(transcript))), [transcript, session?.id]);
+  const blocksCache = useRef({});
+  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], listsAtTurnEnd(displayBlocksCached(transcript, blocksCache.current))), [transcript, session?.id]);
   useLayoutEffect(() => { committed.current = { sessionId: session?.id, blocks }; }, [blocks, session?.id]);
   useLayoutEffect(() => {
     if (readOnly || !session?.id) return;
