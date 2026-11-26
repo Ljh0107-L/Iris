@@ -147,6 +147,11 @@ try {
     if (method === 'agents') return [];
     if (method === 'jobs') {
       if (args[0] === 'cc-ui') return { version: 1, at: Date.now(), jobs: [{ id: 'bmon00001', description: 'Watch CI run', command: 'tail -f ci.log', cwd, status: 'running', stopping: false, startedAt: 1000, elapsedMs: 500, tail: 'ci step 1\n' }] };
+      // Codex: a command it left running (Iris cannot stop it from outside), and two that ended, one failing.
+      if (args[0] === 'codex-ui') return { version: 1, at: Date.now(), jobs: [
+        { id: 'bg-1', description: null, command: 'python bench.py --cards 64', cwd, status: 'running', stoppable: false, startedAt: Date.now() - 65000, elapsedMs: 65000, tail: 'lap 3/8\n' },
+        { id: 'bg-2', command: 'make lint', cwd, status: 'completed', exitCode: 0, stoppable: false, startedAt: 1000, endedAt: 2000, elapsedMs: 1000, tail: 'ok\n' },
+        { id: 'bg-3', command: 'make test', cwd, status: 'failed', exitCode: 2, stoppable: false, startedAt: 1000, endedAt: 3000, elapsedMs: 2000, tail: '1 failing\n' }] };
       return { version: 0, jobs: [] };
     }
     if (method === 'stopBackgroundJob') {
@@ -460,7 +465,19 @@ try {
   await page.locator('.agents-pill').click();
   assert.deepEqual(await page.locator('.agents-panel .agents-row-name').allInnerTexts(), ['Check the parser']);
   await page.keyboard.press('Escape');
-  assert.equal(await card('Background tasks').count(), 0, 'Codex reports no background tasks');
+  // Its background commands: one line each, with how long it has run; no Stop (it is the agent's to stop); and
+  // under them, the ones that ended.
+  const codexJobs = card('Background tasks');
+  await codexJobs.locator('.job[data-job-id="bg-1"]').waitFor();
+  assert.match(await codexJobs.locator('.job[data-job-id="bg-1"] .job-main').innerText(), /python bench\.py --cards 64\s+1m \d+s/);
+  assert.equal(await codexJobs.locator('.job-stop').count(), 0, 'nothing Iris could not do');
+  assert.match(await codexJobs.locator('.jobs-finished').innerText(), /2 finished\s*1 failed/);
+  await codexJobs.locator('.job[data-job-id="bg-1"] .job-details-toggle').click();
+  await codexJobs.locator('.job-output', { hasText: 'lap 3/8' }).waitFor();
+  assert.match(await codexJobs.locator('.job-note').innerText(), /ask the agent to stop it/);
+  await codexJobs.locator('.jobs-finished').click();
+  assert.deepEqual((await codexJobs.locator('.job.completed, .job.failed').evaluateAll(rows => rows.map(r => r.dataset.jobId))).sort(), ['bg-2', 'bg-3']);
+  await page.screenshot({ path: join(screenshots, 'background-tasks-codex.png') });
   await page.screenshot({ path: join(screenshots, 'right-panel-codex.png') });
   // A Codex turn under way: a model request that has ended is counted at once (the turn is saved only when it
   // ends), and timed from its first output: 300 tokens in the 2 s after a 1 s wait.

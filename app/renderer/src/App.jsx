@@ -85,7 +85,8 @@ function HandoffHost() {
   useEffect(() => { if (handoff) { setMode(handoff.mode ?? 'continue'); setTarget(null); } }, [handoff?.sessionId, handoff?.mode]);
   if (!handoff || !session) return null;
   const from = session.engine ?? 'iris';
-  const engines = ENGINE_ORDER.filter(engine => engine !== from);
+  // The same agent is one of them: a new conversation of it, with another account or model, say.
+  const engines = [from, ...ENGINE_ORDER.filter(engine => engine !== from)];
   const folder = session.noFolder ? 'No folder' : session.project || baseName(session.cwd);
   return (
     <Modal title={mode === 'review' ? 'Review with another agent' : 'Hand off to another agent'} width={520} onClose={closeHandoff}>
@@ -111,7 +112,7 @@ function HandoffHost() {
           {engines.map(engine => (
             <button key={engine} type="button" className={`handoff-engine engine-${engine}`} onMouseEnter={() => setTarget(engine)} onFocus={() => setTarget(engine)}
               onClick={() => void handOff(session.id, engine, mode)} aria-label={`${mode === 'review' ? 'Review with' : 'Hand off to'} ${engineLabel(engine)}`}>
-              <EngineLogo engine={engine} size={26} /><span>{engineLabel(engine)}</span><Icon name="arrowUpRight" size={14} className="handoff-go" />
+              <EngineLogo engine={engine} size={26} /><span>{engineLabel(engine)}{engine === from && <small className="handoff-same">New conversation</small>}</span><Icon name="arrowUpRight" size={14} className="handoff-go" />
             </button>
           ))}
         </div>
@@ -277,12 +278,15 @@ function SessionView({ session }) {
     return () => window.removeEventListener('iris:open-file', onOpen);
   }, [session.id]);
   const isClaude = session.engine === 'claude-code', cli = isCliEngine(session.engine);
-  const placeholder = cli
-    ? questions.some(q => q.permission) ? 'Choose a permission option above…' : questions.length ? 'Choose an answer above, or type your own…' : session.cli?.authRequired ? 'Sign in to send a message…' : `Message ${engineLabel(session.engine)}…`
-    : questions.length ? 'Answer the agent’s question…'
-    : !isClaude && ultraWorking
-      ? 'Add to the task, @ to mention, / for actions'
-      : 'Ask anything, @ to mention, / for actions';
+  // The message box says what a message does now: while the agent works, Enter sends at once (stopping what it
+  // is doing) and Option+Enter adds it after the step under way; otherwise, how to begin.
+  const placeholder = cli && questions.some(q => q.permission) ? 'Choose a permission option above…'
+    : questions.length ? (cli ? 'Choose an answer above, or type your own…' : 'Answer the agent’s question…')
+    : cli && session.cli?.authRequired ? 'Sign in to send a message…'
+    : !isClaude && !cli && ultraWorking ? 'Add to the task, @ to mention, / for actions'
+    : session.streaming ? '↵ to send now · ⌥↵ to add after this step'
+    : cli ? `Message ${engineLabel(session.engine)} · / for commands`
+    : 'Ask anything, @ to mention, / for actions';
   return (
     <div className={`session-view ${filePaneMax ? 'files-max' : ''}`}>
       <div className="session-main">

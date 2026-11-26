@@ -433,3 +433,22 @@ test('a stop is saved at once, and the next turn begins once Codex has stopped t
   assert.equal(starts.at(-1).params.input[0].text, 'next one');
   assert.ok(Date.now() - sent >= 1000, 'the next turn waited for Codex to confirm the stop');
 });
+
+test('a command Codex leaves running when its turn ends is a background task until it ends, and its step gets its output', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'run it in the background' });
+  await a.next(settled);
+  const jobs = () => a.events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-background').map(e => JSON.parse(e.statusText).jobs);
+  const started = jobs().at(-1);
+  assert.deepEqual(started.map(j => [j.command, j.status, j.stoppable]), [['sleep 1; echo ticked', 'running', false]]);
+  const saved = a.events.find(e => e.type === 'tool_execution_end' && e.result.details.background === 'running');
+  assert.ok(saved && !saved.isError, 'not "Codex did not report the result": it is still running');
+  const done = await a.next(e => e.type === 'tool_execution_end' && e.result.details.background === 'done');
+  assert.equal(done.toolCallId, saved.toolCallId, 'the same step');
+  assert.equal(done.result.content[0].text.trim(), 'ticked');
+  assert.deepEqual(jobs().at(-1).map(j => [j.status, j.exitCode, j.tail.trim()]), [['completed', 0, 'ticked']]);
+  const state = (await a.rpc('get_state')).data;
+  const results = readFileSync(state.sessionFile, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => e.message?.role === 'toolResult' && e.message.toolCallId === saved.toolCallId);
+  assert.deepEqual(results.map(e => e.message.details.background), ['running', 'done'], 'its end is saved with the conversation');
+});

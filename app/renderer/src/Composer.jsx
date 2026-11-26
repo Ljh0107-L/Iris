@@ -97,12 +97,14 @@ function RemoteBrowser({ environmentId, start, onPick, onClose }) {
   );
 }
 
-function FolderMenu({ environmentId, value, onChange, close, onBrowse }) {
+// noFolder: the folder of a conversation under No folder that this one was handed off from: No folder, in that
+// folder (store.handOff).
+function FolderMenu({ environmentId, value, noFolder = null, onChange, close, onBrowse }) {
   const recents = useStore(s => s.settings?.recentFolders?.[environmentId] ?? []);
   const env = useStore(s => s.environments.find(e => e.id === environmentId));
   const local = env?.kind !== 'ssh';
   return <>
-    <MenuItem icon="chat" label="No folder" checked={!value} onClick={() => { onChange(null); close(); }} />
+    <MenuItem icon="chat" label="No folder" checked={!value || value === noFolder} onClick={() => { onChange(noFolder ?? null); close(); }} />
     {recents.length > 0 && <MenuSection title="Recent folders">
       {recents.map(path => <MenuItem key={path} icon="folder" label={baseName(path)} title={path} checked={value === path} onClick={() => { onChange(path); close(); }} />)}
     </MenuSection>}
@@ -163,6 +165,11 @@ export const modelLabel = (model, catalog) => {
 // ---------------------------------------------------------------- composer
 // Built-in commands handled by the desktop (or the bridge, for /goal); Pi's own skills and prompt templates
 // are listed after them.
+// What a CLI offers before its conversation exists (a new conversation's first message): the conversation's own
+// list replaces this once it is open.
+const DRAFT_CLI_COMMANDS = {
+  codex: [{ name: 'goal', argumentHint: '<objective>', description: 'Set a goal Codex keeps working toward: /goal <objective>, /goal pause, /goal resume, /goal clear' }],
+};
 export const BUILTIN_COMMANDS = [
   { name: 'goal', args: true, description: 'Set a goal Iris keeps working toward' },
   { name: 'compact', description: 'Summarize the conversation to free up context' },
@@ -405,7 +412,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   useEffect(() => { setPi([]); }, [session?.id, activeEngine]);
   useEffect(() => { if (!cli && slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id, cli]);
   const mergedCommands = useMemo(() => {
-    if (cli) return [...new Map((agyCommands ?? []).map(c => [c.name, c])).values()];
+    if (cli) return [...new Map((agyCommands ?? (session ? [] : DRAFT_CLI_COMMANDS[activeEngine] ?? [])).map(c => [c.name, c])).values()];
     const builtins = activeEngine === 'claude-code'
       ? BUILTIN_COMMANDS.filter(c => session && c.name !== 'goal')
       : BUILTIN_COMMANDS.filter(c => session || c.name === 'goal');
@@ -584,7 +591,9 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
               if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex(i => (i - 1 + commands.length) % commands.length); return; }
               if ((e.key === 'Tab' || e.key === 'Enter') && !e.nativeEvent.isComposing) {
                 const c = commands[slashIndex];
-                if (c && (e.key === 'Tab' || c.args || c.argumentHint?.startsWith('<') || text.slice(1) !== c.name)) { e.preventDefault(); pickCommand(c); return; }
+                // Enter chooses the command (it is then written out, for its argument); a command that takes none and is
+                // already written out in full is sent.
+                if (c && (e.key === 'Tab' || c.args || c.argumentHint || text.slice(1) !== c.name)) { e.preventDefault(); pickCommand(c); return; }
               }
             }
             if (showMentionMenu && mentionFiles.length) {
@@ -633,7 +642,7 @@ export function NewSessionTrayHead() {
   const [browsing, setBrowsing] = useState(false);
   const environmentId = draft.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
-  const cwd = draft.cwd;
+  const cwd = draft.cwd, noFolder = draft.noFolderCwd ?? null;
   const isClaude = draft.engine === 'claude-code', cli = isCliEngine(draft.engine);
   const changeEnv = id => {
     setDraft({ environmentId: id, cwd: defaultFolder(getState().settings, id) });
@@ -642,9 +651,9 @@ export function NewSessionTrayHead() {
   return (
     <div className="composer-tray-head">
       <div className="composer-tray-left">
-        <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : 'No folder'}
-          menu={close => <FolderMenu environmentId={environmentId} value={cwd} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
-          <Icon name={cwd ? 'folder' : 'chat'} size={13.5} /><span>{cwd ? baseName(cwd) : 'No folder'}</span><Icon name="chevronDown" size={11} className="tray-caret" />
+        <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd && cwd !== noFolder ? shortPath(cwd, home) : cwd ? `No folder · ${shortPath(cwd, home)}` : 'No folder'}
+          menu={close => <FolderMenu environmentId={environmentId} value={cwd} noFolder={noFolder} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
+          <Icon name={cwd && cwd !== noFolder ? 'folder' : 'chat'} size={13.5} /><span>{cwd && cwd !== noFolder ? baseName(cwd) : 'No folder'}</span><Icon name="chevronDown" size={11} className="tray-caret" />
         </Trigger>
         <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
           <Icon name={envIcon(env)} size={13.5} /><span>{env.kind === 'local' ? 'Local' : env.label}</span><Icon name="chevronDown" size={11} className="tray-caret" />

@@ -247,6 +247,37 @@ test('an agent still working when Iris stopped is followed again when the conver
   assert.deepEqual(results.map(m => m.details.agentStatus), ['running', 'completed']);
 });
 
+test('a command Antigravity moves to the background is a background task: its log while it runs, its end from its message', { timeout: 15000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start(undefined, {}, { HOME: join(f.cwd, 'home') });
+  await peer.request('get_state');
+  await peer.request('prompt', { message: 'background' });
+  await peer.next(event('agent_settled'));
+  const jobs = () => peer.events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-background').map(e => JSON.parse(e.statusText).jobs);
+  await until(() => jobs().at(-1)?.[0]?.tail.includes('tick 2'), 'the log as it grows');
+  assert.deepEqual(jobs().at(-1).map(j => [j.command, j.description, j.status, j.stoppable]), [['make bench', 'Run the benchmark', 'running', false]]);
+  await until(() => jobs().at(-1)?.[0]?.status === 'completed', 'its end', 8000);
+  assert.deepEqual(jobs().at(-1).map(j => [j.exitCode, j.tail.trim().split('\n').at(-1)]), [[0, 'done']]);
+});
+
+test('while a turn goes on, its speed counts what was written as earlier turns were counted, so it does not jump when the turn is counted', { timeout: 15000 }, async t => {
+  const f = fixture(t, {}, true);
+  const peer = f.start();
+  await peer.request('get_state');
+  await peer.request('prompt', { message: 'hidden thinking' });
+  await peer.next(event('agent_settled'));
+  const from = peer.events.length;
+  await peer.request('prompt', { message: 'slow command' });
+  const during = await peer.next(e => e.type === 'cli_state' && e.cli.turnRequests?.length, from);
+  await peer.next(event('agent_settled'), from);
+  // The first turn: 250 counted for 25 seen. The second's first request wrote a thought of 33 characters (about 8
+  // tokens): while the turn goes on, it counts as about 80, not 8.
+  assert.ok(during.cli.turnRequests[0].estimated);
+  assert.ok(Math.abs(during.cli.turnRequests[0].output - 83) <= 3, JSON.stringify(during.cli.turnRequests));
+  const reply = peer.events.findLast(e => e.type === 'message_end' && e.message.role === 'assistant').message;
+  assert.ok(reply.__agyTurn.seen > 0, 'what was seen is kept with the turn, for the scale after a restart');
+});
+
 test('the CLI’s ordinary tools are a command, a file read or written and a web search, not a name and its input as JSON', { timeout: 12000 }, async t => {
   const f = fixture(t, {}, true);
   const peer = f.start();

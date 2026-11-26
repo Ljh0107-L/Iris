@@ -101,6 +101,13 @@ try {
   await box().fill('');
   await S('real-4-visual');
 
+  // A command left running in the background: a background task while it runs, gone from the list when it ends.
+  await send('Start `sleep 25 && echo bg-done` as a background terminal session and do not wait for it. Reply with just: started');
+  await settled();
+  check('a command left running in the background is a background task', await page.locator('.right-panel .job.running').waitFor({ timeout: 30000 }).then(() => true, () => false));
+  await S('real-4b-background');
+  check('…and it leaves the list when it ends', await page.locator('.right-panel .job.running').waitFor({ state: 'detached', timeout: 120000 }).then(() => true, () => false));
+
   // Restart: the agent's process ends and starts again, and the conversation goes on.
   // (Codex has named the conversation by now: it is the row that is open.)
   const row = page.locator('.session-row.active, .session-row[aria-current="true"]').first();

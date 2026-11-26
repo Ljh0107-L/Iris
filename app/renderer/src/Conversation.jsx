@@ -1,10 +1,10 @@
 import { Fragment, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { engineLabel, isCliEngine } from './engines.js';
-import { engineAgentStatus } from './agents.js';
+import { conversationAgents, engineAgentStatus } from './agents.js';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
-import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
+import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, listsAtTurnEnd, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
 import { api, editMessage, firstSentAt, lastActivityAt, restartConversation, setComposerDraft, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
@@ -90,6 +90,15 @@ function Running({ thinking = false }) {
   return <Spinner size={14} spectrum kind={thinking ? 'tumble' : 'swap'} />;
 }
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
+// A step while it runs, as the line under the turn says it: what is being done now ("Editing notes.md"). A
+// command with a description is that description; one without, "Running" and the command.
+const NOW = { read: 'Reading', write: 'Writing', edit: 'Editing', NotebookEdit: 'Editing', grep: 'Searching for', find: 'Finding', ls: 'Listing', WebSearch: 'Searching the web for', WebFetch: 'Fetching' };
+export function runningLabel(call) {
+  const d = describeCall(call);
+  if (call.name === 'bash') return d.raw ? `Running ${d.subject}` : d.subject;
+  if (NOW[call.name]) return [NOW[call.name], d.subject].filter(Boolean).join(' ');
+  return d.verb ? [d.verb, d.subject].filter(Boolean).join(' ') : `Running ${d.subject}`;
+}
 export function describeCall(call) {
   if (call.__trace?.status === 'skipped') return { subject: `${call.name} — not executed`, title: 'Output token limit: incomplete tool arguments were not executed.' };
   const a = call.arguments ?? {};
@@ -247,15 +256,16 @@ function ToolCall({ call, tool, bare = false }) {
   );
 }
 
-function ToolGroup({ calls, tools, live }) {
+function ToolGroup({ calls, tools, live, behind = false }) {
   const running = calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
+  const background = behind && calls.some(c => tools[c.id]?.status === 'running');
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
   const [open, setOpen] = useDisclosure(calls.map(c => `group:tool:${c.id}`));
   return (
     <div className="tool-group">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
-        {running && <Running />}
-        <span>{toolSummary(calls)}</span>
+        {running && !background && <Running />}
+        <span>{toolSummary(calls)}{background && <span className="group-still">, still running</span>}</span>
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
@@ -462,7 +472,9 @@ function ThoughtText({ text, sessionId, historyRef, id }) {
 
 // Consecutive steps folded into one line ("Ran 2 commands, edited plan.md (1 failed) +12"), opening to a card
 // with one row per step.
-function WorkGroup({ items, tools, live }) {
+// behind: something came after it in the conversation (the agent wrote on while a step of it runs). Its running
+// step is then not what is happening now: it says it is still running, and the line under the turn names it.
+function WorkGroup({ items, tools, live, behind = false }) {
   const [open, setOpen] = useDisclosure(groupIds(items));
   const { onOpenFile, onFileContextMenu, sessionId } = useContext(DisclosureContext);
   const calls = items.flatMap(i => i.kind === 'tools' ? i.calls : []);
@@ -482,8 +494,10 @@ function WorkGroup({ items, tools, live }) {
   // having stopped. The step most recently begun of those still running.
   const runningCall = running && !thinkingNow ? calls.findLast(c => tools[c.id]?.status === 'running') : null;
   const now = runningCall ? describeCall(runningCall) : null;
-  const nowText = now ? (now.verb ? [now.verb, now.subject].filter(Boolean).join(' ') : `Running ${now.subject}`) : null;
+  const nowText = now ? runningLabel(runningCall) : null;
   const othersRunning = runningCall ? calls.filter(c => c !== runningCall && tools[c.id]?.status === 'running').length : 0;
+  const background = behind && !!runningCall;
+  const stillRunning = background ? calls.filter(c => tools[c.id]?.status === 'running').length : 0;
   // When the step now under way began (the earliest of those still running).
   const started = Math.min(...calls.filter(c => tools[c.id]?.status === 'running' && tools[c.id].startedAt).map(c => tools[c.id].startedAt), Infinity);
   const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('iris:open-file', { detail: path }));
@@ -492,9 +506,11 @@ function WorkGroup({ items, tools, live }) {
       <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && onlyFile) { openTarget(onlyFile); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {running && <Running thinking={thinkingNow} />}
+        {running && !background && <Running thinking={thinkingNow} />}
         <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
+            : background ? <>{only ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)}<span className="group-still">{only ? ', still running' : `, ${stillRunning} still running`}</span>
+                {!open && <span className="group-live" role="link" tabIndex={0} onClick={e => { e.stopPropagation(); setOpen(true); }} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); setOpen(true); } }}>View live output</span>}</>
             : nowText ? <>{nowText}{othersRunning > 0 && <span className="group-also"> · {othersRunning} more running</span>}</>
             : onlyFile && only?.verb ? <>
                 <span>{only.verb} </span>
@@ -541,11 +557,12 @@ function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tok
     return <div className="thinking"><div className="tool-group-head static">{streaming ? <span className="shimmer">Thinking</span> : <span>{label}</span>}<ReasoningTokens tokens={tokens} /></div></div>;
   }
   const latest = streaming ? text.trim().split('\n').filter(l => l.trim()).at(-1)?.replace(/[*_`#>]/g, '').trim() : null;
+  // A thought that is over is one quiet line: how it began (opening to all of it), its length in the tooltip.
+  const gist = !streaming ? firstLine(text) : null;
   return (
     <div className="thinking">
-      <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
-        {streaming ? <span className="shimmer thinking-latest">{latest || 'Thinking'}</span> : <span>{label}</span>}
-        <ReasoningTokens tokens={tokens} />
+      <button className="tool-group-head thinking-head" onClick={() => setOpen(o => !o)} title={[label, tokens > 0 ? `${formatTokens(tokens)} reasoning tokens` : null].filter(Boolean).join(' · ')}>
+        {streaming ? <span className="shimmer thinking-latest">{latest || 'Thinking'}</span> : <FadeText className="thinking-gist">{gist || label}</FadeText>}
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
       {open && <div className="thinking-body"><ThoughtText text={text} sessionId={sessionId} historyRef={historyRef} id={blockKey} /></div>}
@@ -635,7 +652,8 @@ function ClaudeTaskCard({ call, tool, sessionId }) {
 }
 
 // Claude Code's `TodoWrite` checklist card.
-function ClaudeTodoCard({ call, tool, live }) {
+// agents: how many agents are still working (the last list of the conversation): said under its step in progress.
+function ClaudeTodoCard({ call, tool, live, agents = 0 }) {
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef]);
   const todos = Array.isArray(call.arguments?.todos) ? call.arguments.todos.filter(Boolean) : [];
   if (detailState.pending && !todos.length) return <HistoryLoading {...detailState} />;
@@ -663,7 +681,7 @@ function ClaudeTodoCard({ call, tool, live }) {
                     ? (live ? <Spinner size={11} /> : <span className="cc-todo-dot active" />)
                     : <span className="cc-todo-dot" />}
               </span>
-              <span className="cc-todo-text">{label}</span>
+              <span className="cc-todo-text">{label}{state === 'in_progress' && agents > 0 && <span className="cc-todo-agents">{agents} {agents === 1 ? 'agent' : 'agents'} working</span>}</span>
             </li>
           );
         })}
@@ -1011,29 +1029,36 @@ function WorkingRow({ session, transcript, sending = false }) {
   const startedAt = first ?? messages[from - 1]?.timestamp ?? turn[0]?.__timing?.start ?? transcript.live?.__t0;
   const live = transcript.live;
   // Real output tokens of the model calls finished so far this turn (no live estimate).
-  const tokens = turn.reduce((n, m) => n + (m.role === 'assistant' ? m.usage?.output ?? 0 : 0), 0);
+  const tokens = turn.reduce((n, m) => n + (m.role === 'assistant' ? m.usage?.output ?? 0 : 0), 0) + Math.round(transcript.live?.__est ?? 0);
   const lastBlock = live?.content?.filter(Boolean).at(-1);
   const pending = messages.at(-1)?.__interrupting;
+  // A step still running after the agent wrote on (a long command it left going): that is what the turn is
+  // doing, so the line names it, rather than "Writing" over text that has long been written.
+  const runningStep = (live?.content ?? []).filter(b => b?.type === 'toolCall' && transcript.tools[b.id]?.status === 'running').at(-1);
+  const stepLabel = runningStep ? runningLabel(runningStep) : null;
+  const streamingNow = live?.__tLast != null && Date.now() - live.__tLast < 3000;
   const state = pending ? 'Interrupting…'
     : (session?.compacting ?? transcript.compacting) ? 'Compacting conversation'
     : transcript.retry ? `Reconnecting to model · retry ${transcript.retry.attempt}/${transcript.retry.maxAttempts}`
-    : !live || !live.content?.length || lastBlock?.type === 'thinking' ? 'Thinking'
-    : lastBlock?.type === 'toolCall' ? 'Working' : 'Writing';
+    : !live || !live.content?.length || lastBlock?.type === 'thinking' ? (stepLabel && !streamingNow ? stepLabel : 'Thinking')
+    : lastBlock?.type === 'toolCall' ? (stepLabel ?? 'Working')
+    : stepLabel && !streamingNow ? stepLabel : 'Writing';
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
   // How long the agent has said nothing (no event at all). A while: said, so a long wait for the model reads as
   // that. Long: it may be stuck, and it can be stopped or restarted from here. (A step that is running says so
   // on its own line instead; this one shows only while no step runs.)
   const heard = session ? lastActivityAt(session.id) : null;
   const quiet = heard && startedAt && heard >= startedAt ? Date.now() - heard : startedAt ? elapsed : 0;
-  const waiting = state === 'Thinking' ? 'Waiting for the model' : state;
-  if (session && !pending && quiet >= STALL_MS) return <StallRow session={session} quiet={quiet} />;
+  const waiting = state === 'Thinking' || state === 'Writing' ? 'Waiting for the model' : state;
+  // (While a step runs, a quiet agent is waiting for it: not stuck, and no "no output" either.)
+  if (session && !pending && !runningStep && quiet >= STALL_MS) return <StallRow session={session} quiet={quiet} />;
   return (
     <div className="working">
       <Spinner size={14} spectrum kind={state === 'Writing' ? 'orbit' : 'tumble'} />
+      {/* While the model writes, the line has nothing to name: how long, and how much it has written. */}
+      {(session?.activityLabel || state !== 'Writing' || quiet >= QUIET_MS) && <span className="shimmer">{session?.activityLabel ?? (quiet >= QUIET_MS && !runningStep ? waiting : state)}</span>}
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
       {tokens > 0 && <span className="working-meta">{formatTokens(tokens)} tokens</span>}
-      <span className="shimmer">{session?.activityLabel ?? (quiet >= QUIET_MS ? waiting : state)}</span>
-      {quiet >= QUIET_MS && <span className="working-meta" title="Nothing has come from the agent for this long">no output for {seconds(quiet)}</span>}
     </div>
   );
 }
@@ -1173,7 +1198,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   };
   const committed = useRef({ sessionId: session?.id, blocks: [] });
-  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], displayBlocks(transcript)), [transcript, session?.id]);
+  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], listsAtTurnEnd(displayBlocks(transcript))), [transcript, session?.id]);
   useLayoutEffect(() => { committed.current = { sessionId: session?.id, blocks }; }, [blocks, session?.id]);
   useLayoutEffect(() => {
     if (readOnly || !session?.id) return;
@@ -1188,6 +1213,22 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     await loadEarlierHistory(session.id);
   };
   const lastUsage = blocks.findLast(b => b.kind === 'usage');
+  const lastListKey = blocks.findLast(b => b.kind === 'ccTodo')?.key;
+  const liveAgents = useStore(s => session?.id ? s.agents[session.id] : null);
+  const agentsWorking = useMemo(() => readOnly ? 0 : conversationAgents(session, transcript, liveAgents ?? {}).filter(a => a.status === 'running' || a.status === 'queued').length, [readOnly, session, transcript, liveAgents]);
+  // Groups of steps that the agent wrote on after (text, a visual, a card): a step of theirs still running is not
+  // what is happening now (see WorkGroup's `behind`).
+  const behind = useMemo(() => {
+    const keys = new Set();
+    let later = false;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (b.kind === 'user') later = false;
+      else if ((b.kind === 'work' || b.kind === 'tools') && later) keys.add(b.key);
+      else if (['text', 'visual', 'ccTask', 'ccTodo', 'files', 'image', 'subagents'].includes(b.kind)) later = true;
+    }
+    return keys;
+  }, [blocks]);
   const onScroll = e => {
     // Output panes also scroll. Their events must not re-enable transcript auto-follow.
     if (e.target !== scroller.current) return;
@@ -1283,11 +1324,11 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} blockKey={block.key} />;
             case 'thinking': return <Thinking key={block.key} {...block} blockKey={block.key} />;
-            case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
-            case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
+            case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} behind={behind.has(block.key)} />;
+            case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} behind={behind.has(block.key)} />;
             case 'subagents': return renderSubagents?.(block);
             case 'ccTask': return <ClaudeTaskCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} />;
-            case 'ccTodo': return <ClaudeTodoCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={working} />;
+            case 'ccTodo': return <ClaudeTodoCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={working && !!block.live} agents={block.key === lastListKey ? agentsWorking : 0} />; // (a list of a turn that is over does not turn)
             case 'progress': return <ProgressReport key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} live={!!transcript.live} />;
             case 'visual': return <VisualCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={!!transcript.live} superseded={!!block.superseded} />;
             case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;

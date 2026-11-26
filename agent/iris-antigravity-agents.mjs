@@ -10,7 +10,7 @@
 //       created_at, content, thinking, tool_calls: [{ name, args }], input_tokens, output_tokens, model }
 // An agent's conversation is found by its first message: sent by the conversation that started it, with the
 // brief. What it did becomes the steps of its task in Iris; the message it sent back (send_message) is its report.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -106,4 +106,37 @@ export function agentsStoppedAt(data, parent, since = 0) {
   const notices = messagesTo(data, parent).filter(m => m.sender === 'system' && /subagents and background tasks have been stopped/i.test(String(m.content ?? '')))
     .map(m => Date.parse(m.timestamp)).filter(at => at >= since);
   return notices.length ? Math.max(...notices) : null;
+}
+
+// Antigravity's background commands. A command still running after the wait it was given becomes a task:
+// its step's result says so ("Tool is running as a background task with task id: <parent>/task-N", with its
+// log file); its output goes to <data>/brain/<parent>/.system_generated/tasks/task-N.log; and when it ends,
+// the parent gets a message from it ("Task id ... finished with result: ... exited with code N", or "was
+// canceled").
+export function backgroundTaskOf(result) {
+  const said = String(result ?? '');
+  const id = /running as a background task with task id:\s*(\S+)/i.exec(said)?.[1];
+  if (!id) return null;
+  const description = /Task Description:\s*([^\n]+)/i.exec(said)?.[1]?.trim() ?? null;
+  const log = /Task logs are available at:\s*file:\/\/(\S+)/i.exec(said)?.[1] ?? null;
+  return { id, description, log };
+}
+export function readTaskLog(path, max = 4000) {
+  try {
+    const size = statSync(path).size;
+    if (size <= max) return readFileSync(path, 'utf8');
+    const fd = openSync(path, 'r'), buffer = Buffer.alloc(max);
+    try { readSync(fd, buffer, 0, max, size - max); } finally { closeSync(fd); }
+    return buffer.toString('utf8');
+  } catch { return null; }
+}
+// The end of a task, when its message has come: whether it failed, and its exit code.
+export function taskEnded(data, parent, id) {
+  const message = messagesTo(data, parent).find(m => m.sender === id);
+  if (!message) return null;
+  const content = String(message.content ?? '');
+  const code = /exited with code (-?\d+)/i.exec(content)?.[1];
+  const canceled = /was cancel+ed/i.test(content);
+  const exitCode = code != null ? Number(code) : null;
+  return { failed: canceled || (exitCode != null && exitCode !== 0), exitCode, output: /Command output:\n([\s\S]*)$/.exec(content)?.[1] ?? null, canceled };
 }

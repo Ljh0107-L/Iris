@@ -597,7 +597,7 @@ export function displayBlocks(t) {
       if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mk}-${bi}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && (block.name === 'Task' || t.tools[block.id]?.result?.details?.kind === 'claude-code-agent')) { flush(); blocks.push({ kind: 'ccTask', key: `cc-task:${block.id}`, call: block }); return; }
-      if (block.type === 'toolCall' && block.name === 'TodoWrite') { flush(); blocks.push({ kind: 'ccTodo', key: `cc-todo:${block.id}`, call: block }); return; }
+      if (block.type === 'toolCall' && block.name === 'TodoWrite') { flush(); blocks.push({ kind: 'ccTodo', key: `cc-todo:${block.id}`, call: block, ...(message === t.live ? { live: true } : {}) }); return; }
       // Files handed to the user are cards in the conversation, not a folded tool step.
       if (block.type === 'toolCall' && block.name === 'report_progress') { flush(); blocks.push({ kind: 'progress', key: `progress:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'present_files') { flush(); blocks.push({ kind: 'files', key: `files:${block.id}`, call: block }); return; }
@@ -715,6 +715,26 @@ export function collapseWork(blocks) {
 
 // A page join can extend the first work group. Reuse its committed identity so its
 // DOM, disclosure and reading anchors do not become a different group on prepend.
+// A turn's task list stands at the end of the turn, under what was done and said (as the latest state of the
+// work, it reads last), and once: a list updated again in the same turn is shown as it stands now. A message
+// sent into the turn under way (steered) is part of the turn.
+export function listsAtTurnEnd(blocks) {
+  const out = [];
+  let start = 0;
+  const flush = end => {
+    const turn = blocks.slice(start, end), lists = turn.filter(b => b.kind === 'ccTodo');
+    if (!lists.length) { out.push(...turn); return; }
+    const rest = turn.filter(b => b.kind !== 'ccTodo'), list = lists.at(-1);
+    const footer = rest.findIndex(b => b.kind === 'usage');
+    if (footer < 0) out.push(...rest, list); else out.push(...rest.slice(0, footer), list, ...rest.slice(footer));
+  };
+  blocks.forEach((block, i) => {
+    if ((block.kind === 'user' && !block.steer) || block.kind === 'goal') { flush(i); out.push(block); start = i + 1; }
+  });
+  flush(blocks.length);
+  return out;
+}
+
 export function retainWorkKeys(previous, next) {
   const members = block => block.kind === 'work' ? block.items.flatMap(members) : block.kind === 'tools' ? block.calls.map(call => call.id) : [];
   const owners = new Map(previous.flatMap(block => members(block).map(id => [id, block.key])));
@@ -767,10 +787,19 @@ export function toolSummary(calls) {
   const parts = [];
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   if (counts.bash) parts.push(`Ran ${plural(counts.bash, 'command', 'commands')}`);
-  const edited = (counts.edit ?? 0) + (counts.write ?? 0) + (counts.NotebookEdit ?? 0);
-  const editedPaths = [...new Set(calls.filter(c => c.name === 'edit' || c.name === 'write' || c.name === 'NotebookEdit').map(c => c.arguments?.path ?? c.arguments?.file_path ?? c.arguments?.notebook_path).filter(Boolean))];
-  const editedLabel = editedPaths.length === 1 ? editedPaths[0].split('/').pop() : plural(edited, 'file', 'files');
-  if (edited) parts.push(`${parts.length ? 'edited' : 'Edited'} ${editedLabel}`);
+  // Files written new and files changed, by name when there is one: a file written and then changed in the same
+  // steps is "created and edited".
+  const pathOf = c => c.arguments?.path ?? c.arguments?.file_path ?? c.arguments?.notebook_path;
+  const created = [...new Set(calls.filter(c => c.name === 'write').map(pathOf).filter(Boolean))];
+  const changed = [...new Set(calls.filter(c => c.name === 'edit' || c.name === 'NotebookEdit').map(pathOf).filter(Boolean))];
+  const both = created.filter(path => changed.includes(path));
+  const named = (paths, n) => paths.length === 1 ? paths[0].split('/').pop() : plural(n ?? paths.length, 'file', 'files');
+  const verb = (word, text) => `${parts.length ? word : word[0].toUpperCase() + word.slice(1)} ${text}`;
+  if (both.length && created.length === both.length && changed.length === both.length) parts.push(verb('created and edited', named(both)));
+  else {
+    if (created.length || counts.write) parts.push(verb('created', named(created, Math.max(created.length, counts.write ?? 0))));
+    if (changed.length || counts.edit || counts.NotebookEdit) parts.push(verb('edited', named(changed, Math.max(changed.length, (counts.edit ?? 0) + (counts.NotebookEdit ?? 0)))));
+  }
   const readPaths = [...new Set(calls.filter(c => c.name === 'read').map(c => c.arguments?.path ?? c.arguments?.file_path).filter(Boolean))];
   if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${readPaths.length === 1 ? readPaths[0].split('/').pop() : plural(counts.read, 'file', 'files')}`);
   const searched = (counts.grep ?? 0) + (counts.find ?? 0) + (counts.ls ?? 0);
@@ -783,7 +812,7 @@ export function toolSummary(calls) {
   if (counts.subagent) parts.push(`Delegated ${plural(calls.filter(c => c.name === 'subagent').reduce((n, c) => n + (c.arguments?.tasks?.length ?? 0), 0), 'subtask', 'subtasks')}`);
   const tasks = (counts.manage_task ?? 0) + (counts['Run manage_task'] ?? 0);
   if (tasks) parts.push(`${parts.length ? 'checked' : 'Checked'} background tasks`);
-  const accounted = tasks + (counts.bash ?? 0) + edited + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0) + (counts.AskUserQuestion ?? 0);
+  const accounted = tasks + (counts.bash ?? 0) + (counts.edit ?? 0) + (counts.write ?? 0) + (counts.NotebookEdit ?? 0) + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0) + (counts.AskUserQuestion ?? 0);
   const other = calls.length - accounted;
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
   if (skipped) parts.push(`${plural(skipped, 'tool call', 'tool calls')} not executed`);

@@ -163,6 +163,21 @@ lines.on('line', line => {
         tool('s-2', 'Run update_steps', { steps: [{ status: 'done', title: 'Start sub-agent' }, { status: 'done', title: 'Report' }] });
         chunk('It said hi.'); reply(r.id, { stopReason: 'end_turn' }); break;
       }
+      // A command moved to the background, as the real CLI reports one: its step ends saying it is a task (with
+      // its log file), its output goes to the log, and its end is a message to the conversation from the task.
+      if (text === 'background') {
+        const gen = join(process.env.HOME, '.gemini', dataDir, 'brain', SESSION, '.system_generated'), id = `${SESSION}/task-7`, log = join(gen, 'tasks', 'task-7.log');
+        mkdirSync(join(gen, 'tasks'), { recursive: true }); mkdirSync(join(gen, 'messages'), { recursive: true });
+        writeFileSync(log, 'tick 1\n');
+        const said = `Created At: now\nTool is running as a background task with task id: ${id}\nTask Description: make bench\nTask logs are available at: file://${log}`;
+        update('tool_call', { toolCallId: 'bg-1', kind: 'execute', title: 'make bench', status: 'in_progress', rawInput: { CommandLine: 'make bench', toolSummary: 'Run the benchmark' } });
+        update('tool_call_update', { toolCallId: 'bg-1', kind: 'execute', title: 'make bench', status: 'completed', rawInput: { CommandLine: 'make bench', toolSummary: 'Run the benchmark' }, content: [{ type: 'content', content: { type: 'text', text: said } }] });
+        chunk('It runs in the background.'); reply(r.id, { stopReason: 'end_turn' });
+        setTimeout(() => appendFileSync(log, 'tick 2\n'), 600);
+        if (scenario().taskMs !== 0) setTimeout(() => writeFileSync(join(gen, 'messages', 'done.json'), JSON.stringify({ id: 'done', recipient: SESSION, sender: id, timestamp: new Date().toISOString(),
+          renderDetails: { messageTitle: 'Run the benchmark finished' }, content: `Task id "${id}" finished with result:\nCommand exited with code 0.\n\nCommand output:\ntick 1\ntick 2\ndone\n` })), scenario().taskMs ?? 2600);
+        break;
+      }
       // An agent, as the real CLI runs one: invoke_subagent returns at once; the agent is a conversation of its own
       // in the data directory (~/.gemini/<dir>/brain/<id>), started by a message carrying the brief, and it sends
       // its report back to the parent as a message. Its steps are written as it works.
@@ -234,6 +249,14 @@ lines.on('line', line => {
         setTimeout(() => { update('tool_call_update', { toolCallId: 'slow-1', kind: 'execute', title: 'sleep 1', status: 'completed', rawInput: { CommandLine: 'sleep 1' } }); chunk('Slept, and here is a sentence about it.');
           update('usage_update', { used: 560, size: 1000000 });
           reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 40, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 10, totalTokens: 140 } }); }, 400);
+        break;
+      }
+      // A turn whose model thought far more than it showed (Antigravity shows a summary of the thinking): what was
+      // written is 25 tokens or so, what is counted 250.
+      if (text === 'hidden thinking') {
+        update('usage_update', { used: 0, size: 1000000 });
+        chunk('x'.repeat(100));
+        reply(r.id, { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 250, cachedReadTokens: 0, cachedWriteTokens: 0, thoughtTokens: 225, totalTokens: 350 } });
         break;
       }
       // A model that takes a while to begin: the thought comes whole, then the answer in pieces.

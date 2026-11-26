@@ -146,8 +146,8 @@ try {
   // (the page's clock moved on, as if that much time had passed)
   const later = ms => page.evaluate(ms => { const real = window.__realNow ??= Date.now.bind(Date); Date.now = () => real() + ms; }, ms);
   await later(20000);
-  await page.locator('div.working', { hasText: /no output for 2\ds/ }).waitFor({ timeout: 3000 });
-  assert.match(await page.locator('div.working .shimmer').innerText(), /Waiting for the model/);
+  await page.locator('div.working', { hasText: /Waiting for the model/ }).waitFor({ timeout: 3000 });
+  assert.doesNotMatch(await page.locator('div.working').innerText(), /no output/, 'a wait is said in words, not counted as "no output"');
   await later(200000);
   const stalled = page.locator('div.working.stalled');
   await stalled.waitFor({ timeout: 3000 });
@@ -169,7 +169,8 @@ try {
   await page.getByRole('button', { name: 'Hand off to another agent…' }).click();
   const dialog = page.locator('.handoff');
   await dialog.waitFor();
-  assert.deepEqual((await dialog.locator('.handoff-engine').allInnerTexts()).map(t => t.trim()), ['Claude Code', 'Codex', 'Cursor', 'Antigravity'], 'every agent but this one');
+  assert.deepEqual((await dialog.locator('.handoff-engine').allInnerTexts()).map(t => t.trim().split('\n')[0]), ['Iris', 'Claude Code', 'Codex', 'Cursor', 'Antigravity'], 'every agent, this one first (a new conversation of it: another account or model)');
+  assert.match(await dialog.locator('.handoff-engine').first().innerText(), /New conversation/);
   await dialog.getByRole('radio', { name: 'Review the work' }).click();
   await dialog.locator('.handoff-engine', { hasText: 'Codex' }).click();
   const handed = page.locator('.dock textarea[aria-label="Message"]');
@@ -377,6 +378,26 @@ try {
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
   await page.locator('.markdown', { hasText: 'Done with both.' }).waitFor();
   assert.deepEqual(await marks(), { line: [], step: [] }, 'finished: no mark anywhere');
+
+  // A turn whose task list was left with a step under way, then a turn in which the agent starts a long command
+  // and writes on while it runs (Antigravity): the old list does not turn, the step's line says it is still
+  // running without its moving mark, and the line under the turn names the command, not "Writing".
+  await fire([{ type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'aborted', content: [{ type: 'toolCall', id: 'old-plan', name: 'TodoWrite', arguments: { todos: [{ content: 'Check the build', status: 'completed' }, { content: 'Run the benchmark', status: 'in_progress' }] } }] } }]);
+  await fire([{ status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } },
+    ...call('bench', 'bash', { command: 'python bench.py --cards 64', description: 'Run the 64-card benchmark' }, 0),
+    { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 1 } }, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: 'Started the benchmark; results follow.' } },
+    { type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 1, content: 'Started the benchmark; results follow.' } }]);
+  await page.locator('.markdown', { hasText: 'Started the benchmark' }).waitFor();
+  await page.waitForTimeout(3200); // (the text has stood still: nothing is being written)
+  await page.waitForFunction(() => /Run the 64-card benchmark/.test(document.querySelector('.session-main .working')?.innerText ?? ''), undefined, { timeout: 5000 });
+  assert.doesNotMatch(await page.locator('.session-main .working').innerText(), /Writing/);
+  const head = page.locator('.session-main .tool-group-head', { hasText: 'Run the 64-card benchmark' }).last();
+  assert.match(await head.innerText(), /still running/);
+  assert.equal(await head.locator('.spinner').count(), 0, 'the moving mark is on the line under the turn, not on a step above what came after it');
+  const oldPlan = page.locator('.cc-todo-card[data-tool-id="old-plan"]');
+  assert.equal(await oldPlan.locator('.spinner').count(), 0, 'a list of a turn that is over does not turn');
+  await fire([done('bench', 'bash'), { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'toolCall', id: 'bench', name: 'bash', arguments: { command: 'python bench.py --cards 64', description: 'Run the 64-card benchmark' } }, { type: 'text', text: 'Started the benchmark; results follow.' }] } },
+    { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
 
   assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS built renderer: streamed reply applied once per frame, queued message with Option+Enter, Find in conversation across unrendered rows and folded steps');

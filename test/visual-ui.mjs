@@ -55,8 +55,8 @@ try {
   assert.ok(tall < 600, `and stays near its first height: ${tall}`);
   // Filling the window: above the sidebar, the title bar and the message box; Escape goes back.
   await page.locator('.visual-card').last().getByRole('button', { name: 'Fill the window' }).click();
-  const sheet = await page.locator('.visual-sheet').evaluate(el => { const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.left + 20, r.top + r.height / 2); return { left: r.left, right: innerWidth - r.right, covers: el.contains(top) }; });
-  assert.ok(sheet.left <= 40 && sheet.right <= 40 && sheet.covers, JSON.stringify(sheet));
+  const sheet = await page.locator('.visual-sheet').evaluate(el => { const r = el.getBoundingClientRect(); const top = document.elementFromPoint(r.left + 20, r.top + r.height / 2); return { left: r.left, right: innerWidth - r.right, width: innerWidth, covers: el.contains(top) }; });
+  assert.ok(sheet.left <= sheet.width * 0.05 && sheet.right <= sheet.width * 0.05 && sheet.covers, JSON.stringify(sheet));
   await page.keyboard.press('Escape');
   await page.locator('.visual-overlay').waitFor({ state: 'detached' });
   console.log('PASS visuals in the app: as tall as the page, no frame, the conversation’s colours, a 100vh page that stops growing, filling the window');

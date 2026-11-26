@@ -106,62 +106,64 @@ const jobMs = ms => {
   const m = Math.floor(s / 60);
   return m < 60 ? `${m}m${s % 60 ? ` ${s % 60}s` : ''}`.trim() : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
+// A background task: one line (what it is, how long it has run, Stop), opening to its command and output.
 function BackgroundJob({ job, sessionId, connected, elapsed }) {
   const [stopping, setStopping] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const detailId = useId();
   const isStopping = stopping || job.stopping;
+  const running = job.status === 'running';
   const stop = async () => {
     setStopping(true);
     try { await stopBackgroundJob(sessionId, job.id, job.startedAt); }
     catch { /* the store shows the error */ }
     finally { setStopping(false); }
   };
-  return <div className="job running" data-job-id={job.id}>
-    <div className="job-head">
-      {connected ? <Spinner size={13} /> : <Icon name="timer" size={13} />}
-      <div className="job-text">
-        <div className="job-name" title={job.description || job.command}>{job.description || job.command}</div>
-        <div className="job-meta">
-          <span className="job-id">{job.id}</span><span aria-hidden="true">·</span>
-          <span className="job-elapsed">{jobMs(elapsed)}</span>
-          {isStopping && <span>Stopping…</span>}
-        </div>
-      </div>
-    </div>
-    <div className="job-actions">
-      <button className="job-details-toggle" aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(value => !value)}>
-        <Icon name={expanded ? 'caretDown' : 'caretRight'} size={13} />Details
+  return <div className={`job ${job.status}`} data-job-id={job.id}>
+    <div className="job-row">
+      <button type="button" className="job-details-toggle job-main" aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(value => !value)} title={job.command}>
+        {running ? (connected ? <Spinner size={12} /> : <Icon name="timer" size={13} />) : <Icon name={job.status === 'completed' ? 'check' : 'alert'} size={13} />}
+        <span className="job-name">{job.description || job.command}</span>
+        <span className="job-elapsed">{isStopping ? 'Stopping…' : jobMs(elapsed)}</span>
       </button>
-      <button className="link-button job-stop" aria-label={`Stop job ${job.id}`} disabled={!connected || isStopping} onClick={stop}>Stop</button>
+      {running && job.stoppable !== false && <button type="button" className="job-stop" aria-label={`Stop job ${job.id}`} title="Stop" disabled={!connected || isStopping} onClick={stop}><Icon name="stop" size={11} /></button>}
     </div>
     {expanded && <div className="job-details" id={detailId}>
-      <div className="job-cwd"><Icon name="folder" size={13} /><span title={job.cwd}>{job.cwd}</span></div>
+      {job.cwd && <div className="job-cwd"><Icon name="folder" size={13} /><span title={job.cwd}>{job.cwd}</span></div>}
       <div className="job-terminal">
         <div className="job-code"><span className="job-code-label">Command</span><pre className="job-command">{job.command}</pre></div>
-        <div className="job-code"><span className="job-code-label">Output</span><pre className="job-output">{job.tail || 'Waiting for output…'}</pre></div>
+        <div className="job-code"><span className="job-code-label">{running ? 'Output' : job.exitCode != null ? `Output · exit ${job.exitCode}` : 'Output'}</span><pre className="job-output">{job.tail || (running ? 'Waiting for output…' : 'No output.')}</pre></div>
       </div>
+      {running && job.stoppable === false && <div className="job-note">Iris cannot stop this from outside the agent: ask the agent to stop it.</div>}
     </div>}
   </div>;
 }
 function BackgroundJobs({ sessionId }) {
   const snapshot = useStore(s => s.jobs[sessionId]);
   const connected = useStore(s => s.sessions.find(session => session.id === sessionId)?.status === 'connected');
-  // Finished tasks are dropped from the card the moment they end; only running jobs stay visible.
-  const list = sortedBackgroundJobs(snapshot?.jobs).filter(job => job.status === 'running');
+  const all = sortedBackgroundJobs(snapshot?.jobs);
+  const list = all.filter(job => job.status === 'running');
+  const finished = all.filter(job => job.status !== 'running');
+  const failed = finished.filter(job => job.status === 'failed' || (job.exitCode != null && job.exitCode !== 0)).length;
+  const [showFinished, setShowFinished] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!list.length || !connected) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [list.length, connected]);
+  // The card is there while something runs (finished tasks are summed up under the running ones), and goes
+  // when the last one ends.
   if (!list.length) return null;
   return <Card title="Background tasks" aside={<span className="panel-pill">{list.length} running</span>}>
     <div className="jobs">
-      <div className="jobs-summary">{list.length} running</div>
       {!connected && <div className="jobs-offline">Disconnected — showing last known state</div>}
       {list.map(job => <BackgroundJob key={`${job.id}:${job.startedAt}`} job={job} sessionId={sessionId} connected={connected}
         elapsed={backgroundElapsed(job, snapshot, now, connected)} />)}
+      {finished.length > 0 && <button type="button" className="jobs-finished" aria-expanded={showFinished} onClick={() => setShowFinished(v => !v)}>
+        <Icon name="check" size={13} /><span>{finished.length} finished</span>{failed > 0 && <span className="jobs-failed">{failed} failed</span>}<Icon name={showFinished ? 'caretDown' : 'caretRight'} size={12} />
+      </button>}
+      {showFinished && finished.map(job => <BackgroundJob key={`${job.id}:${job.startedAt}`} job={job} sessionId={sessionId} connected={connected} elapsed={backgroundElapsed(job, snapshot, now, connected)} />)}
     </div>
   </Card>;
 }

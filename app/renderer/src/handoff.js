@@ -13,13 +13,15 @@ const textOf = message => (typeof message.content === 'string' ? message.content
   .replace(/(?:^|\n\n)Attached files:\n(?:- .+(?:\n|$))+$/, '').trim();
 const quoted = text => text.split('\n').map(line => `> ${line}`).join('\n');
 
-export function handoffText({ engine, messages = [], tools = {}, cwd = '', file = '', mode = 'continue' }) {
-  const from = engineLabel(engine);
+// to: the agent handed to; the same agent continues from an earlier conversation of its own.
+export function handoffText({ engine, to = null, messages = [], tools = {}, cwd = '', file = '', mode = 'continue' }) {
+  const from = engineLabel(engine), same = to != null && to === (engine ?? 'iris');
   const files = changesOf(messages, tools).map(change => change.path).slice(0, 30);
   const where = cwd ? ` in ${cwd}` : '';
   const parts = [mode === 'review'
-    ? `Please review the work ${from} did${where}.`
-    : `I am moving this work over from ${from}. Pick it up where it stopped${where}.`];
+    ? `Please review the work ${same ? `done in an earlier ${from} conversation` : `${from} did`}${where}.`
+    : same ? `This continues an earlier ${from} conversation. Pick the work up where it stopped${where}.`
+      : `I am moving this work over from ${from}. Pick it up where it stopped${where}.`];
   // The earlier conversation is a file on this machine: the agent reads what it needs from it, rather than a
   // summary of it pasted here.
   if (file) parts.push(`The whole earlier conversation is saved in ${file} (JSON Lines: each line is one message or step, with the tools ${from} used and what they returned). Read it first for what was asked, what was done and what ${from} said last.`);

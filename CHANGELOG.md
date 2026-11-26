@@ -2,6 +2,32 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.2
+
+**New**
+
+- **Background commands of Codex and Antigravity are background tasks.** A command the agent leaves running (Codex's background terminals, Antigravity's commands moved to the background) shows in Background tasks and as "N running" in the title bar, with its output as it comes; when it ends, its step in the conversation gets its output and exit code. (Before, Codex's read "Codex did not report the result", and Antigravity's were not listed at all.) Iris cannot stop these from outside the agent, and says so.
+- **Hand off to the same agent**: the dialog lists the conversation's own agent first, for a new conversation of it (another account or model, say), told where the earlier one is saved.
+
+**Changed**
+
+- **A step still running after the agent wrote on** reads "Ran 2 commands, 1 still running · View live output", without its moving mark; the line under the turn names it ("Running the 64-card benchmark") instead of "Writing", and is not taken for a stuck turn. A task list of a turn that is over no longer turns.
+- **Background tasks** are one line each (what, how long, Stop), opening to the command and its output, with the ones that ended summed up under them ("2 finished · 1 failed").
+- The line under a working turn says what it is doing, then for how long; "no output for 37s" is gone.
+- **A turn's task list stands at the end of the turn**, under what was done and said, once (as it stands now), instead of where it was first made, screens above; while agents still work, its step in progress says how many.
+- **Steps say what was made**: "Created and edited notes.md", "Created x.js", "Edited 2 files".
+- **The line under a working turn says what is being done now**: a command's own description, "Reading app.js", "Editing notes.md"; while the model writes, how long and how many tokens so far.
+- **A thought is one quiet line**, how it began, opening to all of it (its length and tokens in its tooltip). A reply's newest words fade in as they are written.
+- **The message box says what a message does now**: while the agent works, "↵ to send now · ⌥↵ to add after this step"; a CLI's, "Message Codex · / for commands".
+- **Slash commands:** Enter on a command that takes an argument (`/goal`) writes it out for the argument instead of sending it, also in a new conversation's first message.
+- **A conversation handed off from No folder** shows No folder in the new conversation's folder picker.
+
+**Fixed**
+
+- **Antigravity's speed no longer jumps when its turn ends.** Antigravity counts a turn's tokens only at its end, and shows only a summary of the model's thinking; the speed while the turn went on was worked out from what was shown, and rose when the count came. It is now scaled by what the conversation's earlier turns were counted at.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.1
 
 **New**

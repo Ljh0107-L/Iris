@@ -8,6 +8,7 @@ import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, mkdirSync, 
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { visualServer } from './iris-visual.mjs';
+import { BackgroundCommands } from './iris-jobs.mjs';
 
 const ENGINE = 'codex';
 const BINDING = 'iris-codex-thread';
@@ -368,6 +369,9 @@ export class CodexAdapter {
     this.authRequired = false; this.account = null; this.contextUsage = null;
     this.closed = false; this.turn = null; this.threadId = null;
     this.sides = new Map(); // ephemeral threads answering a one-off question (the title) -> what they replied
+    // Commands Codex left running when its turn ended (background terminals): item id -> their step.
+    this.background = new Map();
+    this.jobs = new BackgroundCommands(event => this.write(event));
   }
 
   async handle(r) {
@@ -783,7 +787,7 @@ export class CodexAdapter {
     this.#endBlock(turn);
     turn.tools.set(item.id, shapes.map(({ diff, ...shape }) => {
       const call = { type: 'toolCall', id: randomUUID(), ...shape };
-      const tool = { call, index: turn.content.push(call) - 1, start: Date.now(), output: '', diff };
+      const tool = { call, index: turn.content.push(call) - 1, start: Date.now(), output: '', diff, item: item.type === 'commandExecution' ? { command: item.command, cwd: item.cwd } : null };
       this.#delta({ type: 'toolcall_start', contentIndex: tool.index, id: call.id, toolName: call.name });
       this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: call });
       this.write({ type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: call.arguments });
@@ -847,11 +851,33 @@ export class CodexAdapter {
     if (this.turn && tool.start <= this.turn.counted) { this.turn.from = tool.end; this.turn.first = null; }
     this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError, durationMs: tool.end - tool.start });
   }
+  // A background command's output, and its end: its step is saved again with what it printed and how it exited.
+  #backgroundEvent(method, params) {
+    const itemId = params.itemId ?? params.item?.id, tool = this.background.get(itemId);
+    if (method === 'item/commandExecution/outputDelta' && text(params.delta)) { tool.output = (tool.output + params.delta).slice(-64000); this.jobs.output(itemId, params.delta); return; }
+    if (method !== 'item/completed' || params.item?.type !== 'commandExecution') return;
+    const item = params.item, failed = item.status === 'failed' || item.status === 'declined' || (Number.isInteger(item.exitCode) && item.exitCode !== 0);
+    this.background.delete(itemId);
+    this.jobs.end(itemId, { exitCode: Number.isInteger(item.exitCode) ? item.exitCode : null, failed, output: item.aggregatedOutput ?? tool.output });
+    const content = [{ type: 'text', text: clip(item.aggregatedOutput ?? tool.output) || (failed ? `Exit code ${item.exitCode ?? '?'}` : 'Command completed.') }];
+    const details = { engine: ENGINE, background: 'done', ...(Number.isInteger(item.exitCode) ? { exitCode: item.exitCode } : {}) };
+    const message = { role: 'toolResult', toolCallId: tool.call.id, toolName: tool.call.name, content, details, isError: failed, timestamp: Date.now() };
+    try { this.transcript?.append([{ type: 'message', message }]); } catch { /* shown, if not kept */ }
+    this.write({ type: 'tool_execution_end', toolCallId: tool.call.id, toolName: tool.call.name, result: { content, details }, isError: failed, durationMs: Date.now() - tool.start });
+  }
   #finishTurn(turn, stopReason, errorMessage) {
     if (this.turn !== turn) return;
     this.#cancelPermissions();
     this.#endBlock(turn);
     const agentTools = new Set([...(turn.agents?.values() ?? [])].map(agent => agent.tool));
+    // A command still running when the turn ends was left running on purpose (a background terminal): it goes on,
+    // and is a background task until Codex says it has ended (#backgroundEvent).
+    for (const [itemId, tools] of turn.tools) for (const tool of tools) {
+      if (tool.message || !tool.item || stopReason === 'aborted') continue;
+      this.background.set(itemId, tool);
+      this.jobs.start(itemId, { command: shellCommand(tool.item.command) || tool.call.arguments?.command || '', description: tool.call.arguments?.description ?? null, cwd: tool.item.cwd ?? this.config.cwd ?? '', startedAt: tool.start, tail: tool.output });
+      this.#toolEnd(tool, false, 'Still running in the background (see Background tasks).', { background: 'running' });
+    }
     for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, stopReason === 'aborted' || !agentTools.has(tool), stopReason === 'aborted' ? 'Interrupted.' : agentTools.has(tool) ? 'The agent was still running when this turn ended.' : 'Codex did not report the result.');
     const u = turn.usage;
     const usage = u ? usageOf(u) : undefined;
@@ -949,6 +975,7 @@ export class CodexAdapter {
     if (method === 'thread/goal/cleared' && params.threadId === this.threadId) { this.#publishGoal(null); return; }
     // A turn Codex began itself: the next step toward the conversation's goal. It is a reply like any other.
     if (!this.turn && method === 'turn/started' && params.threadId === this.threadId && text(params.turn?.id) && this.transcript) this.#turnKnown(this.#openTurn(''), params.turn.id);
+    if (params.threadId === this.threadId && this.background.has(params.itemId ?? params.item?.id)) { this.#backgroundEvent(method, params); return; }
     const turn = this.turn;
     const agent = turn?.agents?.get(params.threadId); // an agent Codex started in this turn reports on a thread of its own
     if (agent) { this.#agentEvent(turn, agent, method, params); return; }
@@ -1120,6 +1147,7 @@ export class CodexAdapter {
   async close() {
     if (this.closed) return;
     if (this.turn) this.#finishTurn(this.turn, 'aborted', null);
+    this.jobs.close();
     this.closed = true;
     this.peer?.close();
     this.transcript?.close();

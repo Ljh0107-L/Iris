@@ -57,6 +57,19 @@ function handle(m) {
       send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
       const text = m.params.input.find(i => i.type === 'text').text;
       slowStop = text.includes('slow stop');
+      // A command left running in the background (a background terminal, as the real CLI reports one): it starts,
+      // the turn ends, and the command ends a while later, with its output.
+      if (text.includes('in the background')) {
+        const t = active, item = { type: 'commandExecution', id: 'bg-cmd', command: "/bin/zsh -lc 'sleep 1; echo ticked'", cwd, processId: '4242', source: 'unifiedExecStartup', commandActions: [{ type: 'unknown', command: 'sleep 1; echo ticked' }] };
+        send({ method: 'item/started', params: { threadId: 'thread-1', turnId: t, item: { ...item, status: 'inProgress', aggregatedOutput: null } } });
+        send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: t, item: { type: 'agentMessage', id: 'bg-msg', text: 'started' } } });
+        finish('completed');
+        setTimeout(() => {
+          send({ method: 'item/commandExecution/outputDelta', params: { threadId: 'thread-1', turnId: t, itemId: 'bg-cmd', delta: 'ticked' + String.fromCharCode(10) } });
+          send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: t, item: { ...item, status: 'completed', exitCode: 0, aggregatedOutput: 'ticked' + String.fromCharCode(10) } } });
+        }, 300);
+        return;
+      }
       // A visual (Iris's MCP tool): the page is the file FAKE_CODEX_VISUAL_FILE (read each time), FAKE_CODEX_VISUAL, or a small one of its own.
       if (text.includes('show a visual')) {
         const item = { type: 'mcpToolCall', id: 'vis-' + turn, server: 'iris', tool: 'show_visual', arguments: { title: 'Polygon and circle', html: (process.env.FAKE_CODEX_VISUAL_FILE ? fs.readFileSync(process.env.FAKE_CODEX_VISUAL_FILE, 'utf8') : process.env.FAKE_CODEX_VISUAL) || '<div style="padding:24px;font:16px sans-serif;color:#ddd">A small page<div style="height:180px;background:#2a5"></div></div>' } };

@@ -193,9 +193,27 @@ const sanitizeMarkdown = html => DOMPurify.sanitize(html, { USE_PROFILES: { html
 
 // A reply that is still being written: render the blocks that changed and leave the rest of it alone
 // (markdown-blocks.js).
+// The words a reply has just written fade in, as they come: the text a redrawn block adds to what it said
+// before (a block whose earlier text changed is redrawn as it is, with nothing fading).
+function fadeInTail(nodes, count) {
+  const texts = [];
+  for (const node of nodes) {
+    if (node.nodeType === 1) { const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT); while (walker.nextNode()) texts.push(walker.currentNode); }
+  }
+  for (let i = texts.length - 1; i >= 0 && count > 0; i--) {
+    const node = texts[i], length = node.data.length;
+    if (!node.data.trim() || node.parentElement?.closest('.katex, svg')) continue;
+    const take = Math.min(length, count), span = document.createElement('span');
+    span.className = 'md-fresh'; span.textContent = node.data.slice(length - take);
+    node.data = node.data.slice(0, length - take); node.after(span);
+    count -= take;
+  }
+}
 function updateMarkdownBlocks(root, shown, text, { documentPath, readFile }) {
   const next = markdownBlocks(marked, text, shown.parsed), kept = unchangedBlocks(shown.parsed, next);
   shown.parsed = next;
+  const said = shown.drawn.slice(kept).flatMap(block => block.nodes).map(node => node.textContent).join('');
+  const added = [];
   for (const block of shown.drawn.splice(kept)) { block.dispose?.(); for (const node of block.nodes) node.remove(); }
   const ids = new Set(shown.drawn.flatMap(block => block.ids));
   for (const { tokens } of next.blocks.slice(kept)) {
@@ -205,11 +223,14 @@ function updateMarkdownBlocks(root, shown, text, { documentPath, readFile }) {
     if (documentPath !== undefined) fragment = prepareFileFragment(clean, documentPath, ids);
     else { const template = document.createElement('template'); template.innerHTML = clean; fragment = template.content; }
     const nodes = [...fragment.childNodes];
+    added.push(...nodes);
     root.append(fragment);
     // Images load once they are on the page; only this block's are looked at.
     const within = { querySelectorAll: selector => nodes.flatMap(node => node.nodeType === 1 ? [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)] : []) };
     shown.drawn.push({ nodes, ids: [...ids].filter(id => !before.has(id)), dispose: readFile ? loadMarkdownImages(within, readFile) : null });
   }
+  const now = added.map(node => node.textContent).join('');
+  if (now.length > said.length && now.startsWith(said)) fadeInTail(added, now.length - said.length);
 }
 
 export function Markdown({ text, streaming, sessionId, documentPath, refreshKey }) {

@@ -7,7 +7,8 @@ import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { visualServer } from './iris-visual.mjs';
-import { agentsStoppedAt, antigravityData, findAgentConversation, readAgent } from './iris-antigravity-agents.mjs';
+import { agentsStoppedAt, antigravityData, backgroundTaskOf, findAgentConversation, readAgent, readTaskLog, taskEnded } from './iris-antigravity-agents.mjs';
+import { BackgroundCommands } from './iris-jobs.mjs';
 
 // The agents this adapter runs: each is its vendor's official CLI, spoken to over ACP and signed in with the
 // person's own account there. What differs between them is here.
@@ -502,7 +503,13 @@ function requestsOf(requests, usage) {
 const waitOf = r => Number.isFinite(r.wait) ? { wait: r.wait, lead: r.text + r.thinking + r.tools > 0 ? Math.min(1, r.firstSize / (r.text + r.thinking + r.tools)) : 0 } : {};
 // The requests that have ended in a turn still under way, before the CLI has counted the turn's tokens: their
 // output is what was written, measured (an estimate).
-const openRequests = requests => requests.flatMap(r => r.text + r.thinking + r.tools >= 1 ? [{ ms: r.ms, ...waitOf(r), output: Math.round(r.text + r.thinking + r.tools), estimated: true }] : []);
+// scale: how many tokens the CLI has counted for each one seen written, in this conversation's earlier turns.
+// What is seen is less than what is counted (Antigravity shows a summary of the model's thinking, not all of
+// it): without it, a turn's speed would jump when its tokens are counted at its end.
+const openRequests = (requests, scale = 1) => requests.flatMap(r => r.text + r.thinking + r.tools >= 1 ? [{ ms: r.ms, ...waitOf(r), output: Math.round((r.text + r.thinking + r.tools) * scale), estimated: true }] : []);
+// The scale from turns the CLI counted: counted output over what was seen written (kept as a running mean).
+const SCALE_MIN = 1, SCALE_MAX = 20;
+const scaleOf = (counted, seen) => counted > 0 && seen >= 20 ? Math.min(SCALE_MAX, Math.max(SCALE_MIN, counted / seen)) : null;
 const estimateOutput = blocks => Math.max(0, Math.round(blocks.reduce((n, block) => {
   const printed = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking : '';
   const cjk = (printed.match(/[\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g) ?? []).length;
@@ -527,6 +534,8 @@ export class AntigravityAdapter {
     this.authRequired = false;
     this.watched = new Map(); // Antigravity's agents, followed in its files (#watchAgent)
     this.watchTimer = null;
+    this.tasks = new Map(); // Antigravity's background commands (task id -> { log }), followed in its files too
+    this.jobs = new BackgroundCommands(event => this.write(event));
     this.canSignIn = false;
     this.options = [];
     this.commands = [];
@@ -611,7 +620,7 @@ export class AntigravityAdapter {
     return { authRequired: this.authRequired, canSignIn: this.canSignIn, options: this.options,
       image: this.capabilities?.promptCapabilities?.image === true,
       permissionMode: this.config.bypassPermissions ? 'bypassPermissions' : 'confirm', commands: this.commands, contextUsage: this.contextUsage,
-      ...(this.turn?.requests.length ? { turnRequests: openRequests(this.turn.requests) } : {}),
+      ...(this.turn?.requests.length ? { turnRequests: openRequests(this.turn.requests, this.outputScale ?? 1) } : {}),
       ...(this.standby ? { standby: true } : {}) };
   }
   #model() {
@@ -781,6 +790,11 @@ export class AntigravityAdapter {
       else this.#updateState();
       void this.#loadModelSettings(peer);
       this.#watchSavedAgents();
+      // The output scale of the turns already counted (see openRequests).
+      if (this.outputScale == null) for (const m of this.transcript.messages().filter(m => m?.role === 'assistant' && m.usage && m.__agyTurn?.seen).slice(-8)) {
+        const scale = scaleOf(m.usage.output, m.__agyTurn.seen);
+        if (scale) this.outputScale = this.outputScale ? this.outputScale * 0.6 + scale * 0.4 : scale;
+      }
     } catch (error) {
       // The CLI answered that it created nothing (an ACP error, sign-in needed): the next attempt starts clean.
       // A timeout or a closed pipe stays recorded as an unconfirmed attempt (see #ensureReady).
@@ -915,6 +929,10 @@ export class AntigravityAdapter {
     if (Array.isArray(update.locations)) tool.paths = shownPaths(update.locations);
     if (Array.isArray(update.content)) { tool.result = shownContent(update.content); tool.diff = shownDiff(update.content) ?? tool.diff; }
     if (object(update.rawOutput) && !tool.result.length) tool.result = outputOf(update.rawOutput);
+    if (this.p.engine === 'antigravity' && !tool.task) {
+      const task = backgroundTaskOf(tool.result.map(part => part?.text ?? '').join('\n'));
+      if (task) { tool.task = task.id; this.#watchTask(task, { command: tool.raw?.CommandLine ?? task.description ?? tool.title ?? '', description: text(tool.raw?.toolSummary) ? tool.raw.toolSummary : null, startedAt: tool.start }); }
+    }
     // Its task list and the agents it starts are shown as Claude Code's are: a Tasks card, and a task with its brief.
     const asks = asksOf(tool);
     if (asks) tool.asks = asks;
@@ -1006,6 +1024,10 @@ export class AntigravityAdapter {
     let message = { ...this.#assistant(turn, turn.content), __agyTurn, ...(turn.usage ? { usage: turn.usage, durationMs: __agyTurn.durationMs, modelMs, ...(requestsOf(turn.requests, turn.usage) ? { requests: requestsOf(turn.requests, turn.usage) } : {}) }
         // A CLI that counts no tokens at all (Cursor): each request's speed, from what it wrote (an estimate).
         : this.p.requestsByTools && openRequests(turn.requests).length ? { durationMs: __agyTurn.durationMs, modelMs, requests: openRequests(turn.requests) } : {}), stopReason, ...(errorMessage ? { errorMessage } : {}) };
+    const seenOutput = turn.requests.reduce((n, r) => n + r.text + r.thinking + r.tools, 0) + turn.open.text + turn.open.thinking + turn.open.tools;
+    const turnScale = turn.usage ? scaleOf(turn.usage.output, seenOutput) : null;
+    if (turnScale) this.outputScale = this.outputScale ? this.outputScale * 0.6 + turnScale * 0.4 : turnScale;
+    message.__agyTurn = { ...message.__agyTurn, seen: Math.round(seenOutput) }; // (for the scale, after a restart)
     const results = [...turn.tools.values()].map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
     catch { message = { ...message, stopReason: 'error', errorMessage: `Could not save this turn to the ${this.p.label} transcript.` }; }
@@ -1213,9 +1235,26 @@ export class AntigravityAdapter {
     if (!this.watchTimer) { this.watchTimer = setInterval(() => this.#pollAgents(), AGENT_POLL_MS); this.watchTimer.unref?.(); }
     setTimeout(() => this.#pollAgents(), 500).unref?.();
   }
+  #watchTask(task, { command, description = null, startedAt = Date.now() }) {
+    if (this.closed || this.tasks.has(task.id)) return;
+    this.tasks.set(task.id, { log: task.log, done: false });
+    this.jobs.start(task.id, { command, description, cwd: this.config.cwd ?? '', startedAt });
+    if (!this.watchTimer) { this.watchTimer = setInterval(() => this.#pollAgents(), AGENT_POLL_MS); this.watchTimer.unref?.(); }
+  }
   #watchSavedAgents() {
     if (this.p.engine !== 'antigravity' || !this.transcript) return;
     const messages = this.transcript.messages(), results = new Map();
+    // Background commands of earlier turns still running (no message yet that they ended).
+    const calls = new Map();
+    for (const message of messages) if (message?.role === 'assistant' && Array.isArray(message.content)) for (const block of message.content) if (block?.type === 'toolCall') calls.set(block.id, { block, at: message.timestamp ?? 0 });
+    const parent = this.sessionId ?? this.transcript.binding?.sessionId, data = antigravityData(this.config.appDataDir);
+    for (const message of messages) {
+      if (message?.role !== 'toolResult') continue;
+      const task = backgroundTaskOf((Array.isArray(message.content) ? message.content : []).map(part => part?.text ?? '').join('\n'));
+      const call = calls.get(message.toolCallId);
+      if (!task || !parent || Date.now() - (call?.at ?? 0) > AGENT_WATCH_MS || taskEnded(data, parent, task.id)) continue;
+      this.#watchTask(task, { command: call?.block.arguments?.command ?? task.description ?? '', description: call?.block.arguments?.description ?? null, startedAt: call?.at ?? Date.now() });
+    }
     for (const message of messages) if (message?.role === 'toolResult') results.set(message.toolCallId, message);
     for (const message of messages) {
       if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
@@ -1244,8 +1283,15 @@ export class AntigravityAdapter {
         agent.sig = sig;
         this.#agentChanged(agent, info);
       }
+      for (const [id, task] of this.tasks) {
+        if (task.done) continue;
+        const ended = taskEnded(data, parent, id);
+        if (ended) { task.done = true; this.jobs.end(id, { exitCode: ended.exitCode, failed: ended.failed, output: ended.output ?? (task.log ? readTaskLog(task.log) : null) }); continue; }
+        const tail = task.log ? readTaskLog(task.log) : null;
+        if (tail != null) this.jobs.setTail(id, tail);
+      }
     } catch { /* the files are read again next time */ }
-    if (this.watchTimer && ![...this.watched.values()].some(agent => !agent.final)) { clearInterval(this.watchTimer); this.watchTimer = null; }
+    if (this.watchTimer && ![...this.watched.values()].some(agent => !agent.final) && ![...this.tasks.values()].some(task => !task.done)) { clearInterval(this.watchTimer); this.watchTimer = null; }
   }
   #agentChanged(agent, info) {
     const final = info.status !== 'running', isError = info.status === 'failed';
@@ -1279,6 +1325,7 @@ export class AntigravityAdapter {
     if (this.closed) return;
     this.closed = true;
     if (this.watchTimer) { clearInterval(this.watchTimer); this.watchTimer = null; }
+    this.jobs.close();
     const turn = this.turn;
     if (turn) this.#cancelTurn(turn);
     this.#cancelPermissions();

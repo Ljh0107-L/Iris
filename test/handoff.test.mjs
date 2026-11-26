@@ -39,3 +39,9 @@ test('with the earlier conversation saved, the other agent is told where to read
   assert.match(text, /Pick it up where it stopped in \/home\/me\/app/);
   assert.doesNotMatch(text, /Added an LRU cache|What was asked/);
 });
+
+test('handing to the same agent (another account, say) continues an earlier conversation of its own', () => {
+  const text = handoffText({ engine: 'codex', to: 'codex', cwd: '/w', file: '/w/s.jsonl' });
+  assert.match(text, /^This continues an earlier Codex conversation\. Pick the work up where it stopped in \/w\./);
+  assert.match(handoffText({ engine: 'codex', to: 'codex', mode: 'review' }), /^Please review the work done in an earlier Codex conversation\./);
+});

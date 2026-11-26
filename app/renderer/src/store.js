@@ -741,7 +741,7 @@ export async function openSession(id, { record = true } = {}) {
   const isCliSession = isCliEngine(engine);
   // Fork only needs a spare for Pi; AGY warms its own CLI on the new conversation screen.
   if (!isCliSession) setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
-  if (!isCliSession) refreshJobs(id);
+  refreshJobs(id); // (Codex and Antigravity have background commands too)
   if (t.loaded) {
     api('focusSession', id).catch(() => {}); // the sweep never stops the open conversation
     if (isCliSession) api('openSession', id).catch(() => {}); // historyPage normally starts it
@@ -1009,7 +1009,7 @@ export async function handOff(sessionId, engine, mode) {
   const session = state.sessions.find(s => s.id === sessionId);
   if (!session) return;
   const t = transcriptOf(sessionId);
-  const text = handoffText({ engine: session.engine ?? 'iris', messages: t.messages ?? [], tools: t.tools ?? {}, cwd: session.cwd, file: session.piSessionFile ?? '', mode });
+  const text = handoffText({ engine: session.engine ?? 'iris', to: engine, messages: t.messages ?? [], tools: t.tools ?? {}, cwd: session.cwd, file: session.piSessionFile ?? '', mode });
   set({ handoff: null });
   newSession();
   // The same folder; a conversation under No folder hands off to one under No folder, in the same folder.
