@@ -8,7 +8,9 @@ const instructions = language => `Translate the user's text into ${language}. It
 
 // What to send, and where in the reply the text is, for each kind of API a provider can speak.
 function request(api, base, model, system, text) {
-  if (api === ANTHROPIC) return { url: `${base}/v1/messages`, body: { model, max_tokens: 4096, system, messages: [{ role: 'user', content: text }] },
+  // No thinking: translating needs none, and a reasoning model behind an Anthropic-style endpoint (a relay to
+  // Qwen, say) otherwise thinks for seconds before each paragraph.
+  if (api === ANTHROPIC) return { url: `${base}/v1/messages`, body: { model, max_tokens: 4096, system, messages: [{ role: 'user', content: text }], thinking: { type: 'disabled' } },
     read: reply => (reply?.content ?? []).filter(part => part?.type === 'text').map(part => part.text).join('') };
   if (api === GOOGLE) return { url: `${base}/models/${encodeURIComponent(model)}:generateContent`, body: { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: [{ text }] }] },
     read: reply => (reply?.candidates?.[0]?.content?.parts ?? []).filter(part => !part?.thought).map(part => part?.text ?? '').join('') };
@@ -29,12 +31,22 @@ export async function translateText({ api, baseUrl, headers, apiKey, model, text
   const base = providerBaseUrl(api, baseUrl);
   if (!/^https?:\/\//i.test(base)) throw new Error('The translation model’s provider has no address.');
   const { url, body, read } = request(api, base, model, instructions(language), source);
-  let response;
-  try { response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...requestHeaders(api, apiKey, headers) }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) }); }
-  catch (error) { throw new Error(error?.name === 'TimeoutError' ? 'The translation model did not answer in time.' : `The translation model could not be reached: ${error?.message ?? error}`); }
-  const raw = await response.text();
-  let reply = null;
-  try { reply = JSON.parse(raw); } catch { /* not JSON: an error page */ }
+  const ask = async payload => {
+    let response;
+    try { response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...requestHeaders(api, apiKey, headers) }, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) }); }
+    catch (error) { throw new Error(error?.name === 'TimeoutError' ? 'The translation model did not answer in time.' : `The translation model could not be reached: ${error?.message ?? error}`); }
+    const raw = await response.text();
+    let reply = null;
+    try { reply = JSON.parse(raw); } catch { /* not JSON: an error page */ }
+    return { response, reply, raw };
+  };
+  let { response, reply, raw } = await ask(body);
+  // An endpoint that does not take the switch that turns thinking off is asked again without it.
+  if (response.status === 400 && body.thinking && /thinking/i.test(raw)) {
+    const { thinking, ...plain } = body;
+    void thinking;
+    ({ response, reply } = await ask(plain));
+  }
   if (!response.ok) throw new Error(`The translation model refused the request (${response.status})${reply?.error?.message ? `: ${String(reply.error.message).slice(0, 200)}` : ''}`);
   const translated = String(read(reply) ?? '').trim();
   if (!translated) throw new Error('The translation model returned nothing.');

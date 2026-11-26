@@ -97,18 +97,24 @@ export function menusOf(models, selected = null) {
   return [model, ...settings];
 }
 
-// Whether the CLI is signed in, as whom and on which plan, and (once it is) the menus it offers.
+// Whether the CLI is signed in, as whom and on which plan, and (when asked) the menus it offers.
 export async function check(bin) {
   if (!isAbsolute(bin ?? '')) throw new Error('Missing Cursor CLI.');
-  const status = json((await run(bin, ['status', '--format', 'json'])).out);
+  // Each of these starts the CLI (two to three seconds): they run side by side. The models are asked for only
+  // when Iris has none for this machine or is told to read them again (IRIS_CLI_MENUS_DIR).
+  const menus = !!process.env.IRIS_CLI_MENUS_DIR;
+  const [statusRun, aboutRun, options] = await Promise.all([
+    run(bin, ['status', '--format', 'json']),
+    run(bin, ['about', '--format', 'json']).catch(() => ({ out: '' })),
+    menus ? modelMenus(bin).catch(() => []) : [],
+  ]);
+  const status = json(statusRun.out);
   if (!status) throw new Error('Cursor did not say whether it is signed in.');
   const signedIn = status.isAuthenticated === true;
   if (!signedIn) return { signedIn: false, canSignIn: true };
-  const about = json((await run(bin, ['about', '--format', 'json']).catch(() => ({ out: '' }))).out) ?? {};
+  const about = json(aboutRun.out) ?? {};
   const identity = [status.userInfo?.email, about.userEmail].find(text) ?? null;
   const plan = text(about.subscriptionTier) ? about.subscriptionTier.trim() : null;
-  let options = [];
-  try { options = await modelMenus(bin); } catch { /* the menus appear with the first conversation */ }
   return { signedIn, canSignIn: true, ...(identity ? { identity: identity.slice(0, 200) } : {}), ...(plan ? { plan: plan.slice(0, 60) } : {}),
     ...(options.length ? { options } : {}) };
 }

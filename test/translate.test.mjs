@@ -51,3 +51,15 @@ test('a model whose API translation cannot speak is refused by name, before anyt
   // Mistral's own API takes chat completions under /v1.
   assert.equal((await ask('mistral-conversations', 'https://api.mistral.example.test', { choices: [{ message: { content: 'ok' } }] })).call.url, 'https://api.mistral.example.test/v1/chat/completions');
 });
+
+test('thinking is turned off for a translation, and asked again without the switch where an endpoint refuses it', async () => {
+  const bodies = [];
+  const fetch = async (url, init) => {
+    const body = JSON.parse(init.body); bodies.push(body);
+    if (body.thinking) return new Response(JSON.stringify({ error: { message: 'thinking: unknown field' } }), { status: 400 });
+    return new Response(JSON.stringify({ content: [{ type: 'text', text: '译文' }] }), { status: 200 });
+  };
+  const text = await translateText({ api: 'anthropic-messages', baseUrl: 'https://relay.example.test', apiKey: 'k', model: 'm', text: 'Hello', language: 'Simplified Chinese', fetch });
+  assert.equal(text, '译文');
+  assert.deepEqual(bodies.map(b => b.thinking ?? null), [{ type: 'disabled' }, null]);
+});

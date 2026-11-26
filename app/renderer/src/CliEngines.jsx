@@ -170,8 +170,8 @@ const planName = plan => plan ? `${String(plan).replace(/^(pro|plus|team|free|bu
 const SUBSCRIPTION = { codex: 'ChatGPT plan', antigravity: 'Google account', cursor: 'Cursor plan' };
 const BRAND = { codex: 'ChatGPT', antigravity: 'Google', cursor: 'Cursor' };
 // How each CLI is installed when Iris does not do it itself: in a terminal here, where it can be watched.
-const TERMINAL_INSTALL = { codex: <>Installing with <code>npm install -g @openai/codex</code></>, cursor: <>Installing Cursor’s CLI from <code>cursor.com</code></> };
-const TERMINAL_INSTALL_TITLE = { codex: 'Runs npm install -g @openai/codex in a terminal here', cursor: 'Downloads Cursor’s own CLI into ~/.local/share/cursor-agent and links it as cursor-agent (an existing agent command is left alone)' };
+const TERMINAL_INSTALL = { codex: <>Installing with <code>npm install -g @openai/codex</code></> };
+const TERMINAL_INSTALL_TITLE = { codex: 'Runs npm install -g @openai/codex in a terminal here' };
 // How much of one limit is used, as a bar: "5-hour limit · 42% used · resets 3:00 PM".
 function LimitBar({ limit }) {
   const span = limit.label ?? `${limit.windowMinutes >= 10080 ? 'Weekly' : limit.windowMinutes >= 1440 ? 'Daily' : limit.windowMinutes ? `${Math.round(limit.windowMinutes / 60)}-hour` : 'Usage'} limit`;
@@ -305,6 +305,13 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
     finally { setChecking(false); }
   };
   const terminalExited = useCallback(code => { setTerminalLink(null); if (!code) void check(); }, [check]);
+  // Cursor signing in on a host prints the page to open and waits until it is done there: no code to paste. The
+  // page opens here by itself, once; the terminal stays for what the CLI says.
+  const opened = useRef(null);
+  const onTerminalLink = useCallback(link => {
+    setTerminalLink(link);
+    if (engine === 'cursor' && link && opened.current !== link) { opened.current = link; api('openExternal', link).catch(() => {}); }
+  }, [engine]);
   const signedIn = account?.signedIn === true;
   // Read beside the account check, not after it; and until either answers, what the last run of the app found.
   useEffect(() => { void readUsage(false); }, [readUsage]);
@@ -318,8 +325,8 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
   // What is true on that machine right now, in two or three words.
   const state = installing ? 'Installing' : signingIn ? 'Signing in' : !account ? (!asked && !fresh ? '' : checking ? 'Checking' : 'Could not check')
     : account.installed === false ? 'Not installed'
-    : signedIn ? null : account.signedIn === false ? 'Not signed in'
-    : checking ? 'Checking' : 'Could not check';
+    : signedIn ? null : checking && asked ? 'Checking' : account.signedIn === false ? 'Not signed in'
+    : 'Could not check';
   const busy = state === 'Checking' || state === 'Installing' || state === 'Signing in';
   // Signed in, the row is the account: who, and on which plan.
   const who = signedIn ? (account.identity || usage?.identity || hostIdentity || profile?.name || 'Signed in') : profile?.name;
@@ -341,7 +348,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
               <button type="button" className={`button small ${!local && engine === 'codex' ? '' : 'primary'}`} disabled={terminal === 'login' || hostSignIn || checking || copying} onClick={signIn}>{!local && !antigravity ? 'Sign in on the host' : `Sign in with ${brand}`}</button>
               {profile && <button type="button" className="button small ghost" onClick={onRemove}>Remove</button>}
             </>}
-        </> : account?.installed === false ? (antigravity ? <button type="button" className="button small primary" onClick={install}>Install</button>
+        </> : account?.installed === false ? (antigravity || engine === 'cursor' ? <button type="button" className="button small primary" title={engine === 'cursor' ? 'Downloads Cursor’s own CLI into ~/.local/share/cursor-agent and links it as cursor-agent (an existing agent command is left alone). It goes on in the background.' : undefined} onClick={install}>Install</button>
           : <button type="button" className="button small primary" disabled={terminal === 'install'} title={TERMINAL_INSTALL_TITLE[engine]} onClick={() => setTerminal('install')}>Install</button>)
           : !checking && <button type="button" className="button small" onClick={check}>Retry</button>}
       </div>}
@@ -379,7 +386,7 @@ function AccountRow({ environmentId, engine, profile = null, fresh = false, onRe
           <button type="button" className="button small ghost" aria-label="Close terminal" title="Close terminal" onClick={() => setTerminal(null)}><Icon name="x" size={14} /></button>
         </div>
       </div>
-      <CliTerminal key={terminal} environmentId={environmentId} action={terminal} engine={engine} account={accountId} onExit={terminalExited} onLink={setTerminalLink} />
+      <CliTerminal key={terminal} environmentId={environmentId} action={terminal} engine={engine} account={accountId} onExit={terminalExited} onLink={onTerminalLink} />
     </div>}
   </div>;
 }
@@ -523,15 +530,24 @@ export function SubscriptionSettings() {
 
 // Settings → Cursor: which of Cursor's models its model menu lists. Cursor offers dozens, each with settings of
 // its own (effort, context, speed); the ones switched off here stay out of the menu of every Cursor
-// conversation (a conversation's own model is listed all the same). Until a choice is made, all of them are.
+// conversation, on every machine (a conversation's own model is listed all the same). Until a choice is made,
+// all of them are. The list is the one Cursor gives on the chosen machine (each machine's CLI says its own).
 export function CursorSettings() {
   const shown = useStore(s => s.settings?.defaults?.cursorModels);
-  const readiness = useStore(s => s.cliReadiness[readinessKey('cursor', 'local')]);
-  const remembered = useStore(s => s.cliDraftOptions[cliOptionsKey('cursor', 'local')]);
+  const environments = useStore(s => s.environments.filter(e => e.kind === 'local' || (e.added && e.enabled)));
+  const known = useStore(s => s.cliDraftOptions);
+  const initial = useStore(s => s.settingsEnvironmentId ?? s.draft.environmentId);
+  // The machine to start on: the one the new conversation is on, else one Cursor has listed its models on.
+  const [selected, select] = useState(() => initial);
+  const machine = environments.some(e => e.id === selected) ? selected
+    : environments.find(e => known[cliOptionsKey('cursor', e.id)]?.length)?.id ?? 'local';
+  const current = environments.find(e => e.id === machine);
+  const readiness = useStore(s => s.cliReadiness[readinessKey('cursor', machine)]);
+  const remembered = known[cliOptionsKey('cursor', machine)];
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  useEffect(() => { void refreshCliReadiness('local', 'cursor'); void loadCliOptions('local', 'cursor'); }, []);
+  useEffect(() => { setError(null); void refreshCliReadiness(machine, 'cursor'); void loadCliOptions(machine, 'cursor'); }, [machine]);
   const models = (remembered ?? []).find(o => o.category === 'model')?.options ?? [];
   const on = value => !Array.isArray(shown) || shown.includes(value);
   const count = models.filter(choice => on(choice.value)).length;
@@ -547,31 +563,41 @@ export function CursorSettings() {
   };
   const refresh = async () => {
     setRefreshing(true); setError(null);
-    try { await api('cliAccountStatus', 'local', false, 'cursor', null); await loadCliOptions('local', 'cursor'); }
+    try { await api('refreshCliMenus', machine, 'cursor', null); await loadCliOptions(machine, 'cursor'); }
     catch (err) { setError(cleanError(err)); }
     finally { setRefreshing(false); }
   };
+  const picker = environments.length > 1 && <div className="sub-machine">
+    <span>Machine</span>
+    <Trigger className="cli-machine" label="Machine" width={240} placement="bottom-end"
+      menu={close => <MenuSection>{environments.map(env => <MenuItem key={env.id} icon={envIcon(env)} label={env.label} checked={env.id === machine} onClick={() => { select(env.id); close(); }} />)}</MenuSection>}>
+      <Icon name={envIcon(current)} size={14} /><span>{current?.label ?? 'This computer'}</span><Icon name="chevronDown" size={12} />
+    </Trigger>
+  </div>;
+  const where = current?.kind === 'ssh' ? ` on ${current.label}` : ' on this Mac';
   const q = query.trim().toLowerCase();
   const listed = models.filter(choice => !q || `${choice.name} ${choice.value}`.toLowerCase().includes(q));
-  if (!models.length) return <section className="section" aria-label="Cursor models">
+  if (!models.length) return <section className="section cli-settings" aria-label="Cursor models">
+    {picker}
     <ul className="rows"><li className="row-card setting-rows"><div className="row-head">
       <div className="setting-text">
-        <span className="row-name">{readiness === 'missing' ? 'Cursor CLI is not installed on this Mac' : readiness === 'signedOut' ? 'Not signed in to Cursor' : 'Reading Cursor’s models…'}</span>
+        <span className="row-name">{readiness === 'missing' ? `Cursor CLI is not installed${where}` : readiness === 'signedOut' ? `Not signed in to Cursor${where}` : readiness === 'unreachable' ? `${current?.label ?? 'The machine'} cannot be reached` : `Reading Cursor’s models${where}…`}</span>
         <span className="row-meta">{readiness === 'missing' || readiness === 'signedOut' ? 'Install it and sign in in Settings → Subscriptions; its models are listed here then.' : 'Cursor lists the models of your plan once it is signed in.'}</span>
       </div>
       <div className="row-actions">
         {readiness === 'missing' || readiness === 'signedOut'
-          ? <button type="button" className="button small primary" onClick={() => openSettings(true, 'subscriptions', { environmentId: 'local' })}>Open Subscriptions</button>
+          ? <button type="button" className="button small primary" onClick={() => openSettings(true, 'subscriptions', { environmentId: machine })}>Open Subscriptions</button>
           : <button type="button" className="button small" disabled={refreshing} onClick={refresh}>{refreshing ? <Spinner size={12} /> : 'Refresh'}</button>}
       </div>
     </div></li></ul>
     {error && <p className="cli-settings-error" role="alert">{error}</p>}
   </section>;
-  return <section className="section" aria-label="Cursor models">
+  return <section className="section cli-settings" aria-label="Cursor models">
+    {picker}
     <div className="section-head">
       <div>
         <h2 className="section-title">Models in the menu</h2>
-        <p className="section-intro">{count === models.length ? `All ${models.length} models of your plan are listed.` : `${count} of ${models.length} models are listed.`} Switch off the ones you don’t use.</p>
+        <p className="section-intro">{count === models.length ? `All ${models.length} models of your plan are listed.` : `${count} of ${models.length} models are listed.`} Switch off the ones you don’t use; this holds on every machine.</p>
       </div>
       <div className="row-actions">
         <button type="button" className="tool-button" aria-label="Refresh the list" title="Read the list again from Cursor" disabled={refreshing} onClick={refresh}>{refreshing ? <Spinner size={13} /> : <Icon name="refresh" size={14} />}</button>

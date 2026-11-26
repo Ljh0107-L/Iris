@@ -339,6 +339,7 @@ const api = {
   antigravityInstall: (environmentId, engine) => manager.antigravityInstall(environmentId, cliEngineOf(engine)),
   cliSetConfig: (id, configId, value) => manager.cliSetConfig(id, configId, value),
   cliOptions: (environmentId, engine, account) => manager.askCliOptions(environmentId, cliEngineOf(engine), account),
+  refreshCliMenus: (environmentId, engine, account) => manager.refreshCliMenus(environmentId, cliEngineOf(engine), account),
   cliSignIn: (environmentId, engine, account) => manager.cliSignIn(environmentId, { engine: cliEngineOf(engine), account }),
   cliSignInCancel: (environmentId, engine, account) => manager.cliSignInCancel(environmentId, { engine: cliEngineOf(engine), account }),
   cliCopySignIn: (environmentId, engine, account) => manager.cliCopySignIn(environmentId, { engine: cliEngineOf(engine), account }),

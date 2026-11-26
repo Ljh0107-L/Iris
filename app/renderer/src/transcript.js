@@ -155,7 +155,10 @@ function decodeWindow(m, out) {
 // One model request of a Codex or Antigravity turn: how long it took, how much of that was the wait for its
 // first output (wait), and the share of its output that was already there by then (lead).
 function requestWindow(r) {
-  const lead = Number.isFinite(r.lead) ? Math.min(1, Math.max(0, r.lead)) : 0;
+  // A stream so coarse that most of it came in its first piece (Cursor sends some models' output in a few large
+  // pieces) says nothing about how fast that piece was written: then all of it is counted over the time from
+  // the first output to the end, rather than almost none of it.
+  const lead = Number.isFinite(r.lead) && r.lead <= 0.6 ? Math.max(0, r.lead) : 0;
   const ms = time(r.wait) ? r.ms - r.wait : null, out = r.output * (1 - lead);
   return ms != null && ms >= WINDOW_MS && out >= 1 ? { ms, out, basis: 'decode' } : { ms: r.ms, out: r.output, basis: 'request' };
 }

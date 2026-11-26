@@ -297,7 +297,9 @@ function ThinkingCard({ transcript, working }) {
     <div className="thinking-feed" ref={feed} onScroll={e => { const el = e.currentTarget; following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>
       {paragraphs.map((paragraph, index) => {
         const result = !original && index < finished.length ? translated(paragraph) : null;
-        return <p key={index} className={`${live && index === paragraphs.length - 1 ? 'live' : ''} ${result?.pending ? 'pending' : ''}`}>{result?.text ?? paragraph}</p>;
+        // A thought's heading, as Cursor's and Codex's summaries open theirs ("**Considering the tests**"): bold, not asterisks.
+        const shown = result?.text ?? paragraph, heading = /^\*\*([^*\n]+)\*\*$/.exec(shown.trim());
+        return <p key={index} className={`${live && index === paragraphs.length - 1 ? 'live' : ''} ${result?.pending ? 'pending' : ''} ${heading ? 'heading' : ''}`}>{heading ? heading[1] : shown}</p>;
       })}
     </div>
     {on && <div className={`thinking-foot ${failed ? 'failed' : ''}`} role="status">

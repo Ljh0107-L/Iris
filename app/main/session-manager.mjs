@@ -20,6 +20,7 @@ import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
 import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, CURSOR_ENGINE, CURSOR_INSTALL, newestCursorCli, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
+import { installCursorCli } from './cursor-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 function clampPiThinkingLevel(model, level) {
@@ -551,6 +552,7 @@ export class SessionManager extends EventEmitter {
 
   antigravityInstall(environmentId, engine = ANTIGRAVITY_ENGINE) {
     const env = this.env(environmentId);
+    if (engine === CURSOR_ENGINE) return this.#cursorInstall(env);
     // Codex is installed with the user's own package manager; this app does not download it.
     if (engine !== ANTIGRAVITY_ENGINE) return Promise.reject(new Error(antigravityInstallMessage(env, engine)));
     if (this.antigravityInstalls.has(env.id)) return this.antigravityInstalls.get(env.id);
@@ -571,6 +573,29 @@ export class SessionManager extends EventEmitter {
     return install;
   }
 
+  // Cursor's CLI, installed in the background (see installCursorCli): one install per machine at a time, and its
+  // progress is an event the Subscriptions page follows whenever it is open.
+  #cursorInstall(env) {
+    const key = `${env.id}:${CURSOR_ENGINE}`;
+    if (this.antigravityInstalls.has(key)) return this.antigravityInstalls.get(key);
+    const progress = state => this.emit('antigravity-install', { id: key, ...state });
+    const install = (async () => {
+      progress({ stage: 'preparing' });
+      const found = `${CURSOR_ENGINE}:${env.id}`; // where #findCli keeps what it found on a host
+      this.cliBins.delete(found);
+      if (!await this.#findCli(env, CURSOR_ENGINE)) await installCursorCli(env, { onProgress: progress, run: this.runRemote });
+      this.cliBins.delete(found);
+      if (!await this.#findCli(env, CURSOR_ENGINE)) throw new Error(antigravityInstallMessage(env, CURSOR_ENGINE));
+      progress({ stage: 'done' });
+      return { installed: true };
+    })().catch(error => {
+      progress({ stage: 'error', message: error.message });
+      throw error;
+    }).finally(() => this.antigravityInstalls.delete(key));
+    this.antigravityInstalls.set(key, install);
+    return install;
+  }
+
   async cliReadiness(environmentId, engine = ANTIGRAVITY_ENGINE, account = null) {
     const env = this.env(environmentId);
     try { if (!await this.#findCli(env, engine)) return 'missing'; }
@@ -581,10 +606,17 @@ export class SessionManager extends EventEmitter {
     } catch { return 'unknown'; } // A CLI without account reporting can still start a conversation.
   }
 
+  // What a CLI offers, read again (Settings → Cursor's Refresh): its models change with the plan and new releases.
+  async refreshCliMenus(environmentId, engine = CURSOR_ENGINE, account = null) {
+    const env = this.env(environmentId);
+    await this.#readCliAccount(env, false, engine, false, account, true);
+    return this.cliOptions(environmentId, engine, account);
+  }
   async cliAccountStatus(environmentId, { login = false, logout = false, engine = ANTIGRAVITY_ENGINE, account = null } = {}) {
     const env = this.env(environmentId);
     // The Subscriptions page also wants Antigravity's plan and menus, which it only names when asked (see askCliOptions).
-    const menus = engine === ANTIGRAVITY_ENGINE && !login && !logout && !(this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length && this.store.settings.cliPlans?.[`${engine}:${env.id}`]);
+    const menus = !login && !logout && (engine === ANTIGRAVITY_ENGINE ? !(this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length && this.store.settings.cliPlans?.[`${engine}:${env.id}`])
+      : engine === CURSOR_ENGINE && !this.store.settings.cliOptions?.[`${engine}:${env.id}`]?.length);
     const result = await this.#readCliAccount(env, login, engine, logout, account, menus);
     if (result.signedIn && (login || logout)) {
       // Only an explicit account action should invalidate standby/reconnect an open chat.
@@ -662,7 +694,8 @@ export class SessionManager extends EventEmitter {
       if (!bin) return { installed: false };
       const facts = env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null;
       // Antigravity names its models only in a conversation, so to learn them it opens an empty one in this folder.
-      const menusDir = menus && engine === ANTIGRAVITY_ENGINE ? (env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-menus') : `${facts.root}/cli-menus`) : null;
+      // Cursor lists its models over ACP, which costs seconds: only when asked too (the folder is not used).
+      const menusDir = menus && (engine === ANTIGRAVITY_ENGINE || engine === CURSOR_ENGINE) ? (env.kind === 'local' ? join(dirname(this.local.agentDir), 'cli-menus') : `${facts.root}/cli-menus`) : null;
       const { options, ...result } = await cliAccountStatus(env, { bin, local: this.local, facts, login, logout, engine, home: this.#cliHome(env, facts, engine, account), menusDir, run: this.runRemote });
       // The CLI also said what a new conversation can choose from: its menus exist before the first one opens,
       // and follow the account (a plan change shows at the next check).
@@ -863,7 +896,7 @@ export class SessionManager extends EventEmitter {
       this.cliMenusAsked.set(key, Date.now());
       try {
         const env = this.env(environmentId);
-        if (await this.#findCli(env, engine)) await this.#readCliAccount(env, false, engine, false, account, engine === ANTIGRAVITY_ENGINE);
+        if (await this.#findCli(env, engine)) await this.#readCliAccount(env, false, engine, false, account, engine === ANTIGRAVITY_ENGINE || engine === CURSOR_ENGINE);
       } catch { /* the menus come with the first conversation instead */ }
     }
     return this.cliOptions(environmentId, engine, account);

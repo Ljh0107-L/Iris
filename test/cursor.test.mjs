@@ -26,8 +26,8 @@ function fixture(t, { signedIn = true } = {}) {
   const calls = () => existsSync(join(dir, 'calls.jsonl')) ? readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [];
   const state = () => JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
   const setState = value => writeFileSync(join(dir, 'state.json'), JSON.stringify({ ...state(), ...value }));
-  const account = async (flag = '--account-check') => {
-    const { stdout } = await exec(process.execPath, [entry, flag, bin, '9.9.9', home], { cwd: dir });
+  const account = async (flag = '--account-check', menus = false) => {
+    const { stdout } = await exec(process.execPath, [entry, flag, bin, '9.9.9', home], { cwd: dir, env: { ...process.env, ...(menus ? { IRIS_CLI_MENUS_DIR: dir } : {}) } });
     return stdout.trim().split('\n').map(line => JSON.parse(line));
   };
   function start(overrides = {}) {
@@ -60,8 +60,10 @@ test('Settings asks Cursor itself: who is signed in, on which plan, and every mo
   // Signing in: the page the CLI names is passed on (Iris opens it), and the CLI never opens a browser itself.
   const signIn = await f.account('--account-login');
   assert.equal(signIn[0].cliSignIn.url, 'https://cursor.com/loginDeepControl?challenge=fixture&uuid=fixture&mode=login');
-  const { cliAccountStatus: status } = signIn.at(-1);
-  assert.equal(status.signedIn, true); assert.equal(status.identity, 'person@example.test'); assert.equal(status.plan, 'Pro');
+  const { cliAccountStatus: signedIn } = signIn.at(-1);
+  assert.equal(signedIn.signedIn, true); assert.equal(signedIn.identity, 'person@example.test'); assert.equal(signedIn.plan, 'Pro');
+  assert.equal(signedIn.options, undefined, 'a plain check does not read the models: that takes seconds');
+  const { cliAccountStatus: status } = (await f.account('--account-check', true)).at(-1);
   const [model, ...settings] = status.options;
   assert.deepEqual([model.id, model.category, model.currentValue], ['model', 'model', 'auto-smart']);
   assert.deepEqual(model.options.map(choice => [choice.value, choice.name, choice.sub.map(option => option.id)]),
@@ -116,11 +118,14 @@ test('each Cursor conversation keeps its own model, which the CLI shares between
   await a.rpc('get_state');
   await a.rpc('cli_set_config', { configId: 'model', value: 'grok-4.7' });
   await a.rpc('cli_set_config', { configId: 'reasoning_effort', value: 'low' });
-  // Another conversation picks another model meanwhile: this one sets its own again before it sends.
+  // Another conversation picks another model meanwhile: a running CLI keeps its own, so nothing is set again
+  // (each change costs the CLI a second).
   f.setState({ choice: { model: 'composer-2.5', settings: { fast: 'false' } } });
+  const sets = f.calls().filter(call => call.method === 'session/set_config_option').length;
   await a.rpc('prompt', { message: 'hello' });
   await a.until(e => e.type === 'agent_settled', 'the turn');
   assert.deepEqual(f.state().prompted.at(-1).choice, { model: 'grok-4.7', settings: { reasoning_effort: 'low' } });
+  assert.equal(f.calls().filter(call => call.method === 'session/set_config_option').length, sets, 'nothing set again before sending');
   // A question Cursor's model asks while it works: a card, answered with the option's id.
   const before = a.events.length;
   await a.rpc('prompt', { message: 'ask me' });
@@ -138,4 +143,18 @@ test('each Cursor conversation keeps its own model, which the CLI shares between
   await b.rpc('prompt', { message: 'hello again' });
   await b.until(e => e.type === 'agent_settled', 'the turn');
   assert.equal(f.state().prompted.at(-1).choice.model, 'grok-4.7');
+});
+
+test('an image Cursor’s model makes is the tool’s result and part of the reply', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  const a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'draw a pelican' });
+  await a.until(e => e.type === 'agent_settled', 'the turn');
+  const reply = a.events.findLast(e => e.type === 'message_end' && e.message.role === 'assistant').message;
+  const image = reply.content.find(b => b.type === 'image');
+  assert.equal(image?.mimeType, 'image/png'); assert.ok(image.data.length > 20, 'the image, in the reply');
+  const result = a.events.findLast(e => e.type === 'tool_execution_end' && e.toolCallId === reply.content.find(b => b.type === 'toolCall').id).result;
+  assert.deepEqual(result.content.map(c => c.type), ['text', 'image'], 'and in the step: where it was saved, and the image');
+  assert.match(result.content[0].text, /pelican\.png$/);
 });

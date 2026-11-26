@@ -2475,6 +2475,7 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .thinking-feed p.live { color: var(--text-2); }
 
 .thinking-feed p.pending { opacity: .72; }
+.thinking-feed p.heading { font-weight: 600; color: var(--text-2); margin-bottom: 4px; }
 
 .thinking-foot { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--hairline); font-size: var(--fs-xs); color: var(--faint); }
 .thinking-foot > svg, .thinking-foot > .spinner { flex-shrink: 0; }

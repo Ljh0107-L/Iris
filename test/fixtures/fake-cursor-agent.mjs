@@ -47,8 +47,10 @@ function serve(force) {
   const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
   const SESSION = 'cursor-session-1';
   const update = fields => send({ method: 'session/update', params: { sessionId: SESSION, update: fields } });
-  // The model and its settings are one choice of the CLI's, kept in its config directory (shared by its sessions).
-  const choice = () => state().choice ?? { model: 'auto-smart', settings: {} };
+  // The model and its settings: a process starts with the choice made last in its config directory, then keeps
+  // its own (another process changing the directory's choice does not change it), as the real CLI does.
+  let mine = null;
+  const choice = () => mine ?? state().choice ?? { model: 'auto-smart', settings: {} };
   const configOptions = () => {
     const { model, settings } = choice(), current = MODELS.find(m => m.value === model);
     return [{ id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'agent', options: [{ value: 'agent', name: 'Agent' }, { value: 'plan', name: 'Plan' }] },
@@ -71,8 +73,8 @@ function serve(force) {
         return reply({ ...(m.method === 'session/new' ? { sessionId: SESSION } : {}), configOptions: configOptions() });
       case 'session/set_config_option': {
         const { configId, value } = m.params;
-        if (configId === 'model') save({ choice: { model: value, settings: {} } });
-        else save({ choice: { ...choice(), settings: { ...choice().settings, [configId]: value } } });
+        mine = configId === 'model' ? { model: value, settings: {} } : { ...choice(), settings: { ...choice().settings, [configId]: value } };
+        save({ choice: mine });
         return reply({ configOptions: configOptions() });
       }
       case 'session/prompt': {
@@ -91,6 +93,16 @@ function serve(force) {
           update({ sessionUpdate: 'tool_call', toolCallId: 'call_3', title: 'Update todos', kind: 'other', status: 'pending', rawInput: { _toolName: 'updateTodos', todos: [{ id: '1', content: 'Read the files', status: 'TODO_STATUS_COMPLETED' }, { id: '2', content: 'Answer', status: 'TODO_STATUS_IN_PROGRESS' }] } });
           update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_3', status: 'completed' });
           await sleep(40);
+        }
+        if (/draw/.test(text)) {
+          // Its generateImage tool: the tool, then a notification naming the file it wrote.
+          const file = join(dir, 'pelican.png');
+          writeFileSync(file, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64'));
+          update({ sessionUpdate: 'tool_call', toolCallId: 'call_img', title: 'Generate Image: a pelican on a bicycle...', kind: 'other', status: 'pending', rawInput: { _toolName: 'generateImage', description: 'a pelican on a bicycle', filename: 'pelican.png' } });
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_img', status: 'completed' });
+          // (Cursor's "notifications" are requests it does not wait on.)
+          send({ id: 'img-1', method: 'cursor/generate_image', params: { toolCallId: 'call_img', description: 'a pelican on a bicycle', filePath: file } });
+          await sleep(20);
         }
         if (/ask/.test(text)) {
           const answer = await new Promise(resolve => {

@@ -2,6 +2,27 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.12
+
+**Fixed**
+
+- **Cursor answers sooner.** Each message waited two to four seconds while Iris set the conversation's model again; a Cursor conversation keeps its own model while it runs, so it is set only when it differs (when a conversation opens again, for example). A new conversation signs Cursor in while you type, before the first message.
+- **Images Cursor generates show in its reply**, and in the step when you open it, instead of "Tool completed.". Its task-list and agent updates are answered too.
+- **Checking an account in Settings → Subscriptions is quicker.** Cursor's check took about twelve seconds and now takes about three: it asks for the account and the plan side by side, and reads the model list only when Iris has none for that machine or you refresh it. A check after you sign in shows **Checking** instead of staying on "Not signed in".
+- **Cursor's speed on coarse streams.** A model that sends most of a reply in its first piece read as a few tokens a second; that reply is now timed as a whole.
+- Thought titles written as `**Title**` show as headings, without the asterisks.
+- **Translation is quicker with a reasoning model**: its requests ask the model not to think first (and are sent again without that when the provider does not take it).
+
+**Changed**
+
+- **Installing Cursor's CLI runs in the background.** Close Settings and it goes on; open it again to see how far it is.
+- **Settings → Cursor chooses the machine** whose models it lists and refreshes, an SSH host as well as this Mac. Which models the menu shows applies to every machine.
+- **Signing Cursor in on an SSH host opens its page in your browser** on this Mac by itself; when you confirm there, the host is signed in. Each machine keeps its own sign-in: Cursor's refreshed sign-in replaces the one before it, so a copied one would sign one of them out.
+
+**Known limits:** Cursor on SSH hosts and its background install were tested with a stand-in for Cursor.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.11
 
 **New**

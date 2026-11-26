@@ -646,10 +646,11 @@ export class AntigravityAdapter {
     } catch { /* the model menu works without them */ }
     finally { this.loadingSettings = false; }
   }
-  // Before a message goes: this conversation's own model and settings, where the CLI keeps one choice for all of
-  // its conversations (another may have changed it since, and what this process last heard may be out of date:
-  // so it is set each time). The model first, since it decides which settings exist. A conversation that never
-  // chose keeps the model it started with.
+  // Before a message goes: this conversation's own model and settings. The CLI starts with the choice made last
+  // in its directory (perhaps in another conversation); once running, a process keeps its own (another
+  // process changing the directory's choice does not change it), so only what differs from what this process
+  // says it has is set: each change costs the CLI a second. The model first, since it decides which settings
+  // exist. A conversation that never chose keeps the model it started with.
   async #applyChoices() {
     if (!this.p.globalModel || !this.sessionId) return;
     if (!object(this.transcript.choices)) {
@@ -661,7 +662,7 @@ export class AntigravityAdapter {
     const model = this.options.find(o => o.category === 'model');
     for (const id of Object.keys(want).sort((a, b) => (b === model?.id) - (a === model?.id))) {
       const option = this.options.find(o => o.id === id);
-      if (!option || !option.options.some(choice => choice.value === want[id])) continue;
+      if (!option || option.currentValue === want[id] || !option.options.some(choice => choice.value === want[id])) continue;
       const peer = this.peer;
       const { result, seq } = await peer.request('session/set_config_option', { sessionId: this.sessionId, configId: id, value: want[id] });
       if (peer.closed) throw new Error(`The ${this.p.label} CLI connection closed.`);
@@ -705,7 +706,8 @@ export class AntigravityAdapter {
   // session/list sets it off and changes nothing; what it returns is not used.
   #warm() {
     const peer = this.peer;
-    if (!peer || peer.closed || this.warmed === peer || !object(this.capabilities?.sessionCapabilities?.list)) return;
+    // (Cursor has done what warms it, taking up its sign-in, in #initialize.)
+    if (this.p.authenticate || !peer || peer.closed || this.warmed === peer || !object(this.capabilities?.sessionCapabilities?.list)) return;
     this.warmed = peer;
     peer.request('session/list', {}, MENUS_MS).catch(() => {}); // not signed in, or no answer: the first message finds out
   }
@@ -926,6 +928,22 @@ export class AntigravityAdapter {
       this.#toolEnd(tool, true, 'Interrupted.');
     }
   }
+  // An image Cursor's model made (its generateImage tool): it names the file once it is written. The image is
+  // the tool's result, and part of the reply, where it is seen without opening the step.
+  #generatedImage(turn, params) {
+    const path = text(params?.filePath) && isAbsolute(params.filePath) ? params.filePath : null;
+    const mimeType = path && { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }[path.split('.').pop().toLowerCase()];
+    if (!mimeType) return;
+    let data;
+    try { const file = readFileSync(path); if (file.length > 6 * 1024 * 1024) return; data = file.toString('base64'); } catch { return; }
+    const tool = turn.tools.get(params.toolCallId);
+    if (tool) {
+      tool.result = [{ type: 'text', text: path }, { type: 'image', mimeType, data }];
+      if (tool.message) { tool.message.content = tool.result; this.write({ type: 'tool_execution_end', toolCallId: tool.id, toolName: tool.call.name, result: { content: tool.result, details: tool.message.details }, isError: false, durationMs: tool.end - tool.start }); }
+    }
+    this.#endBlock(turn);
+    turn.content.push({ type: 'image', mimeType, data });
+  }
   #toolEnd(tool, isError, fallback) {
     const content = tool.result.length ? tool.result : [{ type: 'text', text: fallback }];
     // Stopped by the person (Stop, or a message sent while it worked) is not the tool failing.
@@ -1075,7 +1093,15 @@ export class AntigravityAdapter {
       else if (method === 'cursor/ask_question') this.#askRpc(peer, id, params);
       // A plan to approve comes only in Cursor's plan mode, which Iris does not start: carry on.
       else if (method === 'cursor/create_plan') peer.send({ id, result: { outcome: { outcome: 'accepted' } } });
+      // What Cursor calls its notifications come as requests it does not wait on: each is answered at once.
+      else if (method === 'cursor/generate_image') {
+        if (this.turn) this.#generatedImage(this.turn, params);
+        peer.send({ id, result: text(params?.filePath) ? { outcome: { outcome: 'generated', filePath: params.filePath } } : { outcome: { outcome: 'cancelled' } } });
+      } else if (method === 'cursor/update_todos') peer.send({ id, result: { outcome: { outcome: 'accepted', todos: Array.isArray(params?.todos) ? params.todos : [] } } });
+      else if (method === 'cursor/task') peer.send({ id, result: { outcome: { outcome: 'completed', ...(text(params?.agentId) ? { agentId: params.agentId } : {}) } } });
       else peer.send({ id, error: { code: -32601, message: 'Method not supported by Iris' } });
+    } else if (method === 'cursor/generate_image') {
+      if (this.turn) this.#generatedImage(this.turn, params);
     } else if (method === 'session/update') {
       const update = params?.update;
       if (!text(params?.sessionId) || !object(update)) return;

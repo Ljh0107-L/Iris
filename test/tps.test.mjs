@@ -245,6 +245,8 @@ test('Codex and Antigravity turns are counted one model request at a time, as Pi
   const thought = usageOf([requestReplies([{ ...agy, requests: [{ ms: 2000, wait: 500, lead: 0.4, output: 100, estimated: true }] }])[0]]);
   assert.deepEqual([thought.tps, speedDisplay(thought).label], [40, 'Output TPS (estimated)'], 'a thought that came whole is not counted over the time after it');
   assert.equal(usageOf([requestReplies([{ ...agy, requests: [{ ms: 2000, wait: 1995, lead: 0.9, output: 100 }] }])[0]]).speedBasis, 'request', 'no time left to measure over');
+  const coarse = usageOf([requestReplies([{ ...agy, requests: [{ ms: 2000, wait: 1000, lead: 0.87, output: 100, estimated: true }] }])[0]]);
+  assert.equal(coarse.tps, 100, 'most of it in the first piece: all of it over the time from the first output, not 13 tokens of it');
   // A request that wrote nothing countable has no speed; a stopped turn has none either.
   assert.equal(usageOf([requestReplies([{ ...codex, requests: [{ ms: 500, ...tokens(10, 0) }] }])[0]]).tps, null);
   assert.equal(usageOf([{ ...codex, stopReason: 'aborted' }]).tps, null);
