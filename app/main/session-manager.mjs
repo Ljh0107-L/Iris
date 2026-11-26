@@ -1735,9 +1735,10 @@ export class SessionManager extends EventEmitter {
       this.#assertCurrent(record, runtime);
       if (runtime.session !== session || this.stopping.has(id)) throw new Error('The Antigravity connection changed. No message was sent.');
       if (runtime.cli?.authRequired) throw new Error('Sign in with Google before sending a message to Antigravity.');
-      // Codex takes a message while it works (it reads it before its next model call). Antigravity cannot,
-      // so a message sent while it works stops what it is doing and starts on the message, as with Pi.
-      const steers = record.engine === CODEX_ENGINE;
+      // A message sent while the CLI works stops what it is doing and starts a turn on the message, as with Pi.
+      // Codex can also take one into the turn under way (it reads it before its next model call): a message
+      // that asks not to interrupt (Option+Enter) goes there.
+      const steers = record.engine === CODEX_ENGINE && !interrupt;
       if (runtime.streaming && !steers && interrupt && !runtime.cliRequest) {
         await this.abort(id);
         // The turn has ended once the CLI confirms the stop; the note of it arrives on the same connection.

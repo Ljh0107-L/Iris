@@ -1,6 +1,6 @@
 {
   "name": "iris",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "One desktop app for your coding agents: Pi, Claude Code, Codex and Antigravity, on this Mac and over SSH",
   "scripts": {
     "dev": "vite",

@@ -857,9 +857,10 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
     // (A question the agent asked is answered by whatever is sent next: the message goes to it as usual.)
     // The one command the desktop runs for Codex itself; everything else is a message to the CLI.
     if (session.engine === 'codex' && /^\/compact\s*$/.test(text) && !attachments.length) { await api('compact', id); return; }
-    // Antigravity cannot take a message while it works, so sending one stops the turn and starts on the
-    // message, as with Pi: it shows at once, and is replaced by the CLI's own copy when the turn begins.
-    const interrupts = session.engine !== 'codex' && !!session.streaming;
+    // A message sent while the CLI works stops the turn and starts one on the message, as with Pi: it shows
+    // at once, as a message of its own after the turn, and is replaced by the CLI's own copy when the turn
+    // begins. With Codex, Option+Enter instead hands it to the turn under way (read before its next model call).
+    const interrupts = !!session.streaming && !(session.engine === 'codex' && queue);
     // What was sent is on the page the moment it is sent, whatever the agent and wherever it runs: the agent's
     // own copy of it replaces this one when it arrives (over SSH that is a round trip or two later).
     // (Codex's /goal is a command, not a message: what shows for it is the goal above the message box.)

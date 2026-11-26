@@ -375,3 +375,30 @@ test('a conversation asks for 800K of usable context, as much as the model may b
   assert.ok(f.calls('thread/start').length, JSON.stringify([state, f.calls().map(c => c.method)]));
   assert.deepEqual(f.calls('thread/start').find(c => !c.params.ephemeral).params.config, { model_context_window: 842106 });
 });
+
+test('a question Codex asks without stopping is a card; its answer is a message of the person’s own, after the turn it stops', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('prompt', { message: 'question later' });
+  const card = await a.next(e => e.type === 'extension_ui_request' && e.ask && e.title === 'Is a large job allocated?');
+  assert.deepEqual([card.method, card.options], ['select', ['Use 64 cards', 'I will provide one']]);
+  const shown = await a.next(e => e.type === 'message_update' && e.assistantMessageEvent?.type === 'text_end');
+  assert.equal(shown.assistantMessageEvent.content, 'Is a large job allocated?', 'the question, without its options as a list');
+  assert.ok(!a.events.some(e => e.type === 'agent_settled'), 'Codex goes on working meanwhile');
+  a.adapter.handle({ type: 'extension_ui_response', id: card.id, value: 'Use 64 cards' });
+  await a.next(e => e.type === 'extension_ui_dismiss' && e.id === card.id);
+  await a.next(e => e.type === 'message_end' && e.message.role === 'assistant' && e.message.stopReason === 'aborted');
+  const answer = await a.next(e => e.type === 'message_end' && e.message.role === 'user' && e.message.content[0]?.text === 'Use 64 cards');
+  assert.ok(answer, 'the answer starts a turn of its own');
+  assert.equal(f.calls('turn/interrupt').length, 1);
+  assert.equal(f.calls('turn/start').filter(c => !String(c.params.threadId).startsWith('title-')).at(-1).params.input[0].text, 'Use 64 cards');
+  assert.equal(f.calls('turn/steer').length, 0);
+});
+
+test('a message typed while a question card is open answers it: the card goes', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('prompt', { message: 'question later' });
+  const card = await a.next(e => e.type === 'extension_ui_request' && e.ask);
+  await a.rpc('abort');
+  await a.rpc('prompt', { message: 'Just use 64 cards' });
+  await a.next(e => e.type === 'extension_ui_dismiss' && e.id === card.id);
+});

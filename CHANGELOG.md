@@ -2,6 +2,18 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.16
+
+**Changed**
+
+- **A message sent while Codex works stops the turn and starts one on it**, as with the other agents: it shows as a row of its own after that turn, instead of joining the turn and showing above its reply. Option+Enter still hands it to the turn under way, which reads it before its next model call.
+
+**Fixed**
+
+- **Questions Codex asks without stopping are question cards.** Codex can ask something and go on working (its answer is whatever you send next); the question showed as text with its options as a list. It now shows as the question in the reply and a card with its options. Choosing one sends it as your message (stopping the turn under way, as above); the card stays after the turn ends, and a message you type instead answers it.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.15
 
 **Fixed**

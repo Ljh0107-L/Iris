@@ -67,6 +67,16 @@ function handle(m) {
       // A model that takes a while to begin writing: the reasoning item begins when it does, the answer follows.
       if (text.includes('slow start')) return setTimeout(() => { send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'reasoning', id: 'rs-slow', summary: [], content: [] } } });
         setTimeout(() => { send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: active, itemId: 'msg-slow', delta: 'Written.' } }); finish('completed'); }, 120); }, 150);
+      // A question asked without stopping (request_user_input_async): a message carrying the questions, and the
+      // turn goes on (here: until it is interrupted). The answer is the next message the person sends.
+      if (text.includes('question later')) {
+        const say = (method, params) => send({ method, params: { threadId: 'thread-1', turnId: active, ...params } });
+        const full = ['Is a large job allocated?', '- Use 64 cards', '- I will provide one'].join(String.fromCharCode(10));
+        say('item/started', { item: { type: 'agentMessage', id: 'q-async', text: '', phase: 'final_answer', delivery: 'async', questions: null } });
+        say('item/agentMessage/delta', { itemId: 'q-async', delta: full });
+        say('item/completed', { item: { type: 'agentMessage', id: 'q-async', text: full, phase: 'final_answer', delivery: 'async', questions: [{ title: 'Is a large job allocated?', options: ['Use 64 cards', 'I will provide one'] }] } });
+        return say('item/started', { item: { type: 'commandExecution', id: 'cmd-on', command: 'make check', status: 'inProgress' } });
+      }
       // The model asks the person something (request_user_input): a server request, answered by question id.
       if (text.includes('ask')) return send({ id: 'input-1', method: 'item/tool/requestUserInput', params: { threadId: 'thread-1', turnId: active, itemId: 'ask-1', isBlocking: true, autoResolutionMs: null,
         questions: [{ id: 'colour', header: 'Colour', question: 'Which colour do you prefer?', isOther: true, isSecret: false, options: [{ label: 'Red', description: 'Warm' }, { label: 'Green', description: 'Calm' }] },

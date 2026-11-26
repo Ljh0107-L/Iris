@@ -480,6 +480,7 @@ export class CodexAdapter {
   }
 
   async #prompt(message, images) {
+    this.#dropLater(); // (what is sent answers Codex's open question)
     await this.#ensureReady();
     if (this.authRequired) throw new Error('Sign in to Codex to continue.');
     const input = [...(message ? [{ type: 'text', text: message, text_elements: [] }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', url: `data:${mimeType};base64,${data}` }))];
@@ -770,6 +771,17 @@ export class CodexAdapter {
     });
   }
   #itemCompleted(turn, item) {
+    // A question Codex asks without stopping (request_user_input_async): it goes on working, and the answer is
+    // the next thing the person sends. Its text in the reply is the question; its options are a card to answer.
+    const asks = item.type === 'agentMessage' && Array.isArray(item.questions) ? item.questions.filter(q => text(q?.title)).slice(0, 8) : [];
+    if (asks.length) {
+      const shown = asks.map(q => q.title.trim()).join('\n\n');
+      if (!turn.streamed?.has(item.id)) this.#chunk(turn, 'text', item.id, shown);
+      else if (turn.blockItem === item.id) turn.content[turn.blockIndex].text = shown; // (its end says the whole text)
+      if (turn.blockItem === item.id) this.#endBlock(turn);
+      this.#askLater(asks);
+      return;
+    }
     if (item.type === 'agentMessage' && !turn.streamed?.has(item.id)) this.#chunk(turn, 'text', item.id, item.text);
     if (item.type === 'reasoning' && !turn.streamed?.has(item.id)) this.#chunk(turn, 'thinking', item.id, [...(item.summary ?? []), ...(item.content ?? [])].join('\n\n'));
     if (item.type === 'agentMessage' || item.type === 'reasoning') { if (turn.blockItem === item.id) this.#endBlock(turn); return; }
@@ -977,7 +989,45 @@ export class CodexAdapter {
     this.asking = null;
     ask.peer.send({ id: ask.id, result: { answers: ask.answers } });
   }
+  // Questions Codex asked without stopping: one card at a time, which stays after the turn ends. The answers
+  // are sent as a message of the person's own, as if typed: the turn under way stops and one starts on it.
+  #askLater(questions) {
+    if (this.later) { this.later.questions.push(...questions); return; }
+    this.later = { questions: [...questions], answers: [], open: null };
+    this.#askLaterNext();
+  }
+  #askLaterNext() {
+    const later = this.later, question = later.questions[later.answers.length];
+    const options = (Array.isArray(question.options) ? question.options : []).filter(text).slice(0, 24);
+    later.open = randomUUID();
+    this.write({ type: 'extension_ui_request', id: later.open, ask: true, method: options.length ? 'select' : 'input',
+      header: later.questions.length > 1 ? `Question ${later.answers.length + 1} of ${later.questions.length}` : 'Question',
+      title: question.title.slice(0, 2000), ...(options.length ? { options: options.map(option => option.slice(0, 300)) } : {}) });
+  }
+  // Something else sent meanwhile is the answer: the card goes.
+  #dropLater() {
+    if (!this.later) return;
+    if (this.later.open) this.write({ type: 'extension_ui_dismiss', id: this.later.open });
+    this.later = null;
+  }
+  async #answeredLater(r) {
+    const later = this.later;
+    this.write({ type: 'extension_ui_dismiss', id: r.id });
+    const value = (Array.isArray(r.value) ? r.value : [r.value]).filter(text);
+    if (r.cancelled || !value.length) { this.later = null; return; }
+    later.answers.push(value.join(', '));
+    if (later.answers.length < later.questions.length) { this.#askLaterNext(); return; }
+    this.later = null;
+    const message = later.answers.length === 1 ? later.answers[0] : later.questions.map((q, i) => `${q.title.trim()}\n${later.answers[i]}`).join('\n\n');
+    try {
+      if (this.turn) await this.#abort();
+      await this.#prompt(message, []);
+    } catch (error) {
+      this.write({ type: 'extension_ui_request', id: randomUUID(), method: 'notify', notifyType: 'error', message: `The answer was not sent: ${error.message}` });
+    }
+  }
   #answer(r) {
+    if (this.later?.open === r.id) { void this.#answeredLater(r); return; }
     if (this.asking?.open === r.id) { this.#asked(r); return; }
     const entry = this.permissions.get(r.id);
     if (!entry) return;

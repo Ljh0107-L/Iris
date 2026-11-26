@@ -70,10 +70,18 @@ test('Codex: found on the login PATH, opened with the choices made beforehand, a
   const opened = calls('thread/start').filter(c => !c.params.ephemeral).at(-1); // the title is asked read-only, in a throwaway thread
   assert.deepEqual([opened.params.approvalPolicy, opened.params.sandbox], ['never', 'danger-full-access']);
 
-  // A message sent while Codex works joins the turn instead of being refused.
+  // A message sent while Codex works and asked not to interrupt (Option+Enter) joins the turn.
   done = settled();
   await manager.prompt(second.id, 'wait for me');
   assert.equal((await manager.prompt(second.id, 'one more thing')).disposition, 'queued');
+  assert.equal(calls('turn/steer').length, 1);
+  // A message sent as usual (Enter) stops the turn and starts one on it: a row of its own, after that turn.
+  const interrupts = calls('turn/interrupt').length;
+  assert.equal((await manager.prompt(second.id, 'wait, instead do this', [], { interrupt: true })).disposition, 'started');
+  assert.equal(calls('turn/interrupt').length, interrupts + 1);
+  assert.equal(calls('turn/steer').length, 1, 'not handed to the turn under way');
+  assert.equal(calls('turn/start').filter(c => c.params.threadId === 'thread-1').at(-1).params.input[0].text, 'wait, instead do this');
+  done = settled();
   await manager.abort(second.id);
   await done;
   await manager.delete(first.id); await manager.delete(second.id);
