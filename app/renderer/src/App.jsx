@@ -12,7 +12,8 @@ import { FilePane } from './FilePane.jsx';
 import { GitReview } from './GitReview.jsx';
 import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
-import { Modal, Popover, Spinner, Trigger } from './ui.jsx';
+import { Modal, Popover, Spinner, Trigger, baseName } from './ui.jsx';
+import { AgentsBar } from './AgentsBar.jsx';
 import { antigravityTurnSpeed, emptyTranscript, findBlocks, formatTokens } from './transcript.js';
 import { sortedBackgroundJobs } from './background-jobs.js';
 import { ENGINE_ORDER } from './handoff.js';
@@ -69,32 +70,52 @@ function UltraBanner({ session }) {
 
 // Hand a conversation to another agent: continue its work there, or have it reviewed. The new conversation opens
 // with the message written, to read and send (handoff.js says what it holds).
+// Hand off to another agent: a relay from this conversation's agent to the one picked, to continue the work or
+// to review it. The line at the top shows who hands to whom (the agent under the pointer, until one is picked);
+// picking one opens a new conversation in the same folder with the first message written, to edit and send.
+const HANDOFF_MODES = [
+  ['continue', 'Continue the work', 'forward', 'Picks up where it stopped, with the files as they are now.'],
+  ['review', 'Review the work', 'eye', 'Reads the changes and reports what it would fix. No edits.'],
+];
 function HandoffHost() {
   const handoff = useStore(s => s.handoff);
   const session = useStore(s => s.sessions.find(x => x.id === s.handoff?.sessionId));
   const [mode, setMode] = useState('continue');
-  useEffect(() => { if (handoff) setMode(handoff.mode ?? 'continue'); }, [handoff?.sessionId, handoff?.mode]);
+  const [target, setTarget] = useState(null);
+  useEffect(() => { if (handoff) { setMode(handoff.mode ?? 'continue'); setTarget(null); } }, [handoff?.sessionId, handoff?.mode]);
   if (!handoff || !session) return null;
   const from = session.engine ?? 'iris';
   const engines = ENGINE_ORDER.filter(engine => engine !== from);
+  const folder = session.noFolder ? 'No folder' : session.project || baseName(session.cwd);
   return (
-    <Modal title="Hand off to another agent" width={460} onClose={closeHandoff}>
-      <div className="handoff">
-        <div className="segmented" role="radiogroup" aria-label="What the other agent does">
-          {[['continue', 'Continue the work'], ['review', 'Review the work']].map(([value, label]) => (
-            <button key={value} type="button" role="radio" aria-checked={mode === value} className={mode === value ? 'on' : ''} onClick={() => setMode(value)}>{label}</button>
-          ))}
+    <Modal title={mode === 'review' ? 'Review with another agent' : 'Hand off to another agent'} width={520} onClose={closeHandoff}>
+      <div className={`handoff ${mode}`}>
+        <div className="handoff-relay" aria-hidden="true">
+          <div className={`handoff-end from engine-${from}`}><EngineLogo engine={from} size={30} /></div>
+          <div className="handoff-line"><span className="handoff-pulse" /></div>
+          <div className={`handoff-end to ${target ? `engine-${target}` : 'empty'}`} key={target ?? 'none'}>{target ? <EngineLogo engine={target} size={30} /> : <Icon name="question" size={18} />}</div>
         </div>
-        <p className="handoff-note">{mode === 'review'
-          ? `A new conversation in the same folder asks the agent you pick to review what ${engineLabel(from)} did, without editing.`
-          : `A new conversation in the same folder, with what was asked, what ${engineLabel(from)} last reported and the files it changed. You can edit the message before sending it.`}</p>
-        <div className="handoff-engines">
-          {engines.map(engine => (
-            <button key={engine} type="button" className="handoff-engine" onClick={() => void handOff(session.id, engine, mode)}>
-              <EngineLogo engine={engine} size={22} /><span>{engineLabel(engine)}</span>
+        <div className="handoff-relay-labels" aria-hidden="true">
+          <span><b>{engineLabel(from)}</b><span className="handoff-subject">{session.title}</span></span>
+          <span className="to">{target ? <b>{engineLabel(target)}</b> : <span className="muted">Pick an agent</span>}</span>
+        </div>
+        <div className="handoff-modes" role="radiogroup" aria-label="What the other agent does">
+          {HANDOFF_MODES.map(([value, label, icon, note]) => (
+            <button key={value} type="button" role="radio" aria-checked={mode === value} className={`handoff-mode ${mode === value ? 'on' : ''}`} onClick={() => setMode(value)}>
+              <span className="handoff-mode-icon"><Icon name={icon} size={16} /></span>
+              <span className="handoff-mode-text"><b>{label}</b><span>{note}</span></span>
             </button>
           ))}
         </div>
+        <div className="handoff-engines" onMouseLeave={() => setTarget(null)}>
+          {engines.map(engine => (
+            <button key={engine} type="button" className={`handoff-engine engine-${engine}`} onMouseEnter={() => setTarget(engine)} onFocus={() => setTarget(engine)}
+              onClick={() => void handOff(session.id, engine, mode)} aria-label={`${mode === 'review' ? 'Review with' : 'Hand off to'} ${engineLabel(engine)}`}>
+              <EngineLogo engine={engine} size={26} /><span>{engineLabel(engine)}</span><Icon name="arrowUpRight" size={14} className="handoff-go" />
+            </button>
+          ))}
+        </div>
+        <p className="handoff-note"><Icon name="folder" size={13} /><span>Opens in the same folder ({folder}) on {session.environmentLabel ?? 'this computer'}. The first message points the agent at this conversation; you can edit it before sending.</span></p>
       </div>
     </Modal>
   );
@@ -369,6 +390,7 @@ function Header({ session, view }) {
               {!local && session.environmentLabel && (
                 <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
               )}
+              <AgentsBar session={session} />
             </div>}
         <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={220} placement="bottom-start">
           <SessionMenuItems session={session} close={() => setMenu(false)} onRename={() => { setTitle(session.title); setRenaming(true); }} />

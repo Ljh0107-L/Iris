@@ -1,5 +1,7 @@
 import { Fragment, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { engineLabel, isCliEngine } from './engines.js';
+import { engineAgentStatus } from './agents.js';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
 import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
@@ -88,7 +90,7 @@ function Running({ thinking = false }) {
   return <Spinner size={14} spectrum kind={thinking ? 'tumble' : 'swap'} />;
 }
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
-function describeCall(call) {
+export function describeCall(call) {
   if (call.__trace?.status === 'skipped') return { subject: `${call.name} — not executed`, title: 'Output token limit: incomplete tool arguments were not executed.' };
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? a.notebook_path ?? '';
@@ -262,36 +264,70 @@ function ToolGroup({ calls, tools, live }) {
   );
 }
 
-// A visual an agent showed (Iris's show_visual tool): its page, running in a sandboxed frame under an address of
-// its own (main's iris-visual scheme: its own scripts and a few CDNs, nothing else), with its title. It can
-// fill the window, and start again from the beginning.
+// The conversation's colour scheme, kept current: a visual's page takes it, so its frame is see-through.
+const themeNow = () => document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+function useTheme() {
+  const [theme, setTheme] = useState(themeNow);
+  useEffect(() => {
+    const watcher = new MutationObserver(() => setTheme(themeNow()));
+    watcher.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => watcher.disconnect();
+  }, []);
+  return theme;
+}
+const VISUAL_MAX_HEIGHT = 1200; // a taller page scrolls inside its frame
+const visualError = error => String(error?.message ?? error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+
+// A visual the agent showed (show_visual): its page, part of the conversation the way a paragraph is, with no
+// frame or heading around it, as tall as the page itself. Under it, as a figure's caption, its title and its
+// controls (save, start again, fill the window). Filling the window opens it in a view of its own, above
+// everything, started afresh there.
 function VisualCard({ call, tool, live, superseded = false }) {
   const detailState = useHistoryDetails([call.__historyRef]);
   const { sessionId } = useContext(DisclosureContext) ?? {};
-  const frameRef = useRef(null);
+  const theme = useTheme();
+  const frameRef = useRef(null), fullRef = useRef(null);
   const [older, showOlder] = useState(false);
   const html = typeof call.arguments?.html === 'string' ? call.arguments.html : null;
   const title = String(call.arguments?.title ?? '').trim() || 'Visual';
-  const height = Math.min(900, Math.max(160, Number(call.arguments?.height) || 420));
+  const asked = Number(call.arguments?.height);
+  const initial = Math.min(900, Math.max(120, asked || 320));
   const refused = tool?.status === 'error' ? (tool.result?.content ?? []).map(c => c?.text ?? '').join('\n').trim() : null;
   const ready = !!html && (!!tool || !live); // a page still being written is not loaded half-way
   const [url, setUrl] = useState(null);
   const [error, setError] = useState(null);
   const [run, setRun] = useState(0); // starting again: a frame of its own
   const [full, setFull] = useState(false);
+  const [height, setHeight] = useState(null); // the page's own, once it says
+  const grown = useRef(0);
   useEffect(() => {
     if (!ready || refused) return;
     let alive = true;
-    api('visualUrl', html).then(u => { if (alive) { setUrl(u); setError(null); } }, e => { if (alive) setError(String(e?.message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); });
+    api('visualUrl', html).then(u => { if (alive) { setUrl(u); setError(null); } }, e => { if (alive) setError(visualError(e)); });
     return () => { alive = false; };
   }, [ready, html, refused]);
-  // The page handing the person a message to send (iris.send): it goes in their message box, for them to send.
+  useEffect(() => { setHeight(null); grown.current = 0; }, [url, run, theme]);
   useEffect(() => {
     const onMessage = event => {
-      if (!frameRef.current || event.source !== frameRef.current.contentWindow || event.data?.iris !== 'send' || !sessionId) return;
+      const inline = frameRef.current && event.source === frameRef.current.contentWindow;
+      const fullView = fullRef.current && event.source === fullRef.current.contentWindow;
+      if (!inline && !fullView) return;
+      // The page's height. A page that is as tall as its frame plus a little (100vh and a margin) would grow
+      // with every answer: it is let grow a few times only.
+      if (event.data?.iris === 'size' && inline) {
+        const next = Math.min(VISUAL_MAX_HEIGHT, Math.max(24, Math.round(Number(event.data.height) || 0)));
+        setHeight(current => {
+          if (current != null && next > current && ++grown.current > 4) return current;
+          return next;
+        });
+        return;
+      }
+      // The page handing the person a message to send (iris.send): it goes in their message box, for them to send.
+      if (event.data?.iris !== 'send' || !sessionId) return;
       const text = String(event.data.text ?? '').trim().slice(0, 4000);
       if (!text) return;
       setComposerDraft(sessionId, 'text', () => text);
+      setFull(false);
       window.dispatchEvent(new CustomEvent('iris:focus-composer'));
       notify('The visual put a message in the message box. Send it when you are ready.');
     };
@@ -308,29 +344,41 @@ function VisualCard({ call, tool, live, superseded = false }) {
   const lost = !html && !live; // (an agent that gave no page)
   if (superseded && !older) return (
     <div className="visual-card folded" data-tool-id={call.id}>
-      <div className="visual-head"><Icon name="sparkle" size={13} /><span className="visual-title">{title}</span><span className="visual-later">Updated later in the conversation</span>
-        <button type="button" className="tool-button" onClick={() => showOlder(true)} title="Show this version" aria-label="Show this version"><Icon name="chevronDown" size={14} /></button></div>
+      <button type="button" className="visual-folded" onClick={() => showOlder(true)} title="Show this version">
+        <Icon name="prompt" size={13} /><span className="visual-title">{title}</span><span className="visual-later">Updated later in the conversation</span><Icon name="chevronDown" size={13} />
+      </button>
     </div>
   );
   const save = async () => {
     try { const saved = await api('saveVisual', html, title); if (saved) notify(`Saved ${saved.split('/').pop()}`); }
-    catch (error) { notify(String(error?.message ?? error).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'); }
+    catch (error) { notify(visualError(error), 'error'); }
   };
-  const frame = url && <iframe ref={frameRef} key={run} className="visual-frame" src={url} title={title} sandbox="allow-scripts" style={full ? undefined : { height }} />;
+  const src = url && `${url}?theme=${theme}`;
+  const problem = refused || (lost ? 'the agent gave no page.' : error);
   return (
-    <div className={`visual-card ${full ? 'full' : ''}`} data-tool-id={call.id} role="group" aria-label={`Visual: ${title}`}>
-      <div className="visual-head">
-        <Icon name="sparkle" size={13} />
-        <span className="visual-title">{title}</span>
-        {html && <button type="button" className="tool-button" onClick={save} title="Save as a web page" aria-label="Save the visual as a web page"><Icon name="download" size={14} /></button>}
-        {url && <button type="button" className="tool-button" onClick={() => setRun(n => n + 1)} title="Start again" aria-label="Start the visual again"><Icon name="refresh" size={14} /></button>}
-        {url && <button type="button" className="tool-button" onClick={() => setFull(f => !f)} title={full ? 'Back to the conversation (Esc)' : 'Fill the window'} aria-label={full ? 'Exit full window' : 'Fill the window'}><Icon name={full ? 'minimize' : 'maximize'} size={14} /></button>}
-      </div>
-      {refused ? <div className="visual-note error">Not shown: {refused}</div>
-        : lost ? <div className="visual-note error">Not shown: the agent gave no page.</div>
-        : error ? <div className="visual-note error">Not shown: {error}</div>
-        : !ready ? <div className="visual-note" style={{ height: Math.min(height, 240) }}><Spinner size={14} kind="orbit" /> Drawing…</div>
-        : frame}
+    <div className={`visual-card ${height == null ? 'measuring' : ''}`} data-tool-id={call.id} role="group" aria-label={`Visual: ${title}`}>
+      {problem ? <div className="visual-note error"><Icon name="alert" size={14} /><span><b>{title}</b> was not shown: {problem}</span></div>
+        : !src ? <div className="visual-note drawing" style={{ height: Math.min(initial, 200) }}><Icon name="prompt" size={14} /><span className="shimmer">Drawing {title}…</span></div>
+        : <>
+          <iframe ref={frameRef} key={`${run}:${theme}`} className="visual-frame" src={src} title={title} sandbox="allow-scripts" style={{ height: height ?? initial, colorScheme: theme }} />
+          <div className="visual-caption" role="toolbar" aria-label="Visual controls">
+            <Icon name="prompt" size={12} /><span className="visual-caption-title" title={title}>{title}</span>
+            <button type="button" className="tool-button" onClick={save} title="Save as a web page" aria-label="Save the visual as a web page"><Icon name="download" size={14} /></button>
+            <button type="button" className="tool-button" onClick={() => setRun(n => n + 1)} title="Start again" aria-label="Start the visual again"><Icon name="refresh" size={14} /></button>
+            <button type="button" className="tool-button" onClick={() => setFull(true)} title="Fill the window" aria-label="Fill the window"><Icon name="maximize" size={14} /></button>
+          </div>
+        </>}
+      {full && src && createPortal(
+        <div className="visual-overlay" onMouseDown={e => { if (e.target === e.currentTarget) setFull(false); }}>
+          <div className="visual-sheet" role="dialog" aria-label={title}>
+            <div className="visual-sheet-head">
+              <Icon name="prompt" size={14} /><span className="visual-title">{title}</span>
+              <button type="button" className="tool-button" onClick={save} title="Save as a web page" aria-label="Save the visual as a web page"><Icon name="download" size={15} /></button>
+              <button type="button" className="tool-button" onClick={() => setFull(false)} title="Back to the conversation (Esc)" aria-label="Exit full window"><Icon name="minimize" size={15} /></button>
+            </div>
+            <iframe ref={fullRef} className="visual-sheet-frame" src={src} title={title} sandbox="allow-scripts" style={{ colorScheme: theme }} />
+          </div>
+        </div>, document.body)}
     </div>
   );
 }
@@ -511,9 +559,10 @@ function ClaudeTaskCard({ call, tool, sessionId }) {
   const { onOpenFile, onFileContextMenu } = useContext(DisclosureContext);
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
   const a = call.arguments ?? {};
-  const status = tool?.status ?? 'running';
-  const running = status === 'running' || status === 'pending';
-  const failed = ['error', 'cancelled', 'timed_out'].includes(status);
+  // (An agent can work on after its call returned: Antigravity's say so in their result.)
+  const status = engineAgentStatus(tool);
+  const running = status === 'running';
+  const failed = status === 'failed' || status === 'cancelled';
   const details = tool?.result?.details ?? {};
   const steps = Array.isArray(details.steps) ? details.steps.filter(s => s && (s.type === 'tool' || (s.type === 'text' && s.text?.trim()))) : [];
   const toolStepCount = steps.filter(s => s.type === 'tool').length;

@@ -7,6 +7,7 @@ import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { visualServer } from './iris-visual.mjs';
+import { agentsStoppedAt, antigravityData, findAgentConversation, readAgent } from './iris-antigravity-agents.mjs';
 
 // The agents this adapter runs: each is its vendor's official CLI, spoken to over ACP and signed in with the
 // person's own account there. What differs between them is here.
@@ -396,6 +397,7 @@ const toolTime = runs => {
   for (const [start, end] of runs.filter(([start, end]) => end > start).sort((a, b) => a[0] - b[0])) { total += Math.max(0, end - Math.max(start, until)); until = Math.max(until, end); }
   return total;
 };
+const AGENT_POLL_MS = 2000, AGENT_WATCH_MS = 24 * 60 * 60 * 1000; // Antigravity's agents: how often and how long they are followed
 const EDIT_SHOWN = 200000; // characters of a written or changed file kept for the conversation
 // The file before and after a change, as the CLI reports it once the change is made.
 const shownDiff = content => { const diff = (Array.isArray(content) ? content : []).find(block => block?.type === 'diff' && typeof block.newText === 'string'); return diff ? { oldText: typeof diff.oldText === 'string' ? diff.oldText : null, newText: diff.newText } : null; };
@@ -523,6 +525,8 @@ export class AntigravityAdapter {
     this.permissions = new Map();
     this.cancelEpoch = 0;
     this.authRequired = false;
+    this.watched = new Map(); // Antigravity's agents, followed in its files (#watchAgent)
+    this.watchTimer = null;
     this.canSignIn = false;
     this.options = [];
     this.commands = [];
@@ -776,6 +780,7 @@ export class AntigravityAdapter {
       else if (Array.isArray(result?.configOptions)) this.#replaceOptions(result.configOptions, seq);
       else this.#updateState();
       void this.#loadModelSettings(peer);
+      this.#watchSavedAgents();
     } catch (error) {
       // The CLI answered that it created nothing (an ACP error, sign-in needed): the next attempt starts clean.
       // A timeout or a closed pipe stays recorded as an unconfirmed attempt (see #ensureReady).
@@ -920,6 +925,11 @@ export class AntigravityAdapter {
       arguments: tool.paths.length ? { path: tool.paths[0], ...(tool.paths.length > 1 ? { paths: tool.paths } : {}) } : {} };
     if (known?.name === 'TodoWrite') tool.fallback = 'Tasks updated.';
     else if (known?.name === 'Task') tool.fallback = `The agent was started; it reports back to ${this.p.label}.`;
+    if (known?.name === 'Task' && this.p.engine === 'antigravity' && !tool.watching) {
+      tool.watching = true;
+      tool.details = { kind: 'claude-code-agent', agentStatus: 'running', stepCount: 0, steps: [] };
+      this.#watchAgent({ id: tool.id, prompt: known.arguments.prompt, since: tool.start, tool });
+    }
     turn.content[tool.index] = call;
     if (!tool.call) this.#delta({ type: 'toolcall_start', contentIndex: tool.index, id: call.id, toolName: call.name });
     this.#delta({ type: 'toolcall_end', contentIndex: tool.index, toolCall: call });
@@ -956,7 +966,7 @@ export class AntigravityAdapter {
   #toolEnd(tool, isError, fallback) {
     const content = tool.result.length ? tool.result : [{ type: 'text', text: fallback }];
     // Stopped by the person (Stop, or a message sent while it worked) is not the tool failing.
-    const details = { engine: this.p.engine, ...(fallback === 'Interrupted.' ? { interrupted: true } : {}) };
+    const details = { engine: this.p.engine, ...(tool.details ?? {}), ...(fallback === 'Interrupted.' ? { interrupted: true, ...(tool.details?.agentStatus ? { agentStatus: 'cancelled' } : {}) } : {}) };
     tool.end = Date.now();
     if (this.turn) this.turn.from = tool.end; // the next model request begins once the tools before it are done
     const durationMs = tool.end - tool.start;
@@ -1193,9 +1203,82 @@ export class AntigravityAdapter {
     }
   }
 
+  // Antigravity's agents. The call that starts one returns at once and ACP says no more about it: what it does
+  // is read from Antigravity's files (iris-antigravity-agents.mjs) every two seconds while it works, and shown as
+  // its task's steps and report, as Claude Code's agents are. A task saved as still working when its turn ended
+  // is followed again when the conversation opens; its final state is saved as a later result of the same call.
+  #watchAgent(agent) {
+    if (this.closed || this.watched.has(agent.id) || !text(agent.prompt)) return;
+    this.watched.set(agent.id, { ...agent, child: null, sig: null, final: false });
+    if (!this.watchTimer) { this.watchTimer = setInterval(() => this.#pollAgents(), AGENT_POLL_MS); this.watchTimer.unref?.(); }
+    setTimeout(() => this.#pollAgents(), 500).unref?.();
+  }
+  #watchSavedAgents() {
+    if (this.p.engine !== 'antigravity' || !this.transcript) return;
+    const messages = this.transcript.messages(), results = new Map();
+    for (const message of messages) if (message?.role === 'toolResult') results.set(message.toolCallId, message);
+    for (const message of messages) {
+      if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        if (block?.type !== 'toolCall' || block.name !== 'Task' || !text(block.arguments?.prompt)) continue;
+        const result = results.get(block.id), status = result?.details?.agentStatus;
+        // Saved as working, or saved before agents were followed (it said only that the agent was started).
+        const open = status === 'running' || (!status && !result?.details?.interrupted && /reports back to/.test(JSON.stringify(result?.content ?? '')));
+        if (open && Date.now() - (message.timestamp ?? 0) < AGENT_WATCH_MS) this.#watchAgent({ id: block.id, prompt: block.arguments.prompt, since: message.timestamp ?? 0 });
+      }
+    }
+  }
+  #pollAgents() {
+    try {
+      const parent = this.sessionId ?? this.transcript?.binding?.sessionId;
+      if (this.closed || !parent) return;
+      const data = antigravityData(this.config.appDataDir);
+      const taken = new Set([...this.watched.values()].map(agent => agent.child).filter(Boolean));
+      for (const agent of this.watched.values()) {
+        if (agent.final) continue;
+        if (Date.now() - agent.since > AGENT_WATCH_MS) { agent.final = true; continue; }
+        if (!agent.child) { agent.child = findAgentConversation(data, parent, agent.prompt, agent.since, taken); if (!agent.child) continue; taken.add(agent.child); }
+        const info = readAgent(data, agent.child, parent, { stopped: agentsStoppedAt(data, parent, agent.since) });
+        const sig = JSON.stringify([info.steps.length, info.status, info.report?.length ?? 0, info.usage.totalTokens]);
+        if (sig === agent.sig) continue;
+        agent.sig = sig;
+        this.#agentChanged(agent, info);
+      }
+    } catch { /* the files are read again next time */ }
+    if (this.watchTimer && ![...this.watched.values()].some(agent => !agent.final)) { clearInterval(this.watchTimer); this.watchTimer = null; }
+  }
+  #agentChanged(agent, info) {
+    const final = info.status !== 'running', isError = info.status === 'failed';
+    const details = { engine: this.p.engine, kind: 'claude-code-agent', agentStatus: info.status, stepCount: info.steps.filter(step => step.type === 'tool').length, steps: info.steps.slice(-200), agentConversation: info.conversation,
+      ...(info.usage.totalTokens ? { agentRuns: [{ key: `antigravity-agent:${info.conversation}`, at: info.startedAt, model: info.model, usage: info.usage, turns: info.turns }] } : {}),
+      ...(info.startedAt && info.lastAt ? { agentMs: Math.max(0, info.lastAt - info.startedAt) } : {}) };
+    const latest = info.steps.at(-1);
+    const content = [{ type: 'text', text: info.report ?? (final ? (info.status === 'cancelled' ? 'The agent was stopped before it reported back.' : 'The agent ended without a report.')
+      : latest?.type === 'tool' ? `${latest.name} ${JSON.stringify(latest.arguments ?? {}).slice(0, 200)}` : latest?.text?.split('\n')[0] ?? 'Working.') }];
+    if (final) agent.final = true;
+    const tool = agent.tool, inTurn = tool && this.turn && [...this.turn.tools.values()].includes(tool);
+    if (tool && !tool.message) {
+      // Its call is still open in the turn under way: the turn saves what it shows when it ends.
+      tool.details = details; tool.result = content;
+      this.write({ type: 'tool_execution_update', toolCallId: tool.id, toolName: 'Task', args: {}, partialResult: { content, details } });
+      return;
+    }
+    if (inTurn) {
+      Object.assign(tool.message, { content, details, isError });
+      this.write({ type: final ? 'tool_execution_end' : 'tool_execution_update', toolCallId: tool.id, toolName: 'Task', ...(final ? { result: { content, details }, isError } : { args: {}, partialResult: { content, details } }) });
+      return;
+    }
+    if (!final) { this.write({ type: 'tool_execution_update', toolCallId: agent.id, toolName: 'Task', args: {}, partialResult: { content, details } }); return; }
+    // Its turn is over and saved: the agent's end is saved as a later result of the same call.
+    const message = { role: 'toolResult', toolCallId: agent.id, toolName: 'Task', content, details, isError, timestamp: Date.now() };
+    try { this.transcript.append([{ type: 'message', message }]); } catch { /* shown, if not kept */ }
+    this.write({ type: 'tool_execution_end', toolCallId: agent.id, toolName: 'Task', result: { content, details }, isError });
+  }
+
   async close() {
     if (this.closed) return;
     this.closed = true;
+    if (this.watchTimer) { clearInterval(this.watchTimer); this.watchTimer = null; }
     const turn = this.turn;
     if (turn) this.#cancelTurn(turn);
     this.#cancelPermissions();

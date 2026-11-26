@@ -1,3 +1,4 @@
+import { visualPage } from './visual-page.mjs';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, protocol, safeStorage, screen, shell } from 'electron';
 import { MIN_SIZE, openingBounds, readWindowState, rememberWindow } from './window-state.mjs';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -73,12 +74,10 @@ function visualUrl(html) {
   while (visuals.size > 200) visuals.delete(visuals.keys().next().value);
   return `iris-visual://v${hash}/`;
 }
-// What every visual page can call: iris.send(text) puts a message in the person's message box (the
-// conversation's window decides what to do with it; see VisualCard).
-const VISUAL_HELPER = `<script>window.iris={send(text){parent.postMessage({iris:'send',text:String(text??'').slice(0,4000)},'*')}};</script>`;
 function serveVisual(request) {
-  const page = visuals.get(new URL(request.url).hostname.slice(1));
-  const html = page == null ? null : VISUAL_HELPER + page;
+  const url = new URL(request.url);
+  const page = visuals.get(url.hostname.slice(1));
+  const html = page == null ? null : visualPage(page, url.searchParams.get('theme'));
   const headers = { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8', 'content-security-policy': VISUAL_POLICY };
   return html == null ? new Response('This visual is no longer open.', { status: 404, headers }) : new Response(html, { headers });
 }

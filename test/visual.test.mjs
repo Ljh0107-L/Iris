@@ -79,3 +79,15 @@ test('the tool tells the model about ids and iris.send', async () => {
   assert.match(VISUAL_DESCRIPTION, /iris\.send\(text\)/);
   assert.equal(VISUAL_SCHEMA.properties.id.type, 'string');
 });
+
+test('the page stays a standards-mode page, takes the conversation’s colours and says how tall it is', async () => {
+  const { visualPage } = await import('../app/main/visual-page.mjs');
+  const full = visualPage('<!DOCTYPE html><html><body>x</body></html>', 'light');
+  assert.match(full, /^<!DOCTYPE html><meta name="color-scheme" content="light">/, 'the doctype first: Iris’s lines go after it');
+  assert.match(full, /parent\.postMessage\(\{iris:'size'/);
+  assert.match(full, /iris\.send|window\.iris=\{send/);
+  const fragment = visualPage('<canvas></canvas>', 'dark');
+  assert.match(fragment, /^<!doctype html>/, 'a fragment is made a standards-mode page');
+  assert.match(fragment, /color-scheme:dark/);
+  assert.match(visualPage('<!-- made by an agent -->\n<!doctype html><p>x</p>', 'nonsense'), /^<!-- made by an agent -->\n<!doctype html><meta name="color-scheme" content="dark">/);
+});

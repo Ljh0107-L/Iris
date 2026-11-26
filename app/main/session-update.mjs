@@ -1,5 +1,7 @@
 // An in-app update is different from a normal quit/reconnect: the new desktop must
 // replace the live session processes, not attach to code they loaded before the update.
+// A conversation in the middle of a turn is not cut off for it: it keeps its process until the turn
+// ends, and is restarted then (manager.restartWhenIdle).
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,7 +36,7 @@ export async function planSessionUpdate(manager, version) {
 }
 
 export async function restartUpdatedSessions(manager, plan, { checkpoint, cancelled = () => false } = {}) {
-  const restarted = [], failures = [], skipResume = new Set(), failedIds = new Set();
+  const restarted = [], deferred = [], failures = [], skipResume = new Set(), failedIds = new Set();
   const reopen = new Set(plan.reopen), done = new Set(plan.done), only = plan.only && new Set(plan.only);
   const snapshot = () => ({ ...plan, reopen: [...reopen], done: [...done] });
   const save = () => checkpoint?.(snapshot());
@@ -65,6 +67,15 @@ export async function restartUpdatedSessions(manager, plan, { checkpoint, cancel
         // must still reopen this history even if the process is no longer listed as live.
         if (!reopen.has(id)) { reopen.add(id); save(); }
         if (live.has(id)) {
+          // Working: attach to it as it is, and restart it once its turn is over.
+          await manager.ensureStarted(id);
+          if (manager.isWorking(id)) {
+            manager.restartWhenIdle(id);
+            done.add(id); save();
+            deferred.push({ id, title, environment });
+            continue;
+          }
+          await manager.close(id);
           const stdout = await manager.stopRelay(env, id, { forUpdate: true });
           const ack = JSON.parse(stdout.trim().split('\n').at(-1));
           if (ack.relay !== 'stopped' || typeof ack.found !== 'boolean') throw new Error('Relay did not acknowledge the stop');
@@ -88,13 +99,14 @@ export async function restartUpdatedSessions(manager, plan, { checkpoint, cancel
       }
     }
   }));
-  return { version: plan.version, restarted, failures, skipResume, failedIds, retryPlan: { ...snapshot(), only: [...failedIds] } };
+  return { version: plan.version, restarted, deferred, failures, skipResume, failedIds, retryPlan: { ...snapshot(), only: [...failedIds] } };
 }
 
 export async function reviewSessionUpdate(result, showMessageBox) {
   const hasIssues = result.failures.length > 0, canRetry = !!result.retryPlan?.only.length;
   const lines = [
     ...result.restarted.map(({ environment, title }) => `✓ ${environment} — ${title ?? 'Conversation'}`),
+    ...(result.deferred ?? []).map(({ environment, title }) => `↻ ${environment} — ${title ?? 'Conversation'}: restarts when its current turn ends`),
     ...result.failures.map(({ environment, title, message }) => `${environment}${title ? ` — ${title}` : ''}: ${message}`),
   ];
   const { response } = await showMessageBox({

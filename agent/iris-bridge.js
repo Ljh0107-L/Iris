@@ -685,6 +685,17 @@ export default function irisBridge(pi) {
     }
   });
 
+  // ---------------------------------------------------------------- trying again on another model
+  // The person switched models while Pi waited to try a failed request again (it waits longer each time). Iris
+  // has stopped that wait; this asks again at once, on the model now chosen. The note is for the model only:
+  // the request it answers is the person's last message, as before.
+  pi.registerCommand?.('iris-retry-now', {
+    description: 'Iris: try the failed request again now, on the model now chosen',
+    handler: async () => {
+      pi.sendMessage({ customType: 'iris-retry', content: 'The previous attempt at answering failed with a provider error. Answer my last message now.', display: false }, { triggerTurn: true });
+    },
+  });
+
   // ---------------------------------------------------------------- titles
   pi.registerCommand?.('iris-title', {
     description: 'Iris: name the conversation',

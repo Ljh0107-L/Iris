@@ -602,7 +602,7 @@ export function SettingsPage() {
   const pages = [
     { id: 'subscriptions', label: 'Subscriptions', icon: 'key', title: 'Subscriptions' }, // plans used through their own CLIs: Codex, Antigravity, Cursor
     { id: 'cursor', label: 'Cursor', logo: 'cursor', title: 'Cursor' }, // which of Cursor's many models its menu lists
-    { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' }, // API keys, for Pi and Claude Code
+    { id: 'providers', label: 'Models', icon: 'prompt', title: 'Models' }, // API keys, for Pi and Claude Code
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
     { id: 'translation', label: 'Translation', icon: 'globe', title: 'Translation' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },

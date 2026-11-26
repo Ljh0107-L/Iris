@@ -16,7 +16,8 @@ export function SessionMenuItems({ session, close, onRename }) {
     <MenuItem icon="arrowUpRight" label="Hand off to another agent…" onClick={() => { close(); openHandoff(session.id, 'continue'); }} />
     <MenuItem icon="eye" label="Review with another agent…" onClick={() => { close(); openHandoff(session.id, 'review'); }} />
     <MenuItem icon="refresh" label="Restart agent" title="End the agent’s process (and what it is doing) and start it again from the conversation’s history"
-      onClick={() => { close(); restartConversation(session.id).catch(failed); }} />
+      onClick={() => { close(); if (!session.streaming) { restartConversation(session.id).catch(failed); return; }
+        askConfirm({ title: 'Restart the agent while it works?', message: 'What it is doing now stops, and the turn ends as interrupted. Send a message afterwards to carry on.', action: 'Restart', run: () => restartConversation(session.id).catch(failed) }); }} />
     <MenuItem icon="archive" label="Archive" onClick={() => { close(); archiveSession(session.id); }} />
     <MenuItem icon="trash" label="Delete" className="danger" onClick={() => { close(); askConfirm({ title: 'Delete conversation?', message: session.title, action: 'Delete', run: () => deleteSession(session.id).catch(failed) }); }} />
   </>;

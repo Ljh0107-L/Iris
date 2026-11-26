@@ -1,11 +1,9 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
-import { MenuItem, Popover, Spinner, baseName, shortPath, useResizable } from './ui.jsx';
+import { MenuItem, Popover, Spinner, baseName, shortPath } from './ui.jsx';
 import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, ttftOf, turnThoughts, usageOf } from './transcript.js';
 import { api, openSettings, stopBackgroundJob, useStore } from './store.js';
-import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
-import { SubagentDetail, SubagentList } from './Subagents.jsx';
 import { backgroundElapsed, sortedBackgroundJobs } from './background-jobs.js';
 import { BATCH_WAIT_MS, batchesOf, nextBatches, translatedParagraphs } from './thought-batches.js';
 
@@ -192,37 +190,6 @@ function EnvironmentCard({ session }) {
 
 // Agents that Claude Code or Codex started in this conversation (their own Task / spawn-agent tools). Each has
 // its card in the conversation; here they are listed together, and a row leads to its card.
-function EngineAgents({ transcript }) {
-  const agents = useMemo(() => {
-    const out = [];
-    for (const message of transcript?.messages ?? []) {
-      if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
-      for (const block of message.content) {
-        const tool = transcript.tools?.[block.id];
-        if (block.type !== 'toolCall' || !(block.name === 'Task' || tool?.result?.details?.kind === 'claude-code-agent')) continue;
-        const a = block.arguments ?? {}, details = tool?.result?.details ?? {};
-        const status = !tool || ['running', 'pending'].includes(tool.status) ? 'running' : ['error', 'cancelled', 'timed_out'].includes(tool.status) ? 'failed' : 'completed';
-        const steps = details.stepCount ?? details.steps?.length ?? 0, tokens = details.agentRuns?.[0]?.usage?.totalTokens;
-        out.push({ id: block.id, status, name: a.description?.trim() || String(a.prompt ?? '').split('\n')[0] || 'Delegated task',
-          caption: [a.subagent_type || 'Agent', status === 'running' ? 'Running' : status === 'failed' ? 'Failed' : 'Completed', steps ? `${steps} step${steps === 1 ? '' : 's'}` : null, tokens > 0 ? `${formatTokens(tokens)} tok` : null].filter(Boolean).join(' · ') });
-      }
-    }
-    return out;
-  }, [transcript]);
-  if (!agents.length) return null;
-  const running = agents.filter(agent => agent.status === 'running').length;
-  const show = id => document.querySelector(`[data-tool-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  return <Card title="Subagents" aside={running ? <span className="panel-pill">{running} running</span> : <span>{agents.length} completed</span>}>
-    <div>
-      {agents.slice(-8).reverse().map(agent => <button key={agent.id} type="button" className={`subagent-task-row ${agent.status}`} onClick={() => show(agent.id)}>
-        {agent.status === 'running' ? <Spinner size={13} /> : <Icon name={agent.status === 'failed' ? 'alert' : 'check'} size={14} />}
-        <span className="subagent-task-text"><span className="subagent-task-name">{agent.name}</span><span className="subagent-task-caption">{agent.caption}</span></span>
-        <Icon name="chevronRight" size={14} />
-      </button>)}
-    </div>
-  </Card>;
-}
-
 // Thinking shown in the reader's language: only when translation is on in Settings → Translation, by the model
 // chosen there. A thought is translated in batches of its paragraphs (see thought-batches.js): each paragraph
 // counts once it is finished, and the one still being written once it has stood still for a moment (Antigravity
@@ -351,7 +318,7 @@ function ThinkingCard({ transcript, working }) {
 
 // The panel has little room, and what is worth it differs from person to person: each card can be left out.
 // The choice is kept, for every conversation.
-const PANEL_CARDS = [['environment', 'Environment'], ['context', 'Context'], ['usage', 'Usage'], ['thinking', 'Thinking'], ['jobs', 'Background tasks'], ['agents', 'Agents']];
+const PANEL_CARDS = [['environment', 'Environment'], ['context', 'Context'], ['usage', 'Usage'], ['thinking', 'Thinking'], ['jobs', 'Background tasks']];
 const PANEL_KEY = 'iris.panel.hidden';
 function usePanelCards() {
   const [hidden, setHidden] = useState(() => { try { return new Set(JSON.parse(localStorage.getItem(PANEL_KEY) ?? '[]')); } catch { return new Set(); } });
@@ -378,22 +345,12 @@ export function RightPanel({ session }) {
   const [shows, toggleCard] = usePanelCards();
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
-  const selection = useStore(s => s.subagentSelection[session.id]);
-  const live = useStore(s => s.agents[session.id]);
-  const usesPiAgents = session.engine !== 'claude-code' && !isCliEngine(session.engine);
-  const batches = useMemo(() => usesPiAgents ? visibleSubagentBatches(subagentBatches(transcript, live), session.clearedSubagentIds) : [], [usesPiAgents, transcript, live, session.clearedSubagentIds]);
-  const batch = batches.find(b => b.callId === selection?.callId);
-  const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
-  const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
   const antigravity = session.engine === 'antigravity' || session.engine === 'cursor'; // CLIs whose token counts may be missing
   const context = isCliEngine(session.engine) ? session.cli?.contextUsage : stats?.contextUsage;
   const percent = Number.isFinite(context?.percent) ? context.percent : null;
   const contextLabel = Number.isFinite(context?.tokens)
     ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
     : percent != null ? `${Math.round(percent)}%` : session.status === 'connecting' ? 'Loading…' : 'Not reported';
-  if (task) return <aside className="right-panel subagent-inspector" style={{ width: detailWidth }}>
-    {detailHandle}<SubagentDetail key={`${session.id}:${task.key}`} sessionId={session.id} task={task} />
-  </aside>;
   return (
     <aside className="right-panel">
       <PanelChoice shows={shows} toggle={toggleCard} />
@@ -405,7 +362,6 @@ export function RightPanel({ session }) {
       {shows('usage') && antigravity && !context && !transcript?.messages.some(m => antigravityTurnSpeed(m)) && <div className="panel-note">No usage yet</div>}
       {shows('thinking') && <ThinkingCard transcript={transcript} working={!!session.streaming} />}
       {shows('jobs') && <BackgroundJobs key={session.id} sessionId={session.id} />}
-      {shows('agents') && (usesPiAgents ? <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} /> : <EngineAgents transcript={transcript} />)}
     </aside>
   );
 }

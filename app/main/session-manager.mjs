@@ -144,6 +144,7 @@ export class SessionManager extends EventEmitter {
   #cliCreations = new WeakMap(); // correlate foreground startup with the new-session placeholder
   stopping = new Map();   // do not reattach while a hard stop of this session is pending
   updateRestartFailed = new Set(); // don't silently reattach to a process the update couldn't replace
+  restartAfterTurn = new Set(); // conversations an update reached mid-turn: restarted once the turn is over
   catalogCache = null;
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
@@ -966,6 +967,9 @@ export class SessionManager extends EventEmitter {
     return true;
   }
 
+  isWorking(id) { const runtime = this.runtimes.get(id); return !!(runtime?.streaming || isCompacting(runtime)); }
+  restartWhenIdle(id) { this.restartAfterTurn.add(id); }
+
   // Restart: the conversation's agent process is ended (what it was doing too) and started again from its
   // history, as when it is opened after a restart of the app. For an agent that has stopped answering.
   async restart(id) {
@@ -1201,7 +1205,8 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Moving the pre-warmed conversation was cancelled.');
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode, creationId, cliChoices, cliAccount }) {
+  // noFolder with a folder: a conversation handed off from one under No folder, in that one's folder.
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode, creationId, cliChoices, cliAccount, noFolder: keepNoFolder }) {
     const cli = isCliEngineId(engine);
     creationId = cli && typeof creationId === 'string' && /^pending:\d{1,15}$/.test(creationId) ? creationId : null;
     const claude = engine === CLAUDE_ENGINE;
@@ -1212,8 +1217,8 @@ export class SessionManager extends EventEmitter {
     }
     const env = this.env(environmentId);
     const cliBin = cli ? await this.#cliBinary(env, engine) : null; // verify before creating a folder or record
-    const noFolder = !chosen;
-    const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
+    const noFolder = !chosen || keepNoFolder === true;
+    const cwd = !chosen ? await this.#projectlessDir(env, prompt) : chosen;
     const fields = {
       title: UNTITLED, environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
@@ -1230,7 +1235,7 @@ export class SessionManager extends EventEmitter {
       if (picked.length) fields.cliChoices = Object.fromEntries(picked);
     }
     const spareKey = this.#spareKey(environmentId, chosen, engine, fields.cliAccount);
-    const spare = claude ? null : this.spares.get(spareKey);
+    const spare = claude || (keepNoFolder && chosen) ? null : this.spares.get(spareKey); // (a spare there is one with a folder)
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
@@ -1644,8 +1649,12 @@ export class SessionManager extends EventEmitter {
       this.emit('sessions');
       return;
     }
+    // Pi waiting to try a failed model request again (see setModel).
+    if (event.type === 'auto_retry_start') runtime.retrying = true;
+    if (event.type === 'auto_retry_end' || event.type === 'agent_settled') runtime.retrying = false;
     if (event.type === 'agent_start') { runtime.streaming = true; this.#busyStatus(record, runtime); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.#busyStatus(record, runtime); }
+    if (event.type === 'agent_settled' && this.restartAfterTurn.delete(record.id)) setTimeout(() => this.restart(record.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: `Could not restart this conversation after the update: ${error.message}` })), 0);
     if (event.type === 'compaction_start' || event.type === 'compaction_end') {
       runtime.compacting = event.type === 'compaction_start';
       this.#busyStatus(record, runtime);
@@ -1976,6 +1985,18 @@ export class SessionManager extends EventEmitter {
       }
       throw error;
     }
+    if (runtime.retrying && !isClaude(record)) await this.#retryNow(record, runtime);
+  }
+  // A model chosen while Pi waits to try a failed request again: Pi would use it, but only once its wait is over,
+  // which grows with each attempt (a minute and more), and the conversation looks stuck on the old model. The
+  // wait is stopped and the request made again at once, on the new model.
+  async #retryNow(record, runtime) {
+    const session = runtime.session;
+    await session.request('abort_retry').catch(() => {});
+    for (let i = 0; i < 50 && runtime.streaming && runtime.session === session; i++) await new Promise(r => setTimeout(r, 100));
+    if (runtime.session !== session || runtime.streaming) return; // it went on by itself
+    this.emit('notice', { id: record.id, level: 'info', message: `Trying again now with ${record.model?.id ?? 'the new model'}.` });
+    await session.prompt('/iris-retry-now').catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message }));
   }
 
   async setThinking(id, level) {

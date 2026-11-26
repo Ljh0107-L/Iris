@@ -214,7 +214,7 @@ function restartFixture() {
   const sessions = [record('local-live', local), record('local-idle', local), record('remote-live', ssh), record('remote-claude', ssh, { engine: 'claude-code' }), record('remote-idle', ssh),
     record('archive', ssh, { archived: true }), record('disabled', disabled), record('offline', down)];
   const live = new Set(['local-live', 'remote-live', 'remote-claude', 'archive', 'disabled']);
-  const trace = [], errors = new Map();
+  const trace = [], errors = new Map(), working = new Set(), attached = new Set();
   let online = false;
   const manager = {
     store: { sessions }, environments: () => [local, ssh, down, disabled],
@@ -228,14 +228,19 @@ function restartFixture() {
       if (errors.has(id)) return errors.get(id);
       live.delete(id); return '{"relay":"stopped","found":true}\n';
     },
+    // A live process is attached to (to see whether it is working); otherwise one is started.
     async ensureStarted(id) {
+      if (live.has(id) && !attached.has(id)) { trace.push(['attach', id]); attached.add(id); return { attachInfo: { created: false } }; }
       trace.push(['start', id]);
       assert.equal(live.has(id), false, 'never launch another writer before acknowledging the stop');
       live.add(id);
       return { attachInfo: { created: true } };
     },
+    async close(id) { trace.push(['close', id]); attached.delete(id); },
+    isWorking: id => working.has(id),
+    restartWhenIdle(id) { trace.push(['later', id]); },
   };
-  return { manager, trace, live, errors, setOnline: () => { online = true; } };
+  return { manager, trace, live, errors, working, setOnline: () => { online = true; } };
 }
 
 test('update reopens saved local history and restarts only live SSH sessions; retries only failures', async () => {
@@ -293,4 +298,19 @@ test('quitting after a remote stop keeps that session in the persisted reopen se
   assert.deepEqual(checkpoint.reopen, ['remote-live']);
   const result = await restartUpdatedSessions(manager, checkpoint);
   assert.deepEqual(result.restarted.map(r => r.id), ['remote-live']);
+});
+
+test('a conversation the update finds in the middle of a turn keeps going, and is restarted when the turn ends', async () => {
+  const f = restartFixture();
+  f.working.add('remote-live');
+  const result = await restartUpdatedSessions(f.manager, { version: '0.2.31', reopen: [], done: [] });
+  assert.ok(!f.trace.some(([op, id]) => op === 'stop' && id === 'remote-live'), 'its process is not stopped');
+  assert.ok(f.trace.some(([op, id]) => op === 'later' && id === 'remote-live'));
+  assert.deepEqual(result.deferred.map(r => r.id), ['remote-live']);
+  assert.ok(f.live.has('remote-live'));
+  assert.ok(result.restarted.some(r => r.id === 'remote-claude'), 'an idle one is restarted at once');
+  assert.ok(f.trace.findIndex(([op, id]) => op === 'close' && id === 'remote-claude') < f.trace.findIndex(([op, id]) => op === 'stop' && id === 'remote-claude'));
+  let detail = '';
+  await reviewSessionUpdate(result, async options => { detail = options.detail; return { response: 0 }; });
+  assert.match(detail, /remote-live: restarts when its current turn ends/);
 });

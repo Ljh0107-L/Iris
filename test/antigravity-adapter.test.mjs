@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -62,10 +62,10 @@ function fixture(t, scenario = {}, signedIn = false) {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  function start(sessionFile, overrides = {}) {
+  function start(sessionFile, overrides = {}, extraEnv = {}) {
     const boot = { antigravity: { ...config, sessionFile, ...overrides }, providers: [{ apiKey: 'fixture-private-boot-provider' }] };
     const child = spawn(process.execPath, [adapter], { cwd, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...secretEnv, ...networkEnv, IRIS_BOOT: JSON.stringify(boot) } });
+      env: { ...process.env, ...secretEnv, ...networkEnv, ...extraEnv, IRIS_BOOT: JSON.stringify(boot) } });
     const closed = once(child, 'close');
     const events = [];
     let stderr = '', n = 0;
@@ -203,6 +203,48 @@ test('the task list is one Tasks card kept current, and an agent Antigravity sta
   assert.deepEqual(calls[1].arguments, { description: 'Greeter', prompt: 'Reply with the word hi', subagent_type: 'Agent', model: 'flash_lite' });
   const ended = peer.events.filter(event('tool_execution_end'));
   assert.deepEqual(ended.map(e => [e.toolName, e.isError]), [['TodoWrite', false], ['Task', false]], 'each ends once');
+});
+
+test('an agent Antigravity starts is followed in its files: its steps while it works, then its report, kept with the conversation', { timeout: 15000 }, async t => {
+  const f = fixture(t, {}, true);
+  const home = join(f.cwd ?? '', 'home');
+  const peer = f.start(undefined, {}, { HOME: home });
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: 'agent' });
+  await peer.next(event('agent_settled'));
+  const call = lastAssistant((await readHistory(state.sessionFile)).messages).content.find(block => block.type === 'toolCall' && block.name === 'Task');
+  assert.deepEqual(call.arguments, { description: 'Auditor', prompt: 'Audit src/ for dead code', subagent_type: 'research' });
+  const saved = (await readHistory(state.sessionFile)).messages.filter(m => m.role === 'toolResult' && m.toolCallId === call.id);
+  assert.equal(saved.at(-1).details.agentStatus, 'running', 'the turn ends with the agent still working, and says so');
+  const working = await peer.next(e => e.type === 'tool_execution_update' && e.toolCallId === call.id && e.partialResult?.details?.steps?.length);
+  assert.deepEqual(working.partialResult.details.steps.map(step => [step.name, step.arguments]), [['bash', { command: 'rg -n TODO src', description: 'Find TODOs' }], ['read', { path: '/work/src/a.js' }]]);
+  const done = await peer.next(e => e.type === 'tool_execution_end' && e.toolCallId === call.id && e.result?.details?.agentStatus !== 'running');
+  assert.equal(done.result.details.agentStatus, 'completed');
+  assert.equal(done.result.content[0].text, 'Found two dead files: a.js and b.js.');
+  assert.equal(done.result.details.agentRuns[0].usage.output, 65);
+  const results = (await readHistory(state.sessionFile)).messages.filter(m => m.role === 'toolResult' && m.toolCallId === call.id);
+  assert.equal(results.at(-1).details.agentStatus, 'completed', 'its end is saved with the conversation');
+});
+
+test('an agent still working when Iris stopped is followed again when the conversation opens', { timeout: 15000 }, async t => {
+  const f = fixture(t, { agentMs: 0 }, true); // the agent finishes only once Iris has stopped
+  const home = join(f.cwd, 'home');
+  const first = f.start(undefined, {}, { HOME: home });
+  const state = await first.request('get_state');
+  await first.request('prompt', { message: 'agent' });
+  await first.next(event('agent_settled'));
+  await first.stop();
+  // Meanwhile Antigravity's agent finished: its last steps, and its report to the conversation that started it.
+  const brain = join(home, '.gemini/antigravity-cli/brain'), at = new Date().toISOString();
+  appendFileSync(join(brain, 'child-1/.system_generated/logs/transcript_full.jsonl'), [
+    { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: at, tool_calls: [{ name: 'send_message', args: { Message: 'Found two dead files: a.js and b.js.' } }] },
+    { step_index: 4, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: at, content: 'Reported back.' }].map(line => JSON.stringify(line) + '\n').join(''));
+  const again = f.start(state.sessionFile, {}, { HOME: home });
+  await again.request('get_state');
+  const done = await again.next(e => e.type === 'tool_execution_end' && e.result?.details?.agentStatus === 'completed');
+  assert.equal(done.result.content[0].text, 'Found two dead files: a.js and b.js.');
+  const results = (await readHistory(state.sessionFile)).messages.filter(m => m.role === 'toolResult' && m.toolName === 'Task');
+  assert.deepEqual(results.map(m => m.details.agentStatus), ['running', 'completed']);
 });
 
 test('the CLI’s ordinary tools are a command, a file read or written and a web search, not a name and its input as JSON', { timeout: 12000 }, async t => {

@@ -429,8 +429,19 @@ try {
   assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~?57\.1\s*tok\/s$/, 'Claude Code: 40 output tokens in the 0.7 s from its first token to its last, not the 0.3 s before it');
   assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Output TPS');
   assert.match(await card('Usage').locator('.usage-speed-metric').getAttribute('title'), /wait for the first token \(TTFT\) is not counted/);
-  assert.deepEqual(await card('Subagents').locator('.subagent-task-name').allInnerTexts(), ['Inspect parser module']);
-  assert.match(await card('Subagents').locator('.subagent-task-caption').innerText(), /^Explore · Completed · 2 steps · 480 tok$/);
+  // Its agents are in the title bar, not the panel: a pill, and the list it opens, and one agent from the list.
+  assert.equal(await card('Subagents').count(), 0, 'agents are not a card of the panel');
+  assert.equal(await page.locator('.agents-pill').innerText(), '1 agent');
+  await page.locator('.agents-pill').click();
+  assert.deepEqual(await page.locator('.agents-panel .agents-row-name').allInnerTexts(), ['Inspect parser module']);
+  assert.match(await page.locator('.agents-panel .agents-row-caption').innerText(), /^Explore · Completed · 2 steps · 480 tok$/);
+  await page.locator('.agents-panel .agents-row').click();
+  await page.locator('.agents-panel .agent-detail', { hasText: 'Read example.js and summarize.' }).waitFor();
+  await page.screenshot({ path: join(screenshots, 'agents-claude-code.png') });
+  await page.getByRole('button', { name: 'Back to agents' }).click();
+  await page.locator('.agents-panel .agents-list').waitFor();
+  await page.keyboard.press('Escape');
+  await page.locator('.agents-panel').waitFor({ state: 'detached' });
   await page.screenshot({ path: join(screenshots, 'right-panel-claude-code.png') });
   // Codex: token counts and the turn's speed, the context it reports, and an agent it started.
   const codexSession = { ...session, id: 'codex-ui', title: 'Delegate with Codex', engine: 'codex', model: null, cli: { options: [], contextUsage: { tokens: 52000, contextWindow: 400000, percent: 13 } } };
@@ -446,7 +457,9 @@ try {
   assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Request TPS', 'a turn saved without its first-token time: the request as a whole, and it says so');
   assert.match(await card('Context').locator('.panel-card-aside').innerText(), /52K \/ 400K · 13%/);
   assert.equal(await card('Context').locator('.context-bar > span').evaluate(bar => bar.style.width), '13%');
-  assert.deepEqual(await card('Subagents').locator('.subagent-task-name').allInnerTexts(), ['Check the parser']);
+  await page.locator('.agents-pill').click();
+  assert.deepEqual(await page.locator('.agents-panel .agents-row-name').allInnerTexts(), ['Check the parser']);
+  await page.keyboard.press('Escape');
   assert.equal(await card('Background tasks').count(), 0, 'Codex reports no background tasks');
   await page.screenshot({ path: join(screenshots, 'right-panel-codex.png') });
   // A Codex turn under way: a model request that has ended is counted at once (the turn is saved only when it
@@ -464,13 +477,14 @@ try {
   await page.screenshot({ path: join(screenshots, 'right-panel-usage.png') });
   sessions[0] = codexSession;
   await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
-  // Antigravity: its protocol gives neither token counts nor agents, so the panel shows an estimated speed only.
+  // Antigravity: its protocol gives no token counts, so the panel shows an estimated speed only (its agents are
+  // read from its files: this one started none).
   await page.getByRole('button', { name: 'Summarise with Antigravity' }).click();
   await page.locator('.title-button img.title-engine-logo[alt="Antigravity"]').waitFor();
   await card('Usage').locator('.usage-speed-value').waitFor();
   assert.match(await card('Usage').locator('.usage-speed-value').innerText(), /^~80(\.0)?\s*tok\/s$/);
   assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Estimated turn TPS');
-  assert.equal(await card('Subagents').count() + await card('Background tasks').count(), 0);
+  assert.equal(await page.locator('.agents-pill').count() + await card('Background tasks').count(), 0);
   await page.screenshot({ path: join(screenshots, 'right-panel-antigravity.png') });
   await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
   await page.locator('.title-button img.title-engine-logo[alt="Claude Code"]').waitFor();

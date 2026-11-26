@@ -5,7 +5,7 @@ import {
   Download, Ellipsis, ExternalLink, File, FileCode, FileDiff, FileImage, FilePen, FileText, FoldVertical,
   Folder, FolderOpen, GitBranch, GitFork, Globe, Gauge, KeyRound, Laptop, Layers, ListChecks, ListTree,
   Maximize2, MessageCircleQuestion, MessageSquare, Minimize2, Moon, PanelLeft, PanelRight, Paperclip,
-  Pencil, Plus, RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles,
+  Pencil, Plus, RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, SlidersHorizontal,
   SquareTerminal, StickyNote, Sun, Target, Terminal, Timer, Trash2, TriangleAlert, Unplug, Wifi, WrapText, Wrench,
   X, Zap, Infinity as InfinityIcon,
  Eye } from 'lucide-react';
@@ -20,7 +20,7 @@ const LUCIDE = {
   plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder, folderOpen: FolderOpen,
   chevronDown: ChevronDown, chevronRight: ChevronRight, chevronUp: ChevronUp, caretDown: ChevronDown, caretRight: ChevronRight,
   check: Check, eye: Eye, arrowUp: ArrowUp, arrowUpRight: ArrowUpRight, panel: PanelRight,
-  sidebar: PanelLeft, sidebarToggle: PanelLeft, sparkle: Sparkles, shield: ShieldCheck, shieldAlert: ShieldAlert,
+  sidebar: PanelLeft, sidebarToggle: PanelLeft, prompt: Terminal, shield: ShieldCheck, shieldAlert: ShieldAlert,
   file: StickyNote, fileEdit: FilePen, x: X, alert: TriangleAlert, brain: Brain, refresh: RefreshCw, server: Server,
   key: KeyRound, trash: Trash2, edit: Pencil, globe: Globe, more: Ellipsis, archive: Archive, back: ChevronLeft,
   forward: ChevronRight, branch: GitBranch, enter: CornerDownLeft, compact: FoldVertical, copy: Copy, list: ListChecks,

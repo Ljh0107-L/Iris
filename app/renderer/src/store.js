@@ -58,6 +58,7 @@ let state = {
   notices: [],
   rightPanel: (() => { try { return localStorage.getItem('iris.rightPanel') === 'true'; } catch { return false; } })(),
   subagentSelection: {},                    // session id -> { callId, taskIndex }; changes only on user navigation
+  agentsOpen: null,                         // the conversation whose Agents (title bar) are open
   sidebar: true,
   sidebarAuto: false,                      // the window is too narrow for the sidebar beside the conversation
   sidebarPeek: false,                      // ...but it was asked for: shown over the conversation until used
@@ -561,7 +562,7 @@ export const setView = patch => set(patch);
 export function openSubagent(id, callId, taskIndex = null) {
   const result = transcriptOf(id).messages.find(m => m.role === 'toolResult' && m.toolCallId === callId && m.__history?.truncated);
   if (result) loadHistoryEntry(id, result.__history.ref).catch(error => notify(error.message, 'error'));
-  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false, gitReviewOpen: false }));
+  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, agentsOpen: id }));
 }
 // The inspector's controls for an agent running in this session's Pi.
 export function stopAgent(id, agentId) {
@@ -583,6 +584,9 @@ export function messageAgent(id, agentId, text) {
 export function closeSubagent(id) {
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: null } }));
 }
+// The title bar's Agents: the list, or (with a selection) one agent.
+export const openAgents = id => set({ agentsOpen: id });
+export const closeAgents = () => set({ agentsOpen: null });
 
 export function clearSubagentRecords(id, onlyIds) {
   const current = state.sessions.find(session => session.id === id);
@@ -812,7 +816,7 @@ export async function startSession(text, attachments = []) {
       if (state.draft.environmentId === draft.environmentId && state.draft.engine === draft.engine) draft = state.draft;
       checkModel(draft);
     }
-    const target = { environmentId: draft.environmentId, cwd: draft.cwd, prompt: text };
+    const target = { environmentId: draft.environmentId, cwd: draft.cwd, prompt: text, ...(draft.noFolderCwd && draft.cwd === draft.noFolderCwd ? { noFolder: true } : {}) };
     const session = await api('createSession', cli
       ? { ...target, engine: draft.engine, creationId: pendingId, ...(Object.keys(cliDraftChoices(draft)).length ? { cliChoices: cliDraftChoices(draft) } : {}), ...(draftCliAccount(draft) ? { cliAccount: draftCliAccount(draft) } : {}) }
       : claude
@@ -1005,10 +1009,11 @@ export async function handOff(sessionId, engine, mode) {
   const session = state.sessions.find(s => s.id === sessionId);
   if (!session) return;
   const t = transcriptOf(sessionId);
-  const text = handoffText({ engine: session.engine ?? 'iris', messages: t.messages ?? [], tools: t.tools ?? {}, cwd: session.cwd, mode });
+  const text = handoffText({ engine: session.engine ?? 'iris', messages: t.messages ?? [], tools: t.tools ?? {}, cwd: session.cwd, file: session.piSessionFile ?? '', mode });
   set({ handoff: null });
   newSession();
-  setDraft({ environmentId: session.environmentId, cwd: session.cwd, engine });
+  // The same folder; a conversation under No folder hands off to one under No folder, in the same folder.
+  setDraft({ environmentId: session.environmentId, cwd: session.cwd, engine, noFolderCwd: session.noFolder ? session.cwd : null });
   setComposerDraft('new', 'text', () => text);
 }
 export function newSession() { navigate({ view: 'new', activeId: null }); set({ view: 'new', activeId: null, paletteOpen: false, sidebarPeek: false }); }

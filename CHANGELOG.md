@@ -2,6 +2,31 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.1
+
+**New**
+
+- **Agents in the title bar.** Beside a conversation's title, a pill says how many agents it started and how many are working ("2 agents running"). It opens the list, and from it one agent: what it was asked, each step it took (files open with a click), and what it reported. Every agent's agents are there: Iris's own (as before, with Stop and Message), and those of Claude Code, Codex, Cursor and Antigravity. The right panel no longer has an Agents card.
+- **Antigravity's agents show what they do.** Antigravity starts an agent and gets on with its turn; the agent works on in a conversation of its own. Iris now follows it in Antigravity's files: its steps while it works, its report when it sends one, its tokens, and whether it finished or was stopped, including after the turn that started it has ended and after Iris restarts. (Before, every one read "Completed" at once and could not be opened.)
+- **Switching models while a request is being retried takes effect at once.** Iris's own agent waits longer between each try of a failed request (a minute and more); a model picked during the wait was used only once the wait was over, so the conversation looked stuck on the old model. Now the wait stops and the request is made again right away on the new model.
+
+**Changed**
+
+- **Visuals sit in the conversation like a paragraph:** no frame or heading, as tall as the page itself (no more empty space under it, or a page cut off), on the conversation's own background and in its light or dark colours. A faint caption under it holds its title and Save, Start again and Fill the window. Filling the window now covers the whole window, sidebar and message box included, and Esc comes back. Pages are no longer put in quirks mode (which centred some in empty space).
+- **Hand off and Review open where the conversation was**: the same folder, and under No folder when it was there. The first message no longer pastes a summary: it tells the agent where the earlier conversation is saved, for it to read.
+- **The Hand off dialog** shows who hands to whom, the two kinds of hand-off as cards, and the agents as tiles.
+- Iris's own mark (>_) replaces the sparkle on visuals and in Settings.
+
+**Fixed**
+
+- **An update no longer cuts off a conversation in the middle of its turn.** After an update Iris restarts running conversations so they use the new version; one that was working (on an SSH host, say) was stopped mid-turn and ended as Interrupted. Now it keeps going and is restarted once its turn is over. **Restart agent** on a conversation that is working asks first.
+
+**For developers**
+
+- `npm run test:ui` also drives visuals in the real app (`test/visual-ui.mjs`): page height, colours, a 100vh page, filling the window.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.0
 
 **New**

@@ -1,7 +1,7 @@
 // An offline ACP server for the Antigravity adapter tests. The workspace controls the
 // scenario and stands in for the CLI's own credential and session cache.
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -162,6 +162,30 @@ lines.on('line', line => {
         tool('a-1', 'Run invoke_subagent', { Model: 'flash_lite', Prompt: 'Reply with the word hi', Role: 'Greeter', TypeName: 'self' });
         tool('s-2', 'Run update_steps', { steps: [{ status: 'done', title: 'Start sub-agent' }, { status: 'done', title: 'Report' }] });
         chunk('It said hi.'); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
+      // An agent, as the real CLI runs one: invoke_subagent returns at once; the agent is a conversation of its own
+      // in the data directory (~/.gemini/<dir>/brain/<id>), started by a message carrying the brief, and it sends
+      // its report back to the parent as a message. Its steps are written as it works.
+      if (text === 'agent') {
+        const brain = join(process.env.HOME, '.gemini', dataDir, 'brain'), child = join(brain, 'child-1', '.system_generated'), parent = join(brain, SESSION, '.system_generated'); // (the session id has a slash: a folder inside a folder)
+        const now = () => new Date().toISOString();
+        mkdirSync(join(child, 'messages'), { recursive: true }); mkdirSync(join(child, 'logs'), { recursive: true }); mkdirSync(join(parent, 'messages'), { recursive: true });
+        const sender = SESSION;
+        writeFileSync(join(child, 'messages', 'm-1.json'), JSON.stringify({ id: 'm-1', recipient: 'child-1', sender, timestamp: now(), content: 'Audit src/ for dead code' }));
+        const step = entry => appendFileSync(join(child, 'logs', 'transcript_full.jsonl'), JSON.stringify({ created_at: now(), status: 'DONE', ...entry }) + '\n');
+        step({ step_index: 0, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', content: 'brief' });
+        step({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-test', input_tokens: 100, output_tokens: 20, tool_calls: [{ name: 'run_command', args: { CommandLine: 'rg -n TODO src', toolSummary: 'Find TODOs' } }, { name: 'view_file', args: { AbsolutePath: '/work/src/a.js' } }] });
+        step({ step_index: 2, source: 'MODEL', type: 'GENERIC', content: 'Command output' });
+        update('tool_call', { toolCallId: 'a-1', kind: 'other', title: 'Run invoke_subagent', status: 'in_progress', rawInput: { Prompt: 'Audit src/ for dead code', Role: 'Auditor', TypeName: 'research' } });
+        update('tool_call_update', { toolCallId: 'a-1', kind: 'other', title: 'Run invoke_subagent', status: 'completed', rawInput: { Prompt: 'Audit src/ for dead code', Role: 'Auditor', TypeName: 'research' } });
+        chunk('The auditor is on it.'); reply(r.id, { stopReason: 'end_turn' });
+        if (scenario().agentMs !== 0) setTimeout(() => {
+          step({ step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-test', input_tokens: 200, output_tokens: 40, tool_calls: [{ name: 'send_message', args: { Message: 'Found two dead files: a.js and b.js.' } }] });
+          step({ step_index: 4, source: 'MODEL', type: 'GENERIC', content: 'Message sent.' });
+          step({ step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-test', input_tokens: 10, output_tokens: 5, content: 'Reported back.' });
+          writeFileSync(join(parent, 'messages', 'r-1.json'), JSON.stringify({ id: 'r-1', recipient: sender, sender: 'child-1', timestamp: now(), content: 'Found two dead files: a.js and b.js.', renderDetails: { messageTitle: 'Message from Auditor (research)' } }));
+        }, scenario().agentMs ?? 1200);
+        break;
       }
       // A turn that uses the CLI's ordinary tools, reported as the real CLI reports them (kind, title, rawInput).
       if (text === 'tools') {

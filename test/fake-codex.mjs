@@ -57,6 +57,14 @@ function handle(m) {
       send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
       const text = m.params.input.find(i => i.type === 'text').text;
       slowStop = text.includes('slow stop');
+      // A visual (Iris's MCP tool): the page is the file FAKE_CODEX_VISUAL_FILE (read each time), FAKE_CODEX_VISUAL, or a small one of its own.
+      if (text.includes('show a visual')) {
+        const item = { type: 'mcpToolCall', id: 'vis-' + turn, server: 'iris', tool: 'show_visual', arguments: { title: 'Polygon and circle', html: (process.env.FAKE_CODEX_VISUAL_FILE ? fs.readFileSync(process.env.FAKE_CODEX_VISUAL_FILE, 'utf8') : process.env.FAKE_CODEX_VISUAL) || '<div style="padding:24px;font:16px sans-serif;color:#ddd">A small page<div style="height:180px;background:#2a5"></div></div>' } };
+        send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { ...item, status: 'inProgress' } } });
+        send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { ...item, status: 'completed', result: { content: [{ type: 'text', text: 'Shown.' }] } } } });
+        send({ method: 'item/completed', params: { threadId: 'thread-1', turnId: active, item: { type: 'agentMessage', id: 'vis-msg-' + turn, text: 'Here it is.' } } });
+        return finish('completed');
+      }
       if (text.includes('wait')) return; // stays active until interrupted
       // A command that takes a while: the model's own time in the turn is the turn's length less this.
       // (As in the real CLI: the command starts while the request that asked for it is still being answered,

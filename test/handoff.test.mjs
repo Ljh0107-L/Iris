@@ -31,3 +31,11 @@ test('a review asks for findings, not edits', () => {
 test('an empty conversation still hands over cleanly', () => {
   assert.equal(handoffText({ engine: 'cursor' }), 'I am moving this work over from Cursor. Pick it up where it stopped.\n\nCheck the current state of the files first, then continue.');
 });
+
+test('with the earlier conversation saved, the other agent is told where to read it, not given a summary', () => {
+  const messages = [{ role: 'user', content: 'Add a cache to the parser' }, { role: 'assistant', content: [{ type: 'text', text: 'Added an LRU cache.' }] }];
+  const text = handoffText({ engine: 'antigravity', messages, cwd: '/home/me/app', file: '/home/me/.iris/agent/sessions/antigravity/abc.jsonl' });
+  assert.match(text, /saved in \/home\/me\/\.iris\/agent\/sessions\/antigravity\/abc\.jsonl/);
+  assert.match(text, /Pick it up where it stopped in \/home\/me\/app/);
+  assert.doesNotMatch(text, /Added an LRU cache|What was asked/);
+});
