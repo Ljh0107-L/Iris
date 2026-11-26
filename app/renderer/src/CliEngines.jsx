@@ -547,7 +547,9 @@ export function CursorSettings() {
   const [query, setQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  useEffect(() => { setError(null); void refreshCliReadiness(machine, 'cursor'); void loadCliOptions(machine, 'cursor'); }, [machine]);
+  // The check may read the models again (a host's, once after they start going through this Mac): they are
+  // loaded again when it is done.
+  useEffect(() => { setError(null); void loadCliOptions(machine, 'cursor'); void Promise.resolve(refreshCliReadiness(machine, 'cursor')).finally(() => loadCliOptions(machine, 'cursor')); }, [machine]);
   const models = (remembered ?? []).find(o => o.category === 'model')?.options ?? [];
   const on = value => !Array.isArray(shown) || shown.includes(value);
   const count = models.filter(choice => on(choice.value)).length;

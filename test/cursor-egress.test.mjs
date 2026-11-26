@@ -118,3 +118,34 @@ test('Settings checks Cursor on a host through the Mac: the port goes with the c
   assert.doesNotMatch(runs[1].script, /IRIS_CURSOR_EGRESS/);
   assert.equal(runs[1].options.forward, undefined);
 });
+
+test('a host’s Cursor models read before they went through the Mac are read again, through it, at the next check of any kind', { timeout: 20000 }, async t => {
+  const { mkdtempSync, realpathSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join, resolve } = await import('node:path');
+  const { SessionManager } = await import('../app/main/session-manager.mjs');
+  const { Store } = await import('../app/main/store.mjs');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'iris-cursor-route-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const store = new Store(join(dir, 'data'), null, { insecureTestStorage: true });
+  store.settings.cliOptions = { 'cursor:ssh:lab': [{ id: 'model', category: 'model', currentValue: 'kimi', options: [{ value: 'kimi', name: 'Kimi' }] }] }; // read before
+  const checks = [];
+  const runRemote = async (env, script, options = {}) => {
+    if (script.includes('IRIS_AGY=')) return 'IRIS_AGY=/h/bin/cursor-agent\n';
+    if (!script.includes('--account-check')) return '';
+    checks.push({ menus: script.includes('IRIS_CLI_MENUS_DIR='), routed: /IRIS_CURSOR_EGRESS=127\.0\.0\.1:\d+/.test(script) && !!options.forward });
+    const models = script.includes('IRIS_CLI_MENUS_DIR=') ? { options: [{ id: 'model', category: 'model', currentValue: 'claude', options: [{ value: 'claude', name: 'Claude' }, { value: 'kimi', name: 'Kimi' }] }] } : {};
+    return JSON.stringify({ cliAccountStatus: { signedIn: true, canSignIn: true, ...models } }) + '\n';
+  };
+  const root = resolve('.');
+  const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'This computer' }, { id: 'ssh:lab', kind: 'ssh', enabled: true, added: true, label: 'Lab', host: 'lab' }],
+    piVersion: '0', bridgePath: join(root, 'agent/iris-bridge.js'), relayPath: join(root, 'agent/iris-relay.mjs'), cacheDir: join(dir, 'cache'),
+    local: { node: process.execPath, piCli: join(dir, 'no-pi.js'), agentDir: join(dir, 'agent'), runDir: join(dir, 'run'), uploadDir: join(dir, 'uploads'), extraEnv: {} },
+    remoteSetup: async () => ({ root: join(dir, 'host'), node: '/usr/bin/node' }), runRemote });
+  t.after(() => manager.shutdown({ waitMs: 200 }).catch(() => {}));
+  assert.equal(await manager.cliReadiness('ssh:lab', 'cursor'), 'ready');
+  assert.deepEqual(checks, [{ menus: true, routed: true }], 'the composer’s check reads them again, through the Mac');
+  assert.deepEqual(store.settings.cliOptions['cursor:ssh:lab'][0].options.map(o => o.value), ['claude', 'kimi']);
+  assert.equal(await manager.cliReadiness('ssh:lab', 'cursor'), 'ready');
+  assert.deepEqual(checks.at(-1), { menus: false, routed: true }, 'once read through it, a check is a plain check again');
+});

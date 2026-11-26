@@ -2,6 +2,14 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.15
+
+**Fixed**
+
+- **A host's Cursor models are read again through the Mac without being asked.** After 0.1.13, Settings → Cursor and the model menu went on showing the models a host was offered before (a few, where the server's region offers few) until Subscriptions was opened or the list refreshed. Any check of Cursor on that host now reads them again, through the Mac, once; Settings → Cursor shows them when it is done.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.14
 
 **Changed**

@@ -694,6 +694,9 @@ export class SessionManager extends EventEmitter {
   // menus: also ask what a new conversation can choose from (askCliOptions). A plain check never does.
   async #readCliAccount(env, login = false, engine = ANTIGRAVITY_ENGINE, logout = false, account = null, menus = false) {
     if (login && env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
+    // Cursor's models on a host, read before its requests went out through this Mac, are read again at the next
+    // check of any kind (Settings → Cursor, the composer, Subscriptions) until a read through the Mac succeeds.
+    if (engine === CURSOR_ENGINE && env.kind === 'ssh' && !login && !logout && !this.store.settings.cliOptionsRouted?.[`${engine}:${env.id}`]) menus = true;
     const key = `${engine}:${env.id}:${this.#cliAccount(engine, account) ?? ''}`;
     const active = this.cliAccountChecks.get(key);
     if (active) {
