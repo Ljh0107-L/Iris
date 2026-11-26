@@ -60,7 +60,7 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
   return <>{listing.entries.filter(entry => !HIDDEN_ENTRIES.has(entry.name)).map(entry => {
     const path = joinRel(rel, entry.name);
     if (entry.dir) {
-      const open = expanded[entry.name] ?? !!active?.startsWith(path + '/'); // reveal the open file
+      const open = expanded[entry.name] ?? false; // folders open when asked, not to reveal the open file
       return (
         <div key={path}>
           <button className="fp-tree-row" style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setExpanded(x => ({ ...x, [entry.name]: !open }))}>
@@ -319,7 +319,10 @@ function ChangesView({ sessionId, changes, cwd }) {
 export function FilePane({ session }) {
   const state = useStore(s => s.files[session.id]) ?? { tabs: [], active: null };
   const maximized = useStore(s => s.filePaneMax);
-  const [tree, setTree] = useState(true);
+  // Beside an open file the folder's tree shows only when asked for (the choice is kept); with no file open it
+  // is what the pane shows.
+  const [tree, setTreeState] = useState(() => { try { return localStorage.getItem('iris.fileTree') === 'shown'; } catch { return false; } });
+  const setTree = next => setTreeState(now => { const value = typeof next === 'function' ? next(now) : next; try { localStorage.setItem('iris.fileTree', value ? 'shown' : 'hidden'); } catch { /* for this window */ } return value; });
   // The pane and its file tree are both draggable (double-click a handle to reset).
   const [paneWidth, paneHandle] = useResizable('file-pane', 760, 420, 1400, 'left');
   const [treeWidth, treeHandle] = useResizable('file-tree', 280, 180, 520, 'left');
@@ -350,7 +353,7 @@ export function FilePane({ session }) {
           {!state.tabs.length && !state.changes && <span className="fp-title">Files</span>}
         </div>
         <div className="fp-actions">
-          <button className={`tool-button ${tree ? 'on' : ''}`} onClick={() => setTree(t => !t)} title={tree ? 'Hide file tree' : 'Show file tree'} aria-label="Toggle file tree"><Icon name="listTree" size={16} /></button>
+          {(state.active || state.changes) && <button className={`tool-button ${tree ? 'on' : ''}`} onClick={() => setTree(t => !t)} title={tree ? 'Hide file tree' : 'Show file tree'} aria-label="Toggle file tree"><Icon name="listTree" size={16} /></button>}
           <button ref={menuRef} className="tool-button" onClick={() => setMenu(m => !m)} title="More" aria-label="More file actions"><Icon name="more" size={16} /></button>
           <Popover anchor={menuRef} open={menu} onClose={() => setMenu(false)} width={220} placement="bottom-end">
             <MenuItem icon="refresh" label="Refresh" onClick={() => { setMenu(false); setVersion(v => v + 1); }} />
@@ -369,7 +372,7 @@ export function FilePane({ session }) {
               reveal={state.reveal?.path === state.active ? state.reveal : null} local={local} />
           : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} cwd={session.cwd} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
-        {tree && (state.active || state.changes
+        {(tree || !(state.active || state.changes)) && (state.active || state.changes
           ? <div className="fp-tree-wrap" style={{ width: treeWidth }}>{treeHandle}<div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div></div>
           : <div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div>)}
       </div>

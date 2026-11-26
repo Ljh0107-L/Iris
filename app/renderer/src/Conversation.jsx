@@ -307,9 +307,12 @@ function WorkNote({ item }) {
 // should not push the rest of the conversation a screen and a half down.
 const STEPS_SHOWN = 8;
 function WorkSteps({ items, calls, tools }) {
-  const rows = items.flatMap(item => item.kind === 'tools'
-    ? item.calls.map(call => ({ key: call.id, render: () => <ToolCall key={call.id} call={call} tool={tools[call.id]} bare={items.length === 1 && calls.length === 1} /> }))
+  const steps = items.flatMap(item => item.kind === 'tools'
+    ? item.calls.map(call => ({ key: call.id, running: tools[call.id]?.status === 'running', render: () => <ToolCall key={call.id} call={call} tool={tools[call.id]} bare={items.length === 1 && calls.length === 1} /> }))
     : [{ key: item.key, render: () => <WorkNote key={item.key} item={item} /> }]);
+  // What is still running is at the end, where the latest step is read: a long command begun earlier would
+  // otherwise sit at the top, above steps that have long finished, or among the hidden earlier ones.
+  const rows = [...steps.filter(row => !row.running), ...steps.filter(row => row.running)];
   const [all, setAll] = useDisclosure(`steps:${rows[0]?.key}`);
   // A step that is open (opened by hand earlier, or by Find in conversation to show a match) is never among the
   // hidden ones: then the whole run shows.
@@ -354,6 +357,12 @@ function WorkGroup({ items, tools, live }) {
   const summary = (only && !only.mono && !only.raw ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
+  // While a step runs, the line names it ("Running make check"): a long command otherwise reads as the agent
+  // having stopped. The step most recently begun of those still running.
+  const runningCall = running && !thinkingNow ? calls.findLast(c => tools[c.id]?.status === 'running') : null;
+  const now = runningCall ? describeCall(runningCall) : null;
+  const nowText = now ? (now.verb ? [now.verb, now.subject].filter(Boolean).join(' ') : `Running ${now.subject}`) : null;
+  const othersRunning = runningCall ? calls.filter(c => c !== runningCall && tools[c.id]?.status === 'running').length : 0;
   // When the step now under way began (the earliest of those still running).
   const started = Math.min(...calls.filter(c => tools[c.id]?.status === 'running' && tools[c.id].startedAt).map(c => tools[c.id].startedAt), Infinity);
   const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('iris:open-file', { detail: path }));
@@ -365,6 +374,7 @@ function WorkGroup({ items, tools, live }) {
         {running && <Running thinking={thinkingNow} />}
         <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
+            : nowText ? <>{nowText}{othersRunning > 0 && <span className="group-also"> · {othersRunning} more running</span>}</>
             : onlyFile && only?.verb ? <>
                 <span>{only.verb} </span>
                 <span className="file-ref-inline" data-kind={fileBadgeKind(onlyFile)} onContextMenu={e => onFileContextMenu?.(e, onlyFile)}>{only.subject}</span>

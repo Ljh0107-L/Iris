@@ -11,7 +11,7 @@ const note = (method, params) => { fs.appendFileSync(log, JSON.stringify({ metho
 const goalFile = log + '.goal';
 const keep = () => { if (goal) fs.writeFileSync(goalFile, JSON.stringify(goal)); else fs.rmSync(goalFile, { force: true }); };
 let goal = null; try { goal = JSON.parse(fs.readFileSync(goalFile, 'utf8')); } catch { /* none yet */ }
-let cwd = '/w', turn = 0, active = null, total = { totalTokens: 1000, inputTokens: 900, cachedInputTokens: 500, cacheWriteInputTokens: 0, outputTokens: 100, reasoningOutputTokens: 0 };
+let slowStop = false, cwd = '/w', turn = 0, active = null, total = { totalTokens: 1000, inputTokens: 900, cachedInputTokens: 500, cacheWriteInputTokens: 0, outputTokens: 100, reasoningOutputTokens: 0 };
 // Codex counts tokens when a model request ends: once per request of a turn.
 const count = t => { const last = { totalTokens: 60, inputTokens: 50, cachedInputTokens: 20, cacheWriteInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 4 };
   total = Object.fromEntries(Object.entries(total).map(([k, v]) => [k, v + last[k]]));
@@ -56,6 +56,7 @@ function handle(m) {
       active = 'turn-' + (++turn); reply({ turn: { id: active } });
       send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
       const text = m.params.input.find(i => i.type === 'text').text;
+      slowStop = text.includes('slow stop');
       if (text.includes('wait')) return; // stays active until interrupted
       // A command that takes a while: the model's own time in the turn is the turn's length less this.
       // (As in the real CLI: the command starts while the request that asked for it is still being answered,
@@ -91,6 +92,7 @@ function handle(m) {
         main('turn/plan/updated', { explanation: null, plan: [{ step: 'Check the parser', status: 'inProgress' }, { step: 'Report', status: 'pending' }] });
         activity('act-1', 'started');
         sub('turn/started', { turn: { id: 'child-turn' } });
+        sub('item/started', { item: { type: 'reasoning', id: 'child-reasoning', summary: [], content: [] } }); // (no step of its own: the adapter once died on it)
         sub('item/completed', { item: { type: 'userMessage', id: 'u-1', content: [{ type: 'text', text: 'Check the parser\\nRead src/parser.js and list the edge cases.' }] } });
         sub('item/started', { item: { type: 'commandExecution', id: 'cc-1', command: "/bin/zsh -lc 'cat src/parser.js'", commandActions: [{ type: 'read', command: 'cat src/parser.js', name: 'parser.js', path: cwd + '/src/parser.js' }], status: 'inProgress' } });
         sub('item/completed', { item: { type: 'agentMessage', id: 'cm-1', text: 'Three edge cases: empty input, nested quotes, trailing comma.' } });
@@ -142,7 +144,8 @@ function handle(m) {
     }
     case 'thread/revert': return reply({ thread: { id: m.params.threadId }, turnsBackwardsCursor: null, itemsBackwardsCursor: null });
     case 'turn/steer': return m.params.expectedTurnId === active ? reply({}) : send({ id: m.id, error: { code: -32000, message: 'no active turn' } });
-    case 'turn/interrupt': reply({}); return finish('interrupted');
+    // A turn whose commands take a while to stop ('slow stop'): Codex confirms the stop seconds later.
+    case 'turn/interrupt': reply({}); return slowStop ? setTimeout(() => finish('interrupted'), 1500) : finish('interrupted');
     case 'thread/compact/start': reply({}); send({ method: 'thread/compacted', params: { threadId: 'thread-1', turnId: 'compact-1' } }); return send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'compact-1', status: 'completed', error: null } } });
     default: return send({ id: m.id, error: { code: -32601, message: 'unknown ' + m.method } });
   }

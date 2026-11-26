@@ -162,6 +162,18 @@ try {
   for (let i = 0; i < 100 && ipcCalls.filter(c => c.method === 'historyPage').length === loads; i++) await page.waitForTimeout(20);
   await page.waitForTimeout(200);
   assert.deepEqual(await spinning(), [false, true], 'the finished step stays finished after the reload');
+  assert.match(await page.locator('.tool-group').last().locator('.group-summary').innerText(), /^Running make/, 'a step under way is named: a long command does not read as the agent having stopped');
+  // A command still running that began before others finished is listed after them, where the latest step is.
+  await page.evaluate(({ id }) => {
+    const send = event => window.fixtureEvent({ channel: 'event', payload: { id, event } });
+    send({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 3, id: 'quick-1', toolName: 'bash' } });
+    send({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 3, toolCall: { type: 'toolCall', id: 'quick-1', name: 'bash', arguments: { command: 'tail -5 build.log' } } } });
+    send({ type: 'tool_execution_start', toolCallId: 'quick-1', toolName: 'bash', args: { command: 'tail -5 build.log' } });
+    send({ type: 'tool_execution_end', toolCallId: 'quick-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }] }, isError: false });
+  }, { id: session.id });
+  await page.locator('.tool-group').last().locator('.tool-group-head').click();
+  const order = await page.locator('.tool-group').last().locator('.work-body .step-text').allInnerTexts();
+  assert.deepEqual(order.map(t => t.trim()), ['tail -5 build.log', 'make'], 'finished first, running last');
   await page.evaluate(({ id }) => {
     const send = event => window.fixtureEvent({ channel: 'event', payload: { id, event } });
     send({ type: 'tool_execution_end', toolCallId: 'busy-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }] }, isError: false });

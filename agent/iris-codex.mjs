@@ -57,14 +57,33 @@ const within = async (promise, ms, fallback) => {
   finally { clearTimeout(timer); }
 };
 // Codex runs every command through the login shell (`/bin/zsh -lc 'rg -n "x" src'`); show what was run.
+// One shell word as the shell reads it: Codex writes the script of `bash -lc` as one word made of quoted parts
+// side by side ('…'"…'…"'…'), switching quotes where the script has them. Null when it is not a single word.
+function shellWord(s) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "'") { const end = s.indexOf("'", i + 1); if (end < 0) return null; out += s.slice(i + 1, end); i = end + 1; }
+    else if (c === '"') {
+      let closed = false;
+      for (i++; i < s.length;) {
+        if (s[i] === '\\' && i + 1 < s.length && '"\\$`'.includes(s[i + 1])) { out += s[i + 1]; i += 2; }
+        else if (s[i] === '\\' && s[i + 1] === '\n') i += 2; // a line continued
+        else if (s[i] === '"') { closed = true; i++; break; }
+        else out += s[i++];
+      }
+      if (!closed) return null;
+    } else if (/\s/.test(c)) return null;
+    else if (c === '\\') { if (s[i + 1] !== '\n') out += s[i + 1] ?? ''; i += 2; }
+    else out += s[i++];
+  }
+  return out;
+}
 export function shellCommand(command) {
   const whole = String(command ?? '').trim();
   const arg = /^(?:\S*\/)?(?:ba|z|k|da|fi)?sh\s+(?:-l\s+)?-l?c\s+([\s\S]+)$/.exec(whole)?.[1].trim();
   if (!arg) return whole;
-  // POSIX quoting: a quote inside single quotes is written '\'' (or '"'"').
-  if (arg.length >= 2 && arg.startsWith("'") && arg.endsWith("'")) return arg.slice(1, -1).replace(/'\\''/g, "'").replace(/'"'"'/g, "'");
-  if (arg.length >= 2 && arg.startsWith('"') && arg.endsWith('"')) return arg.slice(1, -1).replace(/\\(["\\$`])/g, '$1');
-  return arg;
+  return shellWord(arg) ?? arg;
 }
 // A unified diff's hunks as before/after text pairs: the shape of Pi's edit tool, so a Codex patch shows
 // the same diff and +/− counts as Pi's own edits.
@@ -417,8 +436,10 @@ export class CodexAdapter {
     if (this.peer && !this.peer.closed) return this.peer;
     if (!text(this.config.bin)) throw new Error('The configured Codex CLI could not be started.');
     const peer = await connect({ bin: this.config.bin, cwd: this.config.cwd, env: this.env, version: this.config.clientVersion, home: this.config.home, handlers: {
-      onNotification: (from, method, params) => this.#notification(from, method, params),
-      onRequest: (from, id, method, params) => this.#request(from, id, method, params),
+      // One event this adapter cannot handle must not take the whole conversation down with it (the turn
+      // under way would be lost): it is noted, and the rest go on.
+      onNotification: (from, method, params) => { try { this.#notification(from, method, params); } catch (error) { process.stderr.write(`iris-codex: ${method}: ${error?.stack ?? error}\n`); } },
+      onRequest: (from, id, method, params) => { try { this.#request(from, id, method, params); } catch (error) { process.stderr.write(`iris-codex: ${method}: ${error?.stack ?? error}\n`); } },
       onClose: (from, reason) => this.#disconnected(from, reason),
     } });
     this.peer = peer;
@@ -481,6 +502,7 @@ export class CodexAdapter {
 
   async #prompt(message, images) {
     this.#dropLater(); // (what is sent answers Codex's open question)
+    await this.#settled();
     await this.#ensureReady();
     if (this.authRequired) throw new Error('Sign in to Codex to continue.');
     const input = [...(message ? [{ type: 'text', text: message, text_elements: [] }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', url: `data:${mimeType};base64,${data}` }))];
@@ -589,6 +611,7 @@ export class CodexAdapter {
   // ---- Editing an earlier message: the Codex thread is taken back to before the turn that message began, and
   // so is this conversation. What came after stays in the transcript file, on a branch nothing follows.
   async #rewind({ ordinal, originalText }) {
+    await this.#settled();
     await this.#ensureReady();
     if (this.authRequired) throw new Error('Sign in to Codex to continue.');
     if (this.turn) throw new Error('Wait for Codex to finish, then edit the message.');
@@ -618,6 +641,7 @@ export class CodexAdapter {
 
   // Codex summarizes the thread itself; the conversation shows where that happened.
   async #compact() {
+    await this.#settled();
     await this.#ensureReady();
     if (this.authRequired) throw new Error('Sign in to Codex to continue.');
     if (this.turn) throw new Error('Wait for Codex to finish, then compact.');
@@ -707,9 +731,13 @@ export class CodexAdapter {
       return;
     }
     if (method === 'item/completed' && item.type === 'agentMessage' && text(item.text)) { agent.text = item.text; agent.steps.push({ type: 'text', text: clip(item.text, 2000) }); }
-    else if (method === 'item/started') for (const { diff, ...shape } of this.#toolsOf(item)) agent.steps.push({ type: 'tool', id: `${item.id}:${agent.steps.length}`, name: shape.name, arguments: shape.arguments });
-    else return;
+    else if (method === 'item/started') {
+      const shapes = this.#toolsOf(item);
+      if (!shapes.length) return; // (an item that is no step: its reasoning, say)
+      for (const { diff, ...shape } of shapes) agent.steps.push({ type: 'tool', id: `${item.id}:${agent.steps.length}`, name: shape.name, arguments: shape.arguments });
+    } else return;
     const last = agent.steps.at(-1);
+    if (!last) return;
     this.write({ type: 'tool_execution_update', toolCallId: tool.call.id, toolName: tool.call.name, args: {}, partialResult: { content: [{ type: 'text', text: last.type === 'tool' ? `${last.name} ${JSON.stringify(last.arguments ?? {}).slice(0, 200)}` : last.text.split('\n')[0] }],
       details: { kind: 'claude-code-agent', engine: ENGINE, stepCount: agent.steps.length, steps: agent.steps.slice(-50) } } });
   }
@@ -902,6 +930,8 @@ export class CodexAdapter {
       this.#updateState();
       return;
     }
+    // The turn stopped here has stopped on Codex's side too: the next one may begin.
+    if (method === 'turn/completed' && this.settling && params.turn?.id === this.settling.turnId) { this.settling.confirm(true); if (this.turn?.id !== params.turn.id) return; }
     // A compaction runs as a turn of its own on the Codex side.
     if (this.compaction && params.threadId === this.threadId && !this.turn) {
       if (method === 'error' && !params.willRetry) this.compaction.error = params.error?.message ?? 'Codex could not compact this conversation.';
@@ -1045,18 +1075,36 @@ export class CodexAdapter {
     if (!turn) return {};
     turn.cancelled = true;
     this.#cancelPermissions();
-    // Stopping the work also pauses the goal: otherwise Codex would start on its next step at once.
+    // Stopping the work also pauses the goal: otherwise Codex would start on its next step at once. Asked for
+    // first, not waited for: Codex answers it only once the turn has let go, which can take seconds, and the stop
+    // must not wait on it (the desktop gives a stop a few seconds before it ends the process).
     clearTimeout(this.goalNudge);
     if (this.goal?.status === 'active' && this.peer && !this.peer.closed) {
-      await this.peer.request('thread/goal/set', { threadId: this.threadId, origin: 'user', status: 'paused' }, ABORT_MS).then(set => this.#publishGoal(set?.goal ?? null), () => {});
+      this.peer.request('thread/goal/set', { threadId: this.threadId, origin: 'user', status: 'paused' }, ABORT_MS).then(set => this.#publishGoal(set?.goal ?? null), () => {});
     }
-    if (turn.id && this.peer && !this.peer.closed) await this.peer.request('turn/interrupt', { threadId: this.threadId, turnId: turn.id }, ABORT_MS).catch(() => {});
-    if (await within(turn.done, ABORT_MS, TIMED_OUT) === TIMED_OUT) {
-      // Codex did not confirm in time: end the turn here, and start from a fresh connection next time.
+    if (!turn.id || !this.peer || this.peer.closed) {
+      // Codex has not said which turn it is (or is gone): end it here, and start from a fresh connection.
       this.#finishTurn(turn, 'aborted', null);
       this.peer?.close();
+      return {};
     }
+    // Codex confirms a stop once its commands and agents have stopped, which can take a while. The turn is
+    // saved as it stands at once (a message sent to replace it is not kept waiting, and nothing of it is lost
+    // if this process is stopped meanwhile); the next turn waits for the confirmation (settling).
+    let confirm;
+    const confirmed = new Promise(resolve => { confirm = resolve; });
+    this.settling = { turnId: turn.id, confirm, done: within(confirmed, ABORT_MS, TIMED_OUT) };
+    this.peer.request('turn/interrupt', { threadId: this.threadId, turnId: turn.id }, ABORT_MS).catch(() => {});
+    this.#finishTurn(turn, 'aborted', null);
     return {};
+  }
+  // Before a turn starts: Codex has finished stopping the one before (see #abort), or, if it never said so,
+  // a fresh connection is opened.
+  async #settled() {
+    const settling = this.settling;
+    if (!settling) return;
+    if (await settling.done === TIMED_OUT) this.peer?.close();
+    if (this.settling === settling) this.settling = null;
   }
   #disconnected(peer, reason) {
     if (peer !== this.peer) return;

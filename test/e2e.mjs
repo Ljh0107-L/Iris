@@ -53,6 +53,8 @@ writeFileSync(join(profile, 'agent', 'settings.json'), JSON.stringify({ compacti
 writeFileSync(join(profile, 'settings.json'), JSON.stringify({ environments: { 'ssh:iris-test': { root: remoteInstall, added: false } } }));
 let { app, page } = await launch({ userData: profile, env });
 const S = name => shot(page, opts.shots, name);
+// The folder tree beside an open file shows when asked for (with no file open it is the pane itself).
+const showTree = async () => { const toggle = page.locator('.fp-actions .tool-button[aria-label="Toggle file tree"]'); if (await toggle.count() && !(await toggle.getAttribute('class')).includes(' on')) await toggle.click(); };
 const composer = () => page.locator('.composer textarea');
 const inspector = () => page.locator('.subagent-inspector');
 const mainTranscript = () => page.locator('.session-main .transcript');
@@ -342,6 +344,8 @@ try {
   check('file preview renders Markdown from the file browser', await page.locator('.fp-tab.active', { hasText: 'plan.md' }).count() === 1);
   await page.click('.fp-crumbs .tool-button');
   await page.locator('.fp-source', { hasText: '# Plan' }).waitFor();
+  check('an open file is shown without the folder tree, and its folder is not opened for it', await page.locator('.fp-tree').count() === 0);
+  await showTree();
   await page.locator('.fp-tree-row', { hasText: 'notes' }).waitFor();
   check('source view with line numbers and the folder tree', (await page.locator('.fp-gutter').innerText()).startsWith('1'));
   await S('05a-file-preview');
@@ -739,6 +743,7 @@ try {
   await page.locator('.markdown', { hasText: 'Tool result: survived' }).waitFor({ timeout: 60000 });
   check('command finished during the drop and its result was replayed', existsSync(join(remoteProject, 'survived.txt')));
   await page.click('.main-tools .tool-button[aria-label="Files"]');
+  await showTree();
   await page.locator('.fp-tree-row', { hasText: 'survived.txt' }).click();
   await page.locator('.fp-source', { hasText: 'survived' }).waitFor({ timeout: 30000 });
   check('file preview reads files on the SSH host', true);
@@ -914,6 +919,7 @@ try {
     await mainTranscript().locator('.markdown', { hasText: 'Subagents: 2/2 completed' }).count() === 2 &&
     (await activeRecord()).clearedSubagentIds?.length === 4);
   await page.click('.main-tools .tool-button[aria-label="Files"]');
+  await showTree();
   await page.locator('.fp-tree-row', { hasText: 'subagent-result.txt' }).click();
   await page.locator('.file-pane .fp-source', { hasText: 'created by subagent' }).waitFor();
   check('clearing history does not remove generated files from the file browser', true);

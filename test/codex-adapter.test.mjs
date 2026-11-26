@@ -167,6 +167,10 @@ test('the login-shell wrapper and unified diffs are read the way the shell and g
   assert.equal(shellCommand("bash -lc 'echo '\\''hi'\\'''"), "echo 'hi'");
   assert.equal(shellCommand('/bin/zsh -lc "echo \\"$HOME\\""'), 'echo "$HOME"');
   assert.equal(shellCommand('npm test'), 'npm test');
+  // A script with both kinds of quote: Codex writes it as quoted parts side by side.
+  assert.equal(shellCommand(`/bin/bash -lc "rg -n 'def x' a.py"'\n''rg -n "^def " b.py'`), `rg -n 'def x' a.py\nrg -n "^def " b.py`);
+  assert.equal(shellCommand(`/bin/bash -lc 'python - "$d" <<'"'"'PY'"'"''`), `python - "$d" <<'PY'`);
+  assert.equal(shellCommand(`bash -lc 'a' 'b'`), `'a' 'b'`, 'not one word: shown as written');
   assert.deepEqual(editsOfDiff('@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n'), [{ oldText: 'a', newText: 'b' }]);
   assert.deepEqual(editsOfDiff('@@ -1,2 +1,2 @@\n x\n-y\n+z\n--- a/other\n+++ b/other\n'), [{ oldText: 'x\ny', newText: 'x\nz' }], 'a hunk ends at its line counts');
   assert.deepEqual(editsOfDiff('not a diff'), []);
@@ -302,9 +306,10 @@ test('stopping a goal’s work pauses the goal, and /goal resume and /goal clear
   await a.next(e => e.type === 'message_update' && e.assistantMessageEvent.type === 'text_delta');
   await a.rpc('abort');
   await a.next(settled);
+  await until(() => f.calls('turn/interrupt').length > 0, 'Codex to be asked to stop'); // (the stop is saved before Codex confirms it)
   const order = f.calls().filter(c => ['thread/goal/set', 'turn/interrupt'].includes(c.method)).map(c => [c.method, c.params.status ?? null]);
   assert.deepEqual(order, [['thread/goal/set', 'active'], ['thread/goal/set', 'paused'], ['turn/interrupt', null]], 'paused first: Codex must not start on the next step');
-  assert.equal(goalsOf(a.events).at(-1).status, 'paused');
+  await until(() => goalsOf(a.events).at(-1).status === 'paused', 'the goal to show as paused'); // (the stop does not wait for it)
   assert.equal(lastReply(a.events).stopReason, 'aborted');
   const from = a.events.length;
   assert.equal((await a.rpc('prompt', { message: '/goal resume' })).success, true);
@@ -404,4 +409,21 @@ test('a message typed while a question card is open answers it: the card goes', 
   await a.rpc('abort');
   await a.rpc('prompt', { message: 'Just use 64 cards' });
   await a.next(e => e.type === 'extension_ui_dismiss' && e.id === card.id);
+});
+
+test('a stop is saved at once, and the next turn begins once Codex has stopped the one before', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('prompt', { message: 'wait, slow stop' });
+  for (let i = 0; i < 200 && !f.calls('turn/start').some(c => c.params.input?.[0]?.text === 'wait, slow stop'); i++) await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => setTimeout(r, 50)); // (Codex has said which turn it is)
+  const t0 = Date.now();
+  await a.rpc('abort');
+  assert.ok(Date.now() - t0 < 1000, 'not held while Codex stops its commands');
+  const ended = await a.next(e => e.type === 'message_end' && e.message.role === 'assistant' && e.message.stopReason === 'aborted');
+  assert.ok(ended, 'the stopped turn is saved and shown');
+  const sent = Date.now();
+  await a.rpc('prompt', { message: 'next one' });
+  const starts = f.calls('turn/start').filter(c => !String(c.params.threadId).startsWith('title-'));
+  assert.equal(starts.at(-1).params.input[0].text, 'next one');
+  assert.ok(Date.now() - sent >= 1000, 'the next turn waited for Codex to confirm the stop');
 });

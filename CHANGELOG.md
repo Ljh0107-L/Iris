@@ -2,6 +2,22 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.17
+
+**Fixed**
+
+- **A Codex agent no longer brings the conversation down.** An event of an agent Codex had started (its reasoning, which is no step of its own) stopped Iris's Codex adapter: the turn under way was lost, Context read "Not reported", and the next message started again from nothing. A single event that cannot be handled is now noted and passed over.
+- **Stopping a Codex turn keeps it.** Codex confirms a stop only once its commands and agents have stopped, which can take several seconds; meanwhile Iris gave up and ended the process, and the turn was lost. The turn is now saved as it stands at once (marked Interrupted), and the next one starts once Codex has stopped.
+- **Commands with both kinds of quote show as written**, without a stray `'` or `"` at the start.
+
+**Changed**
+
+- **A step that is still running is named on its group's line** ("Running make check", and how many others are running), and listed after the steps that have finished, where the latest step is read: a long command no longer looks like the agent having stopped.
+- **Opening a file shows the file only.** The folder tree beside it shows when asked for (the choice is kept), and no longer opens folders to reveal the file.
+- **Diffs in the dark theme have more contrast**: stronger tints for added and removed lines, brighter text and +/− marks.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.16
 
 **Changed**
