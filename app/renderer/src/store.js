@@ -388,10 +388,15 @@ export async function reloadTranscript(id) {
     const pageState = mergeReloadedHistory(page, current, baseline);
     if (JSON.stringify(current.history?.next) !== JSON.stringify(pageState.history.next)) historyBuffers.get(id)?.clear();
     const history = fromHistory(pageState.messages, timingsOf(id));
+    // The steps of the reply still being written are in no saved message yet (a CLI saves its turn when it ends):
+    // what is known of them is kept, or every step that had already finished would show as running again.
+    const live = pageState.live ?? current.live;
+    const liveCalls = new Set((Array.isArray(live?.content) ? live.content : []).filter(b => b?.type === 'toolCall').map(b => b.id));
     const updatedTools = Object.fromEntries(Object.entries(current.tools)
       .filter(([key, tool]) => {
         const persisted = history.tools[key];
         if (tool.status === 'running') return !persisted;
+        if (liveCalls.has(key) && !persisted) return true;
         return initial.tools[key] !== tool && (!persisted || persisted.historyRef);
       }));
     setTranscript(id, { ...current, ...pageState, ...history, live: pageState.live,

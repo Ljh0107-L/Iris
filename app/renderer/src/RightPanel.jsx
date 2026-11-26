@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 're
 import { isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, baseName, shortPath, useResizable } from './ui.jsx';
-import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, turnThoughts, usageOf } from './transcript.js';
+import { antigravityTurnSpeed, formatTokens, requestReplies, speedDisplay, speedReply, speedTier, ttftOf, turnThoughts, usageOf } from './transcript.js';
 import { api, openSettings, stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
@@ -71,12 +71,14 @@ export function UsageMetrics({ transcript, antigravity, turnRequests }) {
   const speed = speedDisplay(timed, { earlier: behind > 0 });
   const tier = speedTier(speedMessage);
   const peak = Math.max(...recent, 1);
-  const rows = last ? [
-    ['Input', last.input + last.cacheWrite, total.input + total.cacheWrite],
-    ['Cached', last.cacheRead, total.cacheRead],
-    ['Output', last.output, total.output],
-    ...(total.reasoningReported ? [['Reasoning', last.reasoningReported ? last.reasoning : null, total.reasoning]] : []),
-  ] : null;
+  // Beside the speed: the wait for the first token (TTFT) of the last request it was seen for, how much of the
+  // prompt came from the cache, and the tokens of the whole conversation (prompt and output, every request).
+  const ttft = [...messages].reverse().map(ttftOf).find(ms => ms != null) ?? null;
+  const stats = [
+    ['TTFT', ttft == null ? '—' : ttft < 1000 ? `${Math.round(ttft)}ms` : `${(ttft / 1000).toFixed(ttft < 10000 ? 2 : 1)}s`, 'The wait from sending the last request to its first token.'],
+    ...(last ? [['Cache hit', last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`, `Of the last request’s prompt, how much was read from the cache. Whole conversation: ${total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}.`],
+      ['Total', formatTokens(total.prompt + total.output), `Tokens of the whole conversation, every request’s prompt and output: ${formatTokens(total.prompt)} in (${formatTokens(total.cacheRead)} from the cache), ${formatTokens(total.output)} out.`]] : []),
+  ];
   return (
     <div className="usage">
       <div className="usage-speed">
@@ -86,11 +88,9 @@ export function UsageMetrics({ transcript, antigravity, turnRequests }) {
         </div>
         {recent.length > 1 && <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>}
       </div>
-      {rows && <div className="usage-table" title="Provider-reported counts. Reasoning is already included in output.">
-        <span /><span className="th">Last turn</span><span className="th">Total</span>
-        {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{formatTokens(a)}</span>, <span key={label + 'b'}>{formatTokens(b)}</span>])}
-        <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
-      </div>}
+      <div className="usage-table">
+        {stats.map(([label, value, title]) => <div key={label} className="usage-metric" title={title}><span className="usage-metric-label">{label}</span><span className="usage-metric-value">{value}</span></div>)}
+      </div>
     </div>
   );
 }

@@ -334,6 +334,15 @@ export const requestReplies = messages => (messages ?? []).flatMap(m => m.role =
   ? m.requests.map(request => ({ ...m, requests: undefined, __request: request, ...(Number.isFinite(request.input) ? { usage: { ...request, ms: undefined, wait: undefined, lead: undefined, estimated: undefined } } : {}) }))
   : [m]);
 export const timedReply = m => usageOf([m]).tps != null;
+// The wait for a request's first output (TTFT): from when it was sent to its first token. A CLI's request says
+// it (wait); Pi's and Claude Code's replies are timed by the bridge. Null when it was not seen.
+export function ttftOf(m) {
+  if (m?.__request) return time(m.__request.wait) ? m.__request.wait : null;
+  const t = m?.__timing;
+  if (!t || !time(t.requestStart)) return null;
+  const first = time(t.first) ? t.first : time(t.genStart) ? t.genStart : null;
+  return first != null && first >= t.requestStart ? first - t.requestStart : null;
+}
 // The reply whose speed is shown: the last one when it was timed from its first token; else the last one of
 // the same model that was; else the last with any speed at all (a whole request, wait included).
 export function speedReply(replies) {

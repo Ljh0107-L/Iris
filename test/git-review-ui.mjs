@@ -456,6 +456,12 @@ try {
   await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
   await page.waitForFunction(() => /^~?150\s*tok\/s$/.test(document.querySelector('.right-panel .usage-speed-value')?.innerText ?? ''), undefined, { timeout: 5000 });
   assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Output TPS');
+  // Beside the speed: the wait for the first token, the cache hit and the conversation's tokens, nothing else.
+  const metrics = await card('Usage').locator('.usage-metric').evaluateAll(nodes => nodes.map(n => [n.querySelector('.usage-metric-label').textContent, n.querySelector('.usage-metric-value').textContent]));
+  assert.deepEqual(metrics.map(([label]) => label), ['TTFT', 'Cache hit', 'Total']);
+  assert.equal(metrics[0][1], '1.00s', 'the request’s 1 s wait');
+  assert.equal(await card('Usage').locator('.usage-table .th, .usage-table .td-label').count(), 0, 'no table of input, cached, output and reasoning');
+  await page.screenshot({ path: join(screenshots, 'right-panel-usage.png') });
   sessions[0] = codexSession;
   await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
   // Antigravity: its protocol gives neither token counts nor agents, so the panel shows an estimated speed only.

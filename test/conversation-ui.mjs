@@ -135,6 +135,41 @@ try {
   assert.equal(await page.evaluate(() => window.firstBlock.isConnected), true, 'nothing is rebuilt when the reply finishes either');
   assert.equal(await page.locator('.user-row.queued').count(), 0, 'the queue is cleared when the run settles');
 
+  // ---- a reload while a CLI's turn is under way (opening the conversation again, a resync) keeps what is known
+  // of its finished steps: only the step still running shows as running
+  await page.evaluate(({ id }) => {
+    const send = event => window.fixtureEvent({ channel: 'event', payload: { id, event } });
+    window.fixtureEvent({ channel: 'status', payload: { id, status: 'connected', streaming: true } });
+    const call = (i, cid, command) => {
+      send({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: i, id: cid, toolName: 'bash' } });
+      send({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: i, toolCall: { type: 'toolCall', id: cid, name: 'bash', arguments: { command } } } });
+      send({ type: 'tool_execution_start', toolCallId: cid, toolName: 'bash', args: { command } });
+    };
+    send({ type: 'message_start', message: { role: 'assistant', timestamp: 9000 } });
+    call(0, 'done-1', 'ls');
+    send({ type: 'tool_execution_end', toolCallId: 'done-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'a' }] }, isError: false });
+    send({ type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 1 } });
+    send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: 'Listed; now building.' } });
+    send({ type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 1, content: 'Listed; now building.' } });
+    call(2, 'busy-1', 'make');
+  }, { id: session.id });
+  await page.locator('.markdown', { hasText: 'Listed; now building.' }).waitFor();
+  const spinning = () => page.evaluate(() => [...document.querySelectorAll('.tool-group')].slice(-2).map(g => !!g.querySelector('.tool-group-head .spinner')));
+  await page.waitForFunction(() => document.querySelectorAll('.tool-group').length >= 2);
+  assert.deepEqual(await spinning(), [false, true]);
+  const loads = ipcCalls.filter(c => c.method === 'historyPage').length;
+  await page.evaluate(({ id }) => window.fixtureEvent({ channel: 'resync', payload: { id } }), { id: session.id });
+  for (let i = 0; i < 100 && ipcCalls.filter(c => c.method === 'historyPage').length === loads; i++) await page.waitForTimeout(20);
+  await page.waitForTimeout(200);
+  assert.deepEqual(await spinning(), [false, true], 'the finished step stays finished after the reload');
+  await page.evaluate(({ id }) => {
+    const send = event => window.fixtureEvent({ channel: 'event', payload: { id, event } });
+    send({ type: 'tool_execution_end', toolCallId: 'busy-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }] }, isError: false });
+    send({ type: 'message_end', message: { role: 'assistant', timestamp: 9000, stopReason: 'stop', content: [{ type: 'text', text: 'Listed; now building.' }] } });
+    send({ type: 'agent_settled' });
+    window.fixtureEvent({ channel: 'status', payload: { id, status: 'connected', streaming: false } });
+  }, { id: session.id });
+
   // ---- Find in conversation reaches rows that are not rendered and results inside folded steps
   await input.press('Meta+f');
   const find = page.locator('.session-find-bar input');

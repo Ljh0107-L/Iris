@@ -4,7 +4,16 @@
 // it takes here too: its API, address, headers, and its thinking at the level chosen in Settings → Translation
 // (off, unless the person chooses otherwise; a level the model does not offer becomes the nearest one it does).
 export const TRANSLATE_MAX_CHARS = 12000;
-const instructions = language => `Translate the user's text into ${language}. It is an AI coding agent's reasoning notes. Keep code, commands, file paths, identifiers and numbers exactly as they are, and keep the paragraph breaks: one paragraph of translation for each paragraph of text, separated by a blank line. Reply with the translation only: no preface, no quotes, no notes.`;
+// Not word for word: the notes are terse and abstract, and translated literally they read like a manual. They
+// are said again the way an engineer would say them to a colleague, in plain words.
+const instructions = language => [
+  `Translate the user's text into ${language}. It is an AI coding agent's notes to itself while it works.`,
+  `Write it the way an engineer who speaks ${language} would say it to a colleague: plain, natural and short, not word for word. Turn stiff, abstract or nominalised wording into everyday words and direct sentences, and drop filler. Keep the meaning exact: add nothing, leave nothing out.`,
+  /chinese/i.test(language) ? 'For example, "The directory timestamps show a very recent run matching the current system time. Visual artifacts indicate concurrent execution across threads." becomes "目录时间戳显示刚跑过一次，时间和现在对得上。从画面上的痕迹看，有几个线程在同时跑。"' : '',
+  `Keep technical terms in English where that is how engineers say them (commit, trace, rollout, kernel, cache…). Keep code, commands, file paths, identifiers and numbers exactly as they are.`,
+  'Keep the paragraph breaks: one paragraph of translation for each paragraph of text, separated by a blank line. A "**Title**" line stays a "**Title**" line.',
+  'Reply with the translation only: no preface, no quotes, no notes.',
+].filter(Boolean).join(' ');
 
 // Pi says a refusal as the status and the body ("400 {"error":{"message":…}}"): the provider's message is the reason.
 function reasonOf(raw) {
