@@ -390,7 +390,10 @@ test('a question Codex asks without stopping is a card; its answer is a message 
   const answer = await a.next(e => e.type === 'message_end' && e.message.role === 'user' && e.message.content[0]?.text === 'Use 64 cards');
   assert.ok(answer, 'the answer starts a turn of its own');
   assert.equal(f.calls('turn/interrupt').length, 1);
-  assert.equal(f.calls('turn/start').filter(c => !String(c.params.threadId).startsWith('title-')).at(-1).params.input[0].text, 'Use 64 cards');
+  // (The answer is on the page before Codex is asked: wait for the request.)
+  const lastStart = () => f.calls('turn/start').filter(c => !String(c.params.threadId).startsWith('title-')).at(-1)?.params.input[0].text;
+  for (let i = 0; i < 200 && lastStart() !== 'Use 64 cards'; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(lastStart(), 'Use 64 cards');
   assert.equal(f.calls('turn/steer').length, 0);
 });
 
