@@ -18,6 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/iris-speed.mjs';
 import { readHistory } from '../../agent/iris-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
+import { learnModelSettings } from './cli-menus.mjs';
 import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, CLI_ENGINES, CODEX_ENGINE, CURSOR_ENGINE, CURSOR_INSTALL, newestCursorCli, cliAccountStatus, cliSignIn, cliBoot, antigravityInstallMessage, cliAdapterPath, cliEngine, findCli, findRemoteCli, isCliEngineId, remoteCliAdapter, remoteLoginCommand } from './cli-engines.mjs';
 import { installAntigravityCli } from './antigravity-install.mjs';
 import { installCursorCli } from './cursor-install.mjs';
@@ -903,7 +904,8 @@ export class SessionManager extends EventEmitter {
       options: (o.options ?? []).slice(0, 200).map(choice => ({ value: choice.value, name: choice.name, ...(typeof choice.description === 'string' ? { description: choice.description } : {}),
         // What a model has of its own (efforts, speeds), when the CLI says: shown as soon as that model is picked.
         ...(!nested && Array.isArray(choice.sub) ? { sub: choice.sub.slice(0, 6).map(sub => slim(sub, true)) } : {}) })) });
-    const options = state.options.slice(0, 8).map(o => slim(o, false));
+    // (Antigravity's: what each model has is learned as it is used; see cli-menus.mjs.)
+    const options = learnModelSettings(state.options.slice(0, 8).map(o => slim(o, false)), this.store.settings.cliOptions?.[key]);
     const json = JSON.stringify(options);
     this.cliOptionsSaved ??= new Map();
     if (this.cliOptionsSaved.get(key) === json) return;
