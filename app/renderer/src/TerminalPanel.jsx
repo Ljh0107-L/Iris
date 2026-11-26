@@ -36,8 +36,19 @@ window.iris.subscribe(({ channel, payload }) => {
 });
 
 async function start(sessionId, entry) {
+  if (entry.starting) return; // (the panel shown again while its shell is still starting)
   entry.exited = false;
-  const termId = await api('termOpen', sessionId, entry.term.cols, entry.term.rows);
+  entry.starting = true;
+  let termId;
+  try { termId = await api('termOpen', sessionId, entry.term.cols, entry.term.rows); }
+  catch (error) {
+    // The shell could not be opened (the host cannot be reached, say): said in the terminal, and Enter tries again.
+    if (terms.get(sessionId) === entry) {
+      entry.exited = true;
+      entry.term.write(`\x1b[2m[could not open a shell: ${String(error?.message ?? error).replace(/\s+/g, ' ')} — press Enter to try again]\x1b[0m\r\n`);
+    }
+    return;
+  } finally { entry.starting = false; }
   // Its conversation was deleted while the shell was starting.
   if (terms.get(sessionId) !== entry) { api('termClose', termId).catch(() => {}); return; }
   entry.termId = termId;
@@ -75,7 +86,7 @@ function terminalFor(sessionId) {
   const { term, fit } = makeTerminal();
   const el = document.createElement('div');
   el.className = 'terminal-host';
-  entry = { term, fit, el, termId: null, exited: false, opened: false };
+  entry = { term, fit, el, termId: null, exited: false, opened: false, starting: false };
   terms.set(sessionId, entry);
   term.onData(data => {
     if (entry.exited) { if (data === '\r') { term.reset(); start(sessionId, entry); } return; }

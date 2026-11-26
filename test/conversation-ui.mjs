@@ -62,6 +62,7 @@ try {
     if (method === 'cliSignIn') return (cli.signIn = Promise.withResolvers()).promise; // the browser's part: the test finishes or abandons it
     if (method === 'cliReadiness') return 'missing';
     if (method === 'prompt') return { disposition: args[3]?.interrupt ? 'started' : 'queued' };
+    if (method === 'termOpen') { if (cli.termFails) { cli.termFails = false; throw new Error('Could not connect to Lab host'); } return 41; }
     if (method === 'usageSummary') {
       const key = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const today = new Date(), yesterday = new Date(Date.now() - 86400000);
@@ -449,6 +450,19 @@ try {
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
   await page.waitForFunction(() => !document.querySelector('.cc-todo-card[data-tool-id="new-plan"] .spinner'));
   assert.deepEqual(await dots(newPlan), ['none'], 'stopped: at rest');
+
+  // A shell that cannot be opened says why in the terminal, and Enter tries again.
+  cli.termFails = true;
+  await page.locator('.transcript').click({ position: { x: 5, y: 5 } }).catch(() => {});
+  await page.keyboard.press('Control+Backquote');
+  await page.locator('.terminal-panel .xterm-rows', { hasText: 'could not open a shell' }).waitFor();
+  assert.match(await page.locator('.terminal-panel .xterm-rows').innerText(), /Could not connect to Lab host/);
+  await page.locator('.terminal-panel .xterm-screen').click();
+  await page.keyboard.press('Enter');
+  for (let i = 0; i < 100 && ipcCalls.filter(c => c.method === 'termOpen').length < 2; i++) await page.waitForTimeout(20);
+  assert.equal(ipcCalls.filter(c => c.method === 'termOpen').length, 2, 'Enter opens the shell again');
+  await page.keyboard.press('Control+Backquote');
+  await page.locator('.terminal-panel').waitFor({ state: 'detached' });
 
   // Settings → Usage: the tip over a day at either end of the graph stays inside it; the pane grows no scroll bars.
   await page.keyboard.press('Meta+Comma');

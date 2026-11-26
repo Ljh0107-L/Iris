@@ -93,9 +93,9 @@ export function GitReview({ session }) {
     <div className="git-review-head"><Icon name="fileDiff" size={18} /><strong title="All repository changes, including edits outside this conversation">Git review</strong>
       <span className="git-branch" title={snapshot?.root}><Icon name="branch" size={14} />{snapshot?.branch}</span>
       <button className="tool-button" onClick={() => setShowMetadata(x => !x)} aria-label="Show diff metadata" title="Diff metadata" aria-pressed={showMetadata}><Icon name="fileText" size={16} /></button>
-      <button className="tool-button" onClick={() => setWrap(x => !x)} aria-label="Wrap diff lines" aria-pressed={wrap}><Icon name="code" size={16} /></button>
-      <button className="tool-button" onClick={() => refresh()} disabled={busy || loading} aria-label="Refresh Git review">{loading ? <Spinner size={14} /> : <Icon name="refresh" size={16} />}</button>
-      <button className="tool-button" onClick={() => setStore({ gitReviewOpen: false })} aria-label="Close Git review"><Icon name="x" size={16} /></button>
+      <button className="tool-button" onClick={() => setWrap(x => !x)} aria-label="Wrap diff lines" title={wrap ? 'Disable line wrap' : 'Wrap lines'} aria-pressed={wrap}><Icon name="wrap" size={15} /></button>
+      <button className="tool-button" onClick={() => refresh()} disabled={busy || loading} aria-label="Refresh Git review" title="Refresh">{loading ? <Spinner size={14} /> : <Icon name="refresh" size={16} />}</button>
+      <button className="tool-button" onClick={() => setStore({ gitReviewOpen: false })} aria-label="Close Git review" title="Close"><Icon name="x" size={16} /></button>
     </div>
     {error && <div className="git-review-error" role="alert">{error}<button className="button small" onClick={refresh} disabled={busy}>Refresh</button></div>}
     {!snapshot && !error && <div className="fp-empty"><Spinner /> Reading repository…</div>}

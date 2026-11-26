@@ -605,6 +605,20 @@ try {
   await page.getByLabel('API key', { exact: true }).fill('fixture-key');
   await page.getByRole('button', { name: 'Add model', exact: true }).click();
   await page.screenshot({ path: join(screenshots, 'model-provider-editor.png') });
+  // Two models added by hand are two rows (each keeps what is typed in it), and one ID listed twice is not saved.
+  await page.getByPlaceholder('Company relay').fill('Relay');
+  await page.getByRole('button', { name: 'Add model', exact: true }).click();
+  const ids = page.getByLabel('Model ID', { exact: true });
+  assert.equal(await ids.count(), 2);
+  await ids.nth(0).fill('relay-1');
+  await ids.nth(1).fill('relay-2');
+  assert.deepEqual(await ids.evaluateAll(els => els.map(el => el.value)), ['relay-1', 'relay-2'], 'each row keeps its own ID');
+  await ids.nth(1).fill('relay-1');
+  const saves = () => ipcCalls.filter(c => /provider/i.test(c.method) && c.method !== 'listProviderModels').length;
+  const before = saves();
+  await page.locator('form').filter({ has: ids.first() }).locator('button[type="submit"]').click();
+  await page.locator('.form-error', { hasText: 'relay-1 is listed twice' }).waitFor();
+  assert.equal(saves(), before, 'not saved');
   assert.deepEqual(errors, []);
   console.log('PASS built renderer: Code empty state, task mode, attachments, project navigation, settings, responsive layout, real Git diff, line feedback draft, stage/unstage, commit, confirmed discard, clean state and Ultra review failure UI');
   console.log(`Screenshots: ${screenshots}`);

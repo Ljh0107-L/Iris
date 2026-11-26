@@ -12,6 +12,12 @@ The section for a version becomes the notes of its GitHub release.
 - **The tip over a day of Token activity stays inside the graph** (Settings → Usage): over the latest days it spilled past the pane, which grew scroll bars.
 - **Esc in an agent's view**: from the empty message box it goes back to the conversation (it did nothing while the box had the focus, which is most of the time); closing Settings or the palette with it no longer closes the agent's view under them too.
 - **The message box no longer offers ⌥↵ "add after this step" for Antigravity and Cursor**, which have no such thing: a message sent while they work stops the turn, and the box says so.
+- **Removing a model provider asks first**: its saved API key goes with it, which cannot be undone.
+- **Two models of one ID are not saved** (Settings → Models): it says which one is listed twice. Two models added by hand no longer get mixed up with each other.
+- **A terminal whose shell cannot be opened says why** (a host that cannot be reached, say), and Enter tries again; it stayed blank and did nothing.
+- **Settings → Connections**: a switch or Remove that fails says so; "Ready" no longer ends in "Node" with no version after it.
+- **Files**: an empty folder says so instead of showing nothing; Copy path in the tree copies the whole path, as the pane's menu does.
+- **Git review**: its wrap, refresh and close buttons say what they do on hover, and wrap has the same icon as in Files.
 
 **Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
 

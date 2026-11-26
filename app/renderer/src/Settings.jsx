@@ -5,7 +5,7 @@ import { CursorSettings, SubscriptionSettings } from './CliEngines.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, Trigger } from './ui.jsx';
 import { ModelMenu, effortLabel } from './Composer.jsx';
 import { effortsFor } from './model-catalog.js';
-import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
+import { api, askConfirm, loadCatalog, notify, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
 import { toRow, fromRow, pickedRows } from './model-settings.js';
 
@@ -106,10 +106,10 @@ function ModelCatalog({ models, setModels, choose, fetchModels, fetching = false
       </div>
     </div>
     <div className="model-list">
-      {models.map((m, i) => <ModelRow key={m.base?.id ?? i + ':' + m.id} model={m} lockedId={lockedId} outputTitle={outputTitle}
+      {models.map((m, i) => <ModelRow key={m.rowKey ?? m.base?.id ?? i + ':' + m.id} model={m} lockedId={lockedId} outputTitle={outputTitle}
         onChange={next => setModels(list => list.map((x, j) => j === i ? next : x))} onRemove={() => setModels(list => list.filter((_, j) => j !== i))} />)}
       {!models.length && <button type="button" className="add-button slim" onClick={fetchModels ?? choose} disabled={fetching}>{fetching ? <Spinner size={13} /> : <Icon name="list" size={15} />} {lockedId ? 'Choose models' : 'Fetch available models'}</button>}
-      {!lockedId && <button type="button" className="button small add-model" onClick={() => setModels(list => [...list.map(m => ({ ...m, open: false })), { ...toRow({ id: '' }), open: true }])}><Icon name="plus" size={14} /> Add model</button>}
+      {!lockedId && <button type="button" className="button small add-model" onClick={() => setModels(list => [...list.map(m => ({ ...m, open: false })), { ...toRow({ id: '' }), open: true, rowKey: `new:${Date.now()}:${Math.random().toString(36).slice(2)}` }])}><Icon name="plus" size={14} /> Add model</button>}
     </div>
   </div>;
 }
@@ -152,6 +152,9 @@ function ProviderEditor({ initial, onDone }) {
     e.preventDefault();
     setError(null);
     const rows = models.filter(m => m.id.trim());
+    // (A model is chosen by its ID: two of one ID would be one model listed twice.)
+    const twice = rows.map(m => m.id.trim()).find((id, i, ids) => ids.indexOf(id) !== i);
+    if (twice) return setError({ message: `${twice} is listed twice. Remove one of them.` });
     let provider;
     if (kind === 'builtin') {
       if (!rows.length && (!editing || initial.models?.length)) return setError({ message: 'Choose or add at least one model.' });
@@ -236,7 +239,8 @@ function ModelsPage() {
                 </div>
                 <div className="row-actions">
                   <button className="button small" onClick={() => setEditing(editing === p.id ? null : p.id)}>Edit</button>
-                  <button className="button small danger" onClick={async () => { setSettings(await api('deleteProvider', p.id)); loadCatalog(); }}>Remove</button>
+                  <button className="button small danger" onClick={() => askConfirm({ title: `Remove ${p.name ?? builtin[p.id] ?? p.id}?`, message: p.hasKey ? 'Its saved API key is deleted too, and its models leave the model menu.' : 'Its models leave the model menu.', action: 'Remove',
+                    run: async () => { try { setSettings(await api('deleteProvider', p.id)); loadCatalog(); } catch (e) { notify(e.message, 'error'); } } })}>Remove</button>
                 </div>
               </div>
               {editing === p.id && <ProviderEditor initial={p} onDone={() => setEditing(null)} />}
@@ -259,14 +263,15 @@ function Toggle({ on, onChange, label }) {
 function ConnectionCard({ env }) {
   const engine = useStore(s => s.draft.engine);
   const st = useStore(s => s.envStatus[env.id]);
-  const check = force => api('prepareEnvironment', env.id, force, engine);
+  // (A setup that fails says so on the card itself: the host's status comes as it changes.)
+  const check = force => api('prepareEnvironment', env.id, force, engine).catch(() => {});
   const anchor = useRef(null);
   const [menu, setMenu] = useState(false);
   const state = !env.enabled ? 'off' : st?.status ?? (env.root ? 'known' : 'idle');
   const status = {
     off: { dot: '', text: 'Turned off' },
     preparing: { dot: 'connecting', text: st?.message ?? 'Setting up…' },
-    ready: { dot: 'connected', text: `Ready · Node ${st?.facts?.nodeVersion?.replace(/^v/, '') ?? ''}${st?.facts?.unreachable?.length ? ' · models via this Mac' : ''}` },
+    ready: { dot: 'connected', text: `Ready${st?.facts?.nodeVersion ? ` · Node ${st.facts.nodeVersion.replace(/^v/, '')}` : ''}${st?.facts?.unreachable?.length ? ' · models via this Mac' : ''}` },
     error: { dot: 'error', text: st?.message },
     known: { dot: 'connected', text: 'Set up' },
     idle: { dot: '', text: 'Not set up yet' },
@@ -274,7 +279,7 @@ function ConnectionCard({ env }) {
   return (
     <li className={`row-card connection ${state}`}>
       <div className="row-head">
-        <Toggle on={env.enabled} label={`Use ${env.label}`} onChange={async on => { setEnvironments(await api('setConnectionEnabled', env.id, on)); if (on) check(false); }} />
+        <Toggle on={env.enabled} label={`Use ${env.label}`} onChange={async on => { try { setEnvironments(await api('setConnectionEnabled', env.id, on)); if (on) check(false); } catch (e) { notify(e.message, 'error'); } }} />
         <div className="connection-main">
           <div className="row-identity"><Icon name={env.source === 'manual' ? 'globe' : 'terminal'} size={15} className="connection-icon" /><span className="row-name" title={env.detail}>{env.label}</span></div>
           {/* What is happening on the host, in words: setting one up takes a while (Node and Pi are uploaded). */}
@@ -286,7 +291,7 @@ function ConnectionCard({ env }) {
           <button ref={anchor} className="icon-button" aria-label="More" onClick={() => setMenu(m => !m)}><Icon name="more" size={16} /></button>
           <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={210} placement="bottom-end">
             <MenuItem icon="refresh" label="Check again" disabled={!env.enabled} onClick={() => { setMenu(false); check(true); }} />
-            <MenuItem icon="trash" label="Remove" className="danger" onClick={async () => { setMenu(false); setEnvironments(await api('removeConnection', env.id)); }} />
+            <MenuItem icon="trash" label="Remove" className="danger" onClick={async () => { setMenu(false); try { setEnvironments(await api('removeConnection', env.id)); } catch (e) { notify(e.message, 'error'); } }} />
           </Popover>
         </div>
       </div>

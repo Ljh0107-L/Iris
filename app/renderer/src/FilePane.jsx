@@ -50,14 +50,18 @@ export function DownloadButton({ sessionId, path, className = 'tool-button', lab
 
 // Version-control internals and OS clutter stay out of the tree (as in editors' default excludes).
 const HIDDEN_ENTRIES = new Set(['.git', '.hg', '.svn', 'CVS', '.DS_Store', 'Thumbs.db']);
-function TreeDir({ sessionId, rel, depth, active, version }) {
+function TreeDir({ sessionId, cwd, rel, depth, active, version }) {
   const listing = useListing(sessionId, rel, true, version);
   const [expanded, setExpanded] = useState({});
   const [menu, setMenu] = useState(null); // { path, anchor } of a right-clicked file
   if (!listing) return <div className="fp-tree-row muted" style={{ paddingLeft: 12 + depth * 14 }}><Spinner size={11} /></div>;
   if (listing.error) return <div className="fp-tree-row error" style={{ paddingLeft: 12 + depth * 14 }}>{listing.error}</div>;
   const close = () => setMenu(null);
-  return <>{listing.entries.filter(entry => !HIDDEN_ENTRIES.has(entry.name)).map(entry => {
+  const entries = listing.entries.filter(entry => !HIDDEN_ENTRIES.has(entry.name));
+  // (Copied as the pane's own menu copies one: the whole path.)
+  const fullPath = path => `${String(cwd ?? '').replace(/\/$/, '')}/${path}`;
+  if (!entries.length && depth === 0) return <div className="fp-tree-row muted" style={{ paddingLeft: 12 }}>Empty folder</div>;
+  return <>{entries.map(entry => {
     const path = joinRel(rel, entry.name);
     if (entry.dir) {
       const open = expanded[entry.name] ?? false; // folders open when asked, not to reveal the open file
@@ -66,7 +70,7 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
           <button className="fp-tree-row" style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setExpanded(x => ({ ...x, [entry.name]: !open }))}>
             <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} className="fp-caret" /><span className="fp-name">{entry.name}</span>
           </button>
-          {open && <TreeDir sessionId={sessionId} rel={path} depth={depth + 1} active={active} version={version} />}
+          {open && <TreeDir sessionId={sessionId} cwd={cwd} rel={path} depth={depth + 1} active={active} version={version} />}
         </div>
       );
     }
@@ -80,7 +84,7 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
   {menu && <Popover anchor={menu.anchor} open onClose={close} width={200} placement="bottom-start">
     <MenuItem icon="fileText" label="Open" onClick={() => { close(); openFile(sessionId, menu.path); }} />
     <MenuItem icon="download" label="Download" onClick={() => { close(); downloadFile(sessionId, menu.path); }} />
-    <MenuItem icon="copy" label="Copy path" onClick={() => { close(); navigator.clipboard.writeText(menu.path); notify('Path copied'); }} />
+    <MenuItem icon="copy" label="Copy path" onClick={() => { close(); navigator.clipboard.writeText(cwd ? fullPath(menu.path) : menu.path); notify('Path copied'); }} />
   </Popover>}</>;
 }
 
@@ -373,8 +377,8 @@ export function FilePane({ session }) {
           : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} cwd={session.cwd} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
         {(tree || !(state.active || state.changes)) && (state.active || state.changes
-          ? <div className="fp-tree-wrap" style={{ width: treeWidth }}>{treeHandle}<div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div></div>
-          : <div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div>)}
+          ? <div className="fp-tree-wrap" style={{ width: treeWidth }}>{treeHandle}<div className="fp-tree"><TreeDir sessionId={session.id} cwd={session.cwd} rel="" depth={0} active={state.active} version={refresh} /></div></div>
+          : <div className="fp-tree"><TreeDir sessionId={session.id} cwd={session.cwd} rel="" depth={0} active={state.active} version={refresh} /></div>)}
       </div>
     </aside>
   );
