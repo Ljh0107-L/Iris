@@ -16,6 +16,22 @@ const REWIND = 'iris-codex-rewind'; // the conversation continues from an earlie
 const GOAL_START_MS = 8000;         // how long Codex has to start on a goal by itself before it is asked to
 const CONTROL_MS = 20000;
 const OPEN_MS = 60000;
+// Codex gives each model a context window (500K for some, 272K for others) and the most it may be given
+// (max_context_window, 872K for most): a conversation in Iris asks for 800K that can be used (Codex keeps a
+// share of the window back, effective_context_window_percent), or as much as the model allows. Read from the
+// model list Codex keeps in its home (models_cache.json); a model it does not list is left as Codex has it.
+const CONTEXT_USABLE = 800000;
+export function contextConfig(home, model) {
+  if (!text(home)) return null; // (Iris always gives Codex a home of its own)
+  let models;
+  try { models = JSON.parse(readFileSync(join(home, 'models_cache.json'), 'utf8'))?.models; } catch { return null; }
+  const info = Array.isArray(models) && text(model) ? models.find(m => m?.slug === model) : null;
+  const max = info?.max_context_window, base = info?.context_window;
+  if (!Number.isFinite(max) || !Number.isFinite(base) || max <= 0) return null;
+  const percent = Number.isFinite(info.effective_context_window_percent) && info.effective_context_window_percent > 0 ? Math.min(100, info.effective_context_window_percent) : 100;
+  const window = Math.min(max, Math.ceil(CONTEXT_USABLE * 100 / percent));
+  return window > base ? { model_context_window: window } : null;
+}
 const ABORT_MS = 8000;
 const MAX_LINE = 16 * 1024 * 1024;
 const TIMED_OUT = Symbol('timed out');
@@ -430,10 +446,13 @@ export class CodexAdapter {
     // without a word. `untrusted` lets only commands it knows to be read-only pass unasked.
     const policy = this.config.bypassPermissions ? { approvalPolicy: 'never', sandbox: 'danger-full-access' } : { approvalPolicy: 'untrusted', sandbox: 'workspace-write' };
     const saved = tr.binding?.threadId;
+    // The larger context window, for the model the conversation opens with (see contextConfig).
+    const model = this.models.some(m => m.id === tr.settings?.model) ? tr.settings.model : this.models.find(m => m.isDefault)?.id ?? this.models[0]?.id;
+    const config = contextConfig(this.config.home, model);
     let opened;
     try {
-      opened = saved ? await peer.request('thread/resume', { threadId: saved, cwd: this.config.cwd, ...policy }, OPEN_MS)
-        : await peer.request('thread/start', { cwd: this.config.cwd, ...policy }, OPEN_MS);
+      opened = saved ? await peer.request('thread/resume', { threadId: saved, cwd: this.config.cwd, ...policy, ...(config ? { config } : {}) }, OPEN_MS)
+        : await peer.request('thread/start', { cwd: this.config.cwd, ...policy, ...(config ? { config } : {}) }, OPEN_MS);
     } catch (error) {
       if (signInNeeded(error)) { this.authRequired = true; this.#updateState(); return; }
       throw new Error(saved ? `Codex could not reopen this conversation: ${error.message}` : `Codex could not start a conversation: ${error.message}`);

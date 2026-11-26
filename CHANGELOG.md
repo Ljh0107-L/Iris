@@ -2,6 +2,14 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.1.14
+
+**Changed**
+
+- **Codex conversations have 800K of context.** Codex gives each model a window of its own (500K for GPT-6.2-Sol, 272K for most others, less the 5% it keeps back) and a larger size it may be given. A conversation now asks for 800K that can be used, or as much as the model may be given when that is less; Codex compacts later accordingly. On this Mac and on SSH hosts alike. A conversation already open gets it when it is opened again.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.13
 
 **New**

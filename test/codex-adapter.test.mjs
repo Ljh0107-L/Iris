@@ -5,7 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requestReplies, speedDisplay, usageOf } from '../app/renderer/src/transcript.js';
-import { CodexAdapter, account, editsOfDiff, shellCommand } from '../agent/iris-codex.mjs';
+import { CodexAdapter, account, contextConfig, editsOfDiff, shellCommand } from '../agent/iris-codex.mjs';
 import { FAKE_CODEX as FAKE } from './fake-codex.mjs';
 
 
@@ -355,3 +355,23 @@ test('editing an earlier message takes the Codex thread and the conversation bac
   assert.equal(f.calls('thread/revert').length, 1);
 });
 
+
+test('a conversation asks for 800K of usable context, as much as the model may be given', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  const home = join(f.dir, 'home');
+  mkdirSync(home);
+  writeFileSync(join(home, 'auth.json'), '{}'); // (the stand-in is signed in in a home with one)
+  writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ models: [
+    { slug: 'gpt-a', context_window: 272000, max_context_window: 872000, effective_context_window_percent: 95 },
+    { slug: 'gpt-small', context_window: 272000, max_context_window: 372000, effective_context_window_percent: 95 },
+    { slug: 'gpt-big', context_window: 1000000, max_context_window: 1000000, effective_context_window_percent: 95 }] }));
+  assert.deepEqual(contextConfig(home, 'gpt-a'), { model_context_window: 842106 }, '800K once Codex keeps its 5% back');
+  assert.deepEqual(contextConfig(home, 'gpt-small'), { model_context_window: 372000 }, 'no more than the model may be given');
+  assert.equal(contextConfig(home, 'gpt-big'), null, 'a window already larger is left as it is');
+  assert.equal(contextConfig(home, 'gpt-unknown'), null);
+  assert.equal(contextConfig(null, 'gpt-a'), null, 'Codex’s own home is not read');
+  const a = f.start(undefined, { home });
+  const state = await a.rpc('get_state');
+  assert.ok(f.calls('thread/start').length, JSON.stringify([state, f.calls().map(c => c.method)]));
+  assert.deepEqual(f.calls('thread/start').find(c => !c.params.ephemeral).params.config, { model_context_window: 842106 });
+});
