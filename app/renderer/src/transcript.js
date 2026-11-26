@@ -716,7 +716,8 @@ export function collapseWork(blocks) {
 // A page join can extend the first work group. Reuse its committed identity so its
 // DOM, disclosure and reading anchors do not become a different group on prepend.
 // A turn's task list stands at the end of the turn, under what was done and said (as the latest state of the
-// work, it reads last), and once: a list updated again in the same turn is shown as it stands now. A message
+// work, it reads last), and once: a list updated again in the same turn is shown as it stands now. Once all
+// its steps are done, it is not shown at all. A message
 // sent into the turn under way (steered) is part of the turn.
 export function listsAtTurnEnd(blocks) {
   const out = [];
@@ -725,6 +726,9 @@ export function listsAtTurnEnd(blocks) {
     const turn = blocks.slice(start, end), lists = turn.filter(b => b.kind === 'ccTodo');
     if (!lists.length) { out.push(...turn); return; }
     const rest = turn.filter(b => b.kind !== 'ccTodo'), list = lists.at(-1);
+    // A list whose every step is done has served its purpose: it goes (as the agent's plan does once carried out).
+    const todos = list.call?.arguments?.todos;
+    if (Array.isArray(todos) && todos.length && todos.every(todo => todo?.status === 'completed')) { out.push(...rest); return; }
     const footer = rest.findIndex(b => b.kind === 'usage');
     if (footer < 0) out.push(...rest, list); else out.push(...rest.slice(0, footer), list, ...rest.slice(footer));
   };

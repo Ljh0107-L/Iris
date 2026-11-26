@@ -11,6 +11,7 @@ The section for a version becomes the notes of its GitHub release.
 
 **Changed**
 
+- **A task list goes once every step of it is done** (Antigravity's plan, Codex's, Claude Code's): a plan carried out is no longer left on screen.
 - **One button in the message box while the agent works**: Stop, and Send in its place once something is written (sending stops the turn and starts the message's own; Option+Enter adds it after the step under way).
 
 **Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
