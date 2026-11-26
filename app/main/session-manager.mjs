@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { PiSession } from '../../core/pi-session.mjs';
+import { AgentSession } from '../../core/agent-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { decodeRemoteSearch, remoteSearchScript, searchSessionFiles } from './message-search.mjs';
@@ -38,6 +38,8 @@ function clampPiThinkingLevel(model, level) {
 
 // Conversation engines: Pi by default, or a separate Claude Code / Antigravity CLI adapter.
 export const CLAUDE_ENGINE = 'claude-code';
+// Iris's own agent (built on Pi): a conversation with no engine of its own named runs on it.
+export const IRIS_ENGINE = 'iris';
 const isClaude = record => record?.engine === CLAUDE_ENGINE;
 // Antigravity and Codex: account-backed CLIs behind the same adapter contract (cli.mjs). The
 // name is from when Antigravity was the only one.
@@ -183,7 +185,7 @@ export class SessionManager extends EventEmitter {
     const id = 'selftest-' + randomUUID().slice(0, 8);
     const spawn = relaySpawnSpec({ cwd: this.local.agentDir, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, retryPath: this.local.retryPath, extensions: [this.bridgePath], piArgs: ['--no-session'], extraEnv: this.local.extraEnv });
     mkdirSync(this.local.agentDir, { recursive: true });
-    const session = new PiSession({ id, boot: { providers: [] }, transport: localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv }), relay: { spawn } });
+    const session = new AgentSession({ id, boot: { providers: [] }, transport: localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv }), relay: { spawn } });
     await session.start({ readyTimeout: 60000 });
     const state = session.initialState;
     await session.stop();
@@ -348,7 +350,7 @@ export class SessionManager extends EventEmitter {
       const configured = new Set(this.store.settings.providers.map(p => p.id));
       if (!configured.size) return [];
       await this.local.envReady;
-      const session = new PiSession({ id: 'catalog', boot: { providers: this.bootProviders() }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
+      const session = new AgentSession({ id: 'catalog', boot: { providers: this.bootProviders() }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
       try {
         await session.start();
         const models = await session.request('get_available_models').then(d => d.models);
@@ -356,7 +358,7 @@ export class SessionManager extends EventEmitter {
         const providerById = new Map(this.store.settings.providers.map(p => [p.id, p]));
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
         return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
-          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, ...(m.compat ? { compat: m.compat } : {}), contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m, providerById.get(m.provider)) ? ['pi', CLAUDE_ENGINE] : ['pi'], ...(m.environments ? { environments: m.environments } : {}) }));
+          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, ...(m.compat ? { compat: m.compat } : {}), contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m, providerById.get(m.provider)) ? [IRIS_ENGINE, CLAUDE_ENGINE] : [IRIS_ENGINE], ...(m.environments ? { environments: m.environments } : {}) }));
       } finally { await session.stop(); }
     })();
     const cached = this.catalogCache;
@@ -370,7 +372,7 @@ export class SessionManager extends EventEmitter {
 
   // Pi's full definitions supply parameters and protocol settings for models returned by the API.
   async #builtinCatalog(providerId, apiKey) {
-    const session = new PiSession({ id: 'models-' + providerId, boot: { providers: [{ id: providerId, apiKey }] }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
+    const session = new AgentSession({ id: 'models-' + providerId, boot: { providers: [{ id: providerId, apiKey }] }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
     try {
       await session.start();
       const models = await session.request('get_available_models').then(d => d.models);
@@ -964,6 +966,23 @@ export class SessionManager extends EventEmitter {
     return true;
   }
 
+  // Restart: the conversation's agent process is ended (what it was doing too) and started again from its
+  // history, as when it is opened after a restart of the app. For an agent that has stopped answering.
+  async restart(id) {
+    const record = this.record(id);
+    const runtime = this.runtimes.get(id);
+    if (runtime?.session) {
+      if (runtime.streaming) await this.abort(id).catch(() => {});
+      const current = this.runtimes.get(id);
+      if (current?.session) await this.#hardStop(record, current, current.session);
+    }
+    await this.close(id);
+    const env = this.env(record.environmentId);
+    await this.stopRelay(env, id, { engine: record.engine }).catch(() => {});
+    await this.ensureStarted(id);
+    return true;
+  }
+
   async #cliAction(id, command, payload, timeout) {
     const record = this.record(id);
     if (!isCliSession(record)) throw new Error('This is not an Antigravity CLI conversation.');
@@ -1014,7 +1033,7 @@ export class SessionManager extends EventEmitter {
   }
   #view(record) {
     const runtime = this.runtimes.get(record.id);
-    const engine = record.engine === CLAUDE_ENGINE || isCliEngineId(record.engine) ? record.engine : 'pi';
+    const engine = record.engine === CLAUDE_ENGINE || isCliEngineId(record.engine) ? record.engine : IRIS_ENGINE;
     return { ...record, engine, ...(isCliSession(record) ? { cli: runtime?.cli,
       ...(runtime?.status === 'error' && runtime.error ? { statusMessage: runtime.error } : {}) } : {}),
       status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, compacting: isCompacting(runtime), pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
@@ -1179,7 +1198,7 @@ export class SessionManager extends EventEmitter {
       await runSsh(env, `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(file)}`, { input: line, timeout: 30000 });
     }
     const result = await session.request('switch_session', { sessionPath: file }, { timeout: 60000 });
-    if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
+    if (result?.cancelled) throw new Error('Moving the pre-warmed conversation was cancelled.');
   }
 
   async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode, creationId, cliChoices, cliAccount }) {
@@ -1374,7 +1393,7 @@ export class SessionManager extends EventEmitter {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
     const claude = isClaude(record), cli = isCliSession(record);
-    runtime.engine = cli ? record.engine : claude ? CLAUDE_ENGINE : 'pi';
+    runtime.engine = cli ? record.engine : claude ? CLAUDE_ENGINE : IRIS_ENGINE;
     const agy = cli ? cliBin ?? await this.#cliBinary(env, record.engine) : null;
     const bypass = cli && this.cliPermissionMode(record) === 'bypassPermissions';
     this.#assertCurrent(record, runtime);
@@ -1400,7 +1419,7 @@ export class SessionManager extends EventEmitter {
         spawn = { cwd: record.cwd, env: { ...this.local.extraEnv }, argv: [this.local.node, this.claudeAdapterPath] };
       } else spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, retryPath: this.local.retryPath, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
-      session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
+      session = new AgentSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
       this.#status(record, runtime, { status: runtime.status, phase: 'preparing', ...(cli ? { message: `Preparing ${cliEngine(record.engine).label} on the host…` } : {}) });
       const facts = await this.prepare(env.id, { engine: record.engine });
@@ -1427,7 +1446,7 @@ export class SessionManager extends EventEmitter {
       const sharedOnHost = [...this.runtimes.values()].filter(r => r !== runtime && r.shared && r.envId === env.id && r.session && !r.closing).length;
       runtime.envId = env.id; runtime.shared = sharedOnHost < 6;
       const transport = sshRelayTransport({ host: env.host, sshOptions: env.sshArgs ?? [], node: facts.node, relayPath: facts.relay, runDir: facts.runDir, egress, shared: runtime.shared });
-      session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
+      session = new AgentSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     }
     if (claude) runtime.claudeBootKey = JSON.stringify(claudeConfig);
     runtime.session = session;
@@ -1466,7 +1485,7 @@ export class SessionManager extends EventEmitter {
       if (runtime.starting) return; // the start promise reports this failure
       runtime.status = 'disconnected';
       if (piExited) runtime.lastSeq = null; // a new Pi process numbers its events from scratch
-      const agent = cli ? `${cliEngine(record.engine).label} CLI` : claude ? 'Claude Code' : 'Pi';
+      const agent = cli ? `${cliEngine(record.engine).label} CLI` : claude ? 'Claude Code' : 'Iris';
       this.#status(record, runtime, { status: 'disconnected', phase: null, streaming: false, compacting: false, message: piExited ? `${agent} stopped` + (message ? `: ${message}` : '') : message });
     });
     try {
@@ -1986,7 +2005,7 @@ export class SessionManager extends EventEmitter {
   // Claude Code's Ultracode (standing multi-agent workflows), for models and endpoints that offer it.
   async setUltracode(id, on) {
     const record = this.record(id);
-    if (!isClaude(record)) throw new Error('Ultracode belongs to Claude Code conversations; Pi conversations have Ultra.');
+    if (!isClaude(record)) throw new Error('Ultracode belongs to Claude Code conversations; Iris conversations have Ultra.');
     if (on) record.ultracode = true; else delete record.ultracode;
     this.#save(record, {});
     const runtime = this.runtimes.get(id);

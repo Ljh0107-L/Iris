@@ -85,7 +85,7 @@ test('Antigravity keeps a first draft awaiting sign-in without sending to any Pi
   reset();
   const piModel = { provider: 'mock', id: 'mock' };
   store.set({ composerDrafts: {}, catalog: [piModel], settings: { defaults: { model: piModel } },
-    draft: { environmentId: 'local', cwd: '/tmp', engine: 'pi', model: piModel, ultra: true, speed: 'ultrafast' } });
+    draft: { environmentId: 'local', cwd: '/tmp', engine: 'iris', model: piModel, ultra: true, speed: 'ultrafast' } });
   store.setDraft({ engine: 'antigravity' });
   assert.equal(store.getState().draft.model, null);
   const calls = [];
@@ -112,7 +112,7 @@ test('Antigravity keeps a first draft awaiting sign-in without sending to any Pi
   assert.equal(store.getState().composerDrafts[remote.id].text, 'draft for the SSH host');
   assert.deepEqual(calls.find(([method, args]) => method === 'createSession' && args.environmentId === 'ssh:host')[1],
     { engine: 'antigravity', environmentId: 'ssh:host', cwd: '/remote/work', prompt: 'draft for the SSH host', creationId: pendingRemote });
-  store.setDraft({ engine: 'pi' });
+  store.setDraft({ engine: 'iris' });
   assert.deepEqual(store.getState().draft.model, piModel);
   store.set({ questions: { [session.id]: [{ method: 'select', requestId: 'permission', permission: true, options: ['Allow once'] }] } });
   await assert.rejects(store.sendPrompt(session.id, 'Allow once'), /Choose a permission option/);

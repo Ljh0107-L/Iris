@@ -3,13 +3,13 @@
 [![CI](https://github.com/Ljh0107-L/Iris/actions/workflows/ci.yml/badge.svg)](https://github.com/Ljh0107-L/Iris/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Codex**, **Antigravity** and **Cursor** side by side, on this Mac and on any SSH host, with one interface for conversations, files, diffs and terminals.
+One desktop app for your coding agents. Iris runs its own agent, **Iris**, beside **Claude Code**, **Codex**, **Antigravity** and **Cursor**, on this Mac and on any SSH host, with one interface for conversations, files, diffs and terminals.
 
 ![A conversation in Iris with the file pane open](docs/screenshot.png)
 
 ## What you get
 
-- **Four agents, one window.** Pick a model for a new conversation and the agent follows from it. Each conversation keeps its own agent, model, folder and machine.
+- **Five agents, one window.** Pick a model for a new conversation and the agent follows from it. Each conversation keeps its own agent, model, folder and machine.
 - **This Mac and SSH hosts.** Hosts come from `~/.ssh/config`. Iris installs what an agent needs on the host the first time you use it there.
 - **Work that survives a closed laptop.** On an SSH host the agent keeps working when Wi-Fi drops, the Mac sleeps or the app quits. Iris reconnects and replays what it missed.
 - **A workspace around the conversation.** File tree and previews (Markdown, source, images, PDF), Git review with staging and commit, a terminal in the conversation's folder on its machine, and search across all conversations (⌘K).
@@ -19,7 +19,7 @@ One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Cod
 
 | Agent | What it runs on | What you need |
 | --- | --- | --- |
-| [Pi](https://github.com/earendil-works/pi) | Any model from any provider: OpenAI, Anthropic, Google, DeepSeek, OpenRouter and others, or your own endpoint that speaks the OpenAI, Anthropic or Gemini API | An API key, added in **Settings → Models** |
+| Iris (built on [Pi](https://github.com/earendil-works/pi)) | Any model from any provider: OpenAI, Anthropic, Google, DeepSeek, OpenRouter and others, or your own endpoint that speaks the OpenAI, Anthropic or Gemini API | An API key, added in **Settings → Models** |
 | [Claude Code](https://www.anthropic.com/claude-code) | Models served over the Anthropic Messages API, from Anthropic or a compatible endpoint | An API key, added in **Settings → Models** |
 | [Codex](https://github.com/openai/codex) | The models of your ChatGPT plan | The `codex` CLI, signed in with ChatGPT |
 | [Antigravity](https://antigravity.google) | The models of your Google account | The `agy` CLI, signed in with Google |
@@ -27,11 +27,11 @@ One desktop app for your coding agents. Iris runs **Pi**, **Claude Code**, **Cod
 
 Notes:
 
-- Pi ships with the app. Iris downloads a pinned, checksum-verified Claude Code build on first use; it does not use a `claude` already on your PATH or a Claude subscription signed in there.
+- Iris's agent ships with the app. Iris downloads a pinned, checksum-verified Claude Code build on first use; it does not use a `claude` already on your PATH or a Claude subscription signed in there.
 - **Settings → Subscriptions** shows, for each machine, whether Codex, Antigravity and Cursor are installed and signed in, and can install each CLI and start its sign-in for you. Iris installs Cursor's CLI as `cursor-agent` only: its own installer also takes the name `agent`, which other tools use.
 - **Settings → Cursor** chooses which of Cursor's models its model menu lists; each model keeps its own settings (effort, context, speed) as menus beside it.
 - Codex, Antigravity and Cursor keep their own credentials. Iris gives each its own data directory, so conversations you start in Iris do not appear in the history of the CLI you use in a terminal, and the other way round. Codex therefore asks you to sign in once inside Iris. Antigravity's and Cursor's sign-ins are held in the Keychain by the CLIs themselves and are shared.
-- Codex, Antigravity and Cursor run with full access: they run commands and edit files without asking. Pi and Claude Code also run without approval prompts, and can still ask you a question when they need a decision.
+- Codex, Antigravity and Cursor run with full access: they run commands and edit files without asking. Iris and Claude Code also run without approval prompts, and can still ask you a question when they need a decision.
 
 ## Install
 
@@ -51,8 +51,9 @@ After that Iris updates itself: when a new release has been downloaded, an **Upd
 
 ## More features
 
-- **Agents and background work (Pi).** The model can hand a side task to an agent with its own context, in its own Git worktree if you ask. See [docs/subagents.md](docs/subagents.md).
-- **Ultra (Pi).** Give Pi a large request and let it work unattended until an independent review passes. `/goal` keeps it working across turns towards an objective.
+- **Agents and background work (Iris).** The model can hand a side task to an agent with its own context, in its own Git worktree if you ask. See [docs/subagents.md](docs/subagents.md).
+- **Ultra (Iris).** Give Iris a large request and let it work unattended until an independent review passes. `/goal` keeps it working across turns towards an objective.
+- **Visuals.** Ask any agent to show you something (how an algorithm steps through its data, a protocol in motion, a chart of what it computed) and it can draw an animated or interactive page right in the conversation, with play, step and full-window. Iris gives every agent the same `show_visual` tool, as an MCP server ([`agent/iris-visual.mjs`](agent/iris-visual.mjs)); the page runs in a sandbox that may load libraries from cdnjs, jsDelivr and unpkg and reach nothing else.
 - **Claude Code's own features.** Effort levels, Ultracode, fast mode, slash commands, skills, `CLAUDE.md`, MCP servers, tasks and plan approval. See [docs/claude-code-engine.md](docs/claude-code-engine.md).
 - **Model traffic through your Mac.** If a host cannot reach a provider, its model requests can go back through this Mac over the SSH connection.
 - **Long histories.** Conversations of any length open at the end and load earlier pages as you scroll. See [docs/history-browsing.md](docs/history-browsing.md).
@@ -77,15 +78,16 @@ npm run dist       # packages the .dmg and .zip into release/
 app/main/      Electron main process: conversations, SSH setup, settings, keys, updates
 app/renderer/  the interface (React, built with Vite)
 agent/         what runs next to each agent, on this Mac or a host: the relay that keeps
-               sessions alive, the Pi extension, and the adapters for the other three agents
+               sessions alive, Iris's extension of Pi, the adapters for the other four agents, and the
+               agents' visual tool
 core/          the agent protocol client, local and SSH transports, the egress proxy
 build/         app icon, packaging hook, release scripts
 test/          unit tests, UI drivers, SSH integration suites, mock model servers
 ```
 
-- **Every agent speaks one protocol to the app.** Pi runs as `pi --mode rpc` with Iris's extension ([`agent/iris-bridge.js`](agent/iris-bridge.js)). Claude Code, Codex, Antigravity and Cursor each run behind a small adapter that translates their own protocol into the same events ([`agent/iris-claude.mjs`](agent/iris-claude.mjs), [`agent/iris-codex.mjs`](agent/iris-codex.mjs), [`agent/iris-antigravity.mjs`](agent/iris-antigravity.mjs), which [`agent/iris-cursor.mjs`](agent/iris-cursor.mjs) runs with Cursor's profile since both speak ACP), so the interface is the same for all five.
+- **Every agent speaks one protocol to the app.** Iris's agent is Pi run as `pi --mode rpc` with Iris's extension ([`agent/iris-bridge.js`](agent/iris-bridge.js)). Claude Code, Codex, Antigravity and Cursor each run behind a small adapter that translates their own protocol into the same events ([`agent/iris-claude.mjs`](agent/iris-claude.mjs), [`agent/iris-codex.mjs`](agent/iris-codex.mjs), [`agent/iris-antigravity.mjs`](agent/iris-antigravity.mjs), which [`agent/iris-cursor.mjs`](agent/iris-cursor.mjs) runs with Cursor's profile since both speak ACP), so the interface is the same for all five.
 - **A relay owns the agent processes.** On each machine a small daemon ([`agent/iris-relay.mjs`](agent/iris-relay.mjs)) starts the agents and buffers their events. The app attaches to it, directly on this Mac and through system OpenSSH on a host, which is why a dropped connection loses nothing.
-- **Hosts need nothing preinstalled except SSH.** On first use Iris installs Node, Pi and its own files under `~/.iris` on the host ([`app/main/remote-setup.mjs`](app/main/remote-setup.mjs)).
+- **Hosts need nothing preinstalled except SSH.** On first use Iris installs Node, Pi (its agent's runtime) and its own files under `~/.iris` on the host ([`app/main/remote-setup.mjs`](app/main/remote-setup.mjs)).
 - **Keys.** `secrets.json` in the app's data folder is AES-256-GCM encrypted; the key is in the login Keychain as "Iris Keys" ([`app/main/store.mjs`](app/main/store.mjs)). A key reaches an agent over a pipe (over the SSH channel for a host), never in a command line.
 
 ## Tests
@@ -94,9 +96,10 @@ test/          unit tests, UI drivers, SSH integration suites, mock model server
 npm test                   # unit tests (node:test); what CI runs
 npm run test:ui            # drives the built app and the Git review pane; needs a display
 npm run test:integration   # real sessions over SSH to a throwaway sshd on 127.0.0.1, and the end-to-end UI suite
+npm run test:real          # the app against your real, signed-in Codex (add -- --cursor for Cursor): spends model calls
 ```
 
-No test calls a real model: answers come from mock servers on localhost. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Apart from `test:real`, no test calls a real model: answers come from mock servers on localhost. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Known limits
 
@@ -111,4 +114,4 @@ Iris is an independent open-source project. It is not affiliated with, endorsed 
 
 ## Licence
 
-[MIT](LICENSE)
+[MIT](LICENSE). Iris's agent is built on [Pi](https://github.com/earendil-works/pi) by Mario Zechner, under the MIT License; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

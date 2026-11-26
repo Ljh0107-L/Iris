@@ -40,7 +40,12 @@ test('a conversation opens with the account, the models and their efforts, and a
   assert.deepEqual(state.cli.account, { signedIn: true, canSignIn: false, identity: 'dev@example.test', plan: 'pro', limits: [{ usedPercent: 12, windowMinutes: 300, resetsAt: 1900000000000 }, { usedPercent: 40, windowMinutes: 10080 }] });
   // Each model says what it has, so a model picked before a conversation exists shows the right menus.
   assert.deepEqual(state.cli.options[0].options.map(c => [c.value, c.sub.map(o => `${o.id}:${o.currentValue}`)]), [['gpt-a', ['effort:low', 'speed:standard']], ['gpt-b', []]]);
-  assert.deepEqual(f.calls('thread/start')[0].params, { cwd: join(f.dir, 'work'), approvalPolicy: 'untrusted', sandbox: 'workspace-write' });
+  const { config, ...opened } = f.calls('thread/start')[0].params;
+  assert.deepEqual(opened, { cwd: join(f.dir, 'work'), approvalPolicy: 'untrusted', sandbox: 'workspace-write' });
+  // Iris's visual tool: an MCP server of the thread's own, run by the adapter's own Node.
+  assert.deepEqual(Object.keys(config.mcp_servers), ['iris']);
+  assert.match(config.mcp_servers.iris.args[0], /agent\/iris-visual\.mjs$/);
+  assert.equal(config.mcp_servers.iris.command, process.execPath);
   assert.equal((await a.rpc('cli_set_config', { configId: 'effort', value: 'high' })).success, true);
   assert.equal((await a.rpc('cli_set_config', { configId: 'effort', value: 'ultra' })).success, false, 'only what the model offers');
   assert.deepEqual((await a.rpc('prompt', { message: 'hello' })).data, { disposition: 'started' });
@@ -249,6 +254,7 @@ test('a message sent while Codex works joins the turn, and Stop interrupts it', 
   await a.next(settled);
   assert.equal(lastReply(a.events).stopReason, 'aborted');
   assert.deepEqual((await a.rpc('get_messages')).data.messages.map(m => m.role), ['user', 'user', 'assistant']);
+  assert.deepEqual((await a.rpc('get_messages')).data.messages[1].steer, { at: 0 }, 'saved with where in the reply it was sent');
 });
 
 test('signed out: the conversation says so, and Settings can check and sign out without opening one', { timeout: 20000 }, async t => {
@@ -378,7 +384,7 @@ test('a conversation asks for 800K of usable context, as much as the model may b
   const a = f.start(undefined, { home });
   const state = await a.rpc('get_state');
   assert.ok(f.calls('thread/start').length, JSON.stringify([state, f.calls().map(c => c.method)]));
-  assert.deepEqual(f.calls('thread/start').find(c => !c.params.ephemeral).params.config, { model_context_window: 842106 });
+  assert.equal(f.calls('thread/start').find(c => !c.params.ephemeral).params.config.model_context_window, 842106);
 });
 
 test('a question Codex asks without stopping is a card; its answer is a message of the person’s own, after the turn it stops', { timeout: 20000 }, async t => {

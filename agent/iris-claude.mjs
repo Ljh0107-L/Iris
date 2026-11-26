@@ -23,6 +23,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { VISUAL_TOOL, visualServer } from './iris-visual.mjs';
 
 // ------------------------------------------------------------------ helpers (exported for tests)
 export const CC_TOOL_NAMES = { Read: 'read', Write: 'write', Edit: 'edit', MultiEdit: 'edit', Bash: 'bash', Grep: 'grep', Glob: 'find', LS: 'ls' };
@@ -371,6 +372,9 @@ export class ClaudeAdapter {
     if (c.model?.id) args.push('--model', c.model.id);
     if (c.effort) args.push('--effort', c.effort);
     if (c.permissionMode) args.push('--permission-mode', c.permissionMode);
+    // Iris's visual tool, as an MCP server of its own, allowed without asking (it only shows a page).
+    const { name: server, ...visual } = visualServer();
+    args.push('--mcp-config', JSON.stringify({ mcpServers: { [server]: { type: 'stdio', ...visual } } }), '--allowedTools', `mcp__${server}__${VISUAL_TOOL}`);
     const settings = {};
     if (c.ultracode) settings.ultracode = true;
     if (c.fast) settings.fastMode = true;

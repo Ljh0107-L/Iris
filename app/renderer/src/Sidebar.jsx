@@ -4,7 +4,7 @@ import { Icon, EngineLogo } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, useResizable } from './ui.jsx';
 import { groupSessions } from './session-groups.js';
 import { setAppearance } from './store.js';
-import { api, archiveSession, askConfirm, cancelWarm, deleteSession, forkSession, goBack, goForward, newSession, notify, openPalette, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
+import { api, archiveSession, askConfirm, cancelWarm, deleteSession, forkSession, goBack, goForward, newSession, notify, openPalette, openSession, openHandoff, openSettings, restartConversation, toggleSidebar, useStore, warmSession } from './store.js';
 
 export function SessionMenuItems({ session, close, onRename }) {
   const active = useStore(s => s.activeId === session.id);
@@ -13,6 +13,10 @@ export function SessionMenuItems({ session, close, onRename }) {
   return <>
     <MenuItem icon="edit" label="Rename" onClick={() => { close(); onRename(); }} />
     <MenuItem icon="fork" label="Fork" disabled={!!forkUnavailable} title={forkUnavailable ?? undefined} onClick={() => { close(); forkSession(session.id).catch(failed); }} />
+    <MenuItem icon="arrowUpRight" label="Hand off to another agent…" onClick={() => { close(); openHandoff(session.id, 'continue'); }} />
+    <MenuItem icon="eye" label="Review with another agent…" onClick={() => { close(); openHandoff(session.id, 'review'); }} />
+    <MenuItem icon="refresh" label="Restart agent" title="End the agent’s process (and what it is doing) and start it again from the conversation’s history"
+      onClick={() => { close(); restartConversation(session.id).catch(failed); }} />
     <MenuItem icon="archive" label="Archive" onClick={() => { close(); archiveSession(session.id); }} />
     <MenuItem icon="trash" label="Delete" className="danger" onClick={() => { close(); askConfirm({ title: 'Delete conversation?', message: session.title, action: 'Delete', run: () => deleteSession(session.id).catch(failed) }); }} />
   </>;
@@ -44,7 +48,7 @@ const SessionRow = memo(function SessionRow({ session, active }) {
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setTitle(session.title); setEditing(false); } }} />
         : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onMouseLeave={cancelWarm} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
             {/* Which agent the conversation runs on, before its title: all four are told apart at a glance. */}
-            <span className="session-engine" aria-hidden="true" title={engineLabel(session.engine)}><EngineLogo engine={session.engine ?? 'pi'} size={15} className="session-engine-logo" title={engineLabel(session.engine)} /></span>
+            <span className="session-engine" aria-hidden="true" title={engineLabel(session.engine)}><EngineLogo engine={session.engine ?? 'iris'} size={15} className="session-engine-logo" title={engineLabel(session.engine)} /></span>
             <span className="session-title">{session.title}</span>
             {indicator && <span className="session-indicator">{indicator}</span>}
           </button>}

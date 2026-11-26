@@ -32,7 +32,7 @@ try {
   await invoke('saveProvider', { id: 'runtime-lab', name: 'Runtime fixture', kind: 'custom', api: 'openai-completions', baseUrl: mock.baseUrl('runtime-lab'),
     models: [{ id: 'alpha-1', reasoning: false, contextWindow: 128000, maxTokens: 32768, input: ['text'] }] }, 'sk-offline-fixture');
   session = await invoke('createSession', { environmentId: 'local', cwd, model: { provider: 'runtime-lab', id: 'alpha-1' }, thinkingLevel: 'high', prompt: 'Runtime regression' });
-  const main = await run(`[[bash:node -p "'main-runtime=' + Boolean(process.versions.electron)"; "$PI_NODE" -p "'main-pi-node=' + Boolean(process.versions.electron)"]]`);
+  const main = await run(`[[bash:node -p "'main-runtime=' + Boolean(process.versions.electron)"; "$IRIS_NODE" -p "'main-pi-node=' + Boolean(process.versions.electron)"]]`);
   const mainOutput = main.find(m => m.role === 'toolResult' && m.toolName === 'bash')?.content?.[0]?.text ?? '';
   assert.match(mainOutput, /main-runtime=true/);
   assert.match(mainOutput, /main-pi-node=true/);
@@ -40,7 +40,7 @@ try {
   assert.equal(child.status, 'completed');
   const output = child.steps.find(step => step.name === 'bash')?.output ?? '';
   assert.match(output, /runtime=true/); assert.match(output, /pi-node=true/);
-  assert.ok(mock.requests.filter(request => request.subagent).every(request => request.system.includes('PI_NODE')));
+  assert.ok(mock.requests.filter(request => request.subagent).every(request => request.system.includes('IRIS_NODE')));
   console.log('PASS bundled Electron Node is callable from main and child tools without a system Node PATH or extra window');
 
   for (const mode of ['length', 'length-tools', 'length-repeat']) {

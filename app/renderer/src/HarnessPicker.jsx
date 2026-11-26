@@ -13,7 +13,7 @@ export const HARNESSES = [
   { id: 'antigravity', title: 'Antigravity', detail: 'Your Google account' },
   { id: 'cursor', title: 'Cursor', detail: 'Your Cursor plan' },
   { id: 'claude-code', title: 'Claude Code', detail: 'Anthropic models · API key' },
-  { id: 'pi', title: 'Pi', detail: 'Any model · API key' },
+  { id: 'iris', title: 'Iris', detail: 'Any model · API key' },
 ];
 const CLI_STATUS = { ready: 'Signed in', signedOut: 'Not signed in', missing: 'Not installed', unreachable: 'Machine unreachable' };
 
@@ -47,7 +47,7 @@ function HarnessMenu({ environmentId, close }) {
 }
 
 export function HarnessPicker({ environmentId }) {
-  const engine = useStore(s => s.draft.engine) ?? 'pi';
+  const engine = useStore(s => s.draft.engine) ?? 'iris';
   const current = HARNESSES.find(h => h.id === engine) ?? HARNESSES.at(-1);
   return <Trigger width={340} placement="top-start" label="Agent" title={`${current.title} · ${current.detail}`} className="harness-trigger"
     menu={close => <HarnessMenu environmentId={environmentId} close={close} />}>

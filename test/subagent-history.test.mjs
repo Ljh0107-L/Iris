@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { Store } from '../app/main/store.mjs';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 
 function fixture(t, records) {
   const dir = mkdtempSync(join(tmpdir(), 'iris-subagent-history-'));
@@ -18,7 +18,7 @@ function fixture(t, records) {
   const manager = new SessionManager({ store, environments: forbidden, local: {}, remoteSetup: forbidden });
   clearInterval(manager.sweeper);
   for (const name of ['ensureStarted', 'messages', 'prepare', 'env', 'relaySessions', 'stopRelay', 'close', 'abort']) t.mock.method(manager, name, forbidden);
-  t.mock.method(PiSession.prototype, 'start', forbidden);
+  t.mock.method(AgentSession.prototype, 'start', forbidden);
   let events = 0;
   manager.on('sessions', () => { events++; });
   const saves = t.mock.method(store, 'saveSessions');

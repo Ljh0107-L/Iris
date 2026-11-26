@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localTransport, sshTransport } from '../core/transports.mjs';
 import { startMockLlm } from './mock-llm.mjs';
 
@@ -25,7 +25,7 @@ const piCli = join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bund
 const bridge = join(root, 'agent/iris-bridge.js');
 // Where the harness itself runs on an Electron-provided node (Iris's fallback is an Electron
 // helper), the remote side must use that helper's launcher: it sets ELECTRON_RUN_AS_NODE for it.
-const remoteNode = process.versions.electron ? (process.env.PI_NODE || process.execPath) : process.execPath;
+const remoteNode = process.versions.electron ? (process.env.IRIS_NODE || process.execPath) : process.execPath;
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -58,8 +58,8 @@ const remoteTransport = opts['ssh-host']
   : localTransport(remoteTarget);
 const boot = { providers };
 
-const local = new PiSession({ id: 'local', transport: localTransport(localTarget), boot });
-const remote = new PiSession({ id: 'remote', transport: remoteTransport, boot });
+const local = new AgentSession({ id: 'local', transport: localTransport(localTarget), boot });
+const remote = new AgentSession({ id: 'remote', transport: remoteTransport, boot });
 const sessions = [local, remote];
 
 // Desktop-side state per session: streamed text, tool events, questions answered.
@@ -205,7 +205,7 @@ try {
     const runtimeCheck = await run(session, '[[subagents-runtime]]');
     const runtimeResult = runtimeCheck.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];
     const runtimeOutput = runtimeResult?.steps.find(s => s.name === 'bash')?.output ?? '';
-    check(`[${session.id}] child shell can use node and PI_NODE from the actual runtime`, runtimeResult?.status === 'completed' && runtimeOutput.includes('runtime=false') && runtimeOutput.includes('pi-node=false'), runtimeOutput);
+    check(`[${session.id}] child shell can use node and IRIS_NODE from the actual runtime`, runtimeResult?.status === 'completed' && runtimeOutput.includes('runtime=false') && runtimeOutput.includes('pi-node=false'), runtimeOutput);
     for (const scenario of ['length', 'length-tools', 'length-repeat']) {
       const limited = await run(session, `[[subagents-${scenario}]]`);
       const child = limited.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];

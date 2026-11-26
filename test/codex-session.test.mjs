@@ -84,6 +84,12 @@ test('Codex: found on the login PATH, opened with the choices made beforehand, a
   done = settled();
   await manager.abort(second.id);
   await done;
+  // Restart: the agent's process is ended and started again from the conversation's history.
+  const before = calls('initialize').length;
+  assert.equal(await manager.restart(second.id), true);
+  assert.equal(calls('initialize').length, before + 1, 'a new Codex process');
+  assert.equal(calls('thread/resume').at(-1)?.params.threadId, 'thread-1', 'that picks up the same thread');
+  assert.equal(manager.runtimes.get(second.id)?.status, 'connected');
   await manager.delete(first.id); await manager.delete(second.id);
 
   // A second account is a second home directory: its own sign-in, and conversations that stay with it.

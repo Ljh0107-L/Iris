@@ -34,7 +34,7 @@ test('actual Node setup only appends its directory, retains PATH order and is id
   const result = setupRuntimeEnvironment({ env, electron: false });
   assert.equal(result.ready, true);
   assert.equal(result.node, process.execPath);
-  assert.equal(env.PI_NODE, process.execPath);
+  assert.equal(env.IRIS_NODE, process.execPath);
   assert.equal(env.PATH, original.split(delimiter).includes(dirname(process.execPath)) ? original : original + delimiter + dirname(process.execPath));
   const once = env.PATH;
   assert.deepEqual(setupRuntimeEnvironment({ env, electron: false }), result);
@@ -66,7 +66,7 @@ test('Electron shim is private, scoped, quoted, idempotent and contains no boot 
   assert.equal(result.ready, true);
   assert.equal(result.nodeOnPath, true);
   assert.equal(basename(result.node), 'node');
-  assert.equal(env.PI_NODE, result.node);
+  assert.equal(env.IRIS_NODE, result.node);
   assert.equal(env.PATH, original + delimiter + dirname(result.node));
   assert.equal(env.ELECTRON_RUN_AS_NODE, 'unchanged-parent-value');
   assert.equal(lstatSync(result.node).mode & 0o777, 0o700);
@@ -116,7 +116,7 @@ test('Node CLI semantics survive both direct runtime and simulated Electron shim
     assert.equal(run(setup.node, ['-'], { env, input: 'console.log(42)' }).stdout.trim(), '42');
     assert.equal(run(setup.node, ['-e', 'process.exit(23)'], { env }).status, 23);
     assert.notEqual(run(setup.node, ['--definitely-not-a-node-option'], { env }).status, 0);
-    const bash = run('/bin/sh', ['-c', '"$PI_NODE" -p "6 * 7"'], { env });
+    const bash = run('/bin/sh', ['-c', '"$IRIS_NODE" -p "6 * 7"'], { env });
     assert.equal(bash.stdout.trim(), '42');
     const fallbackOnly = run('/bin/sh', ['-c', 'node -p "6 * 7"'], { env: { ...env, PATH: dirname(setup.node) } });
     assert.equal(fallbackOnly.status, 0, fallbackOnly.stderr);
@@ -124,7 +124,7 @@ test('Node CLI semantics survive both direct runtime and simulated Electron shim
   }
 });
 
-test('PATH keeps an existing node ahead of the fallback while PI_NODE selects bundled runtime', posixOnly, t => {
+test('PATH keeps an existing node ahead of the fallback while IRIS_NODE selects bundled runtime', posixOnly, t => {
   const { root, env } = fixture(t);
   const preferred = join(root, 'preferred bin');
   executable(join(preferred, 'node'), '#!/bin/sh\nprintf preferred-node\n');
@@ -132,23 +132,23 @@ test('PATH keeps an existing node ahead of the fallback while PI_NODE selects bu
   const setup = setupRuntimeEnvironment({ env, electron: true });
   assert.equal(setup.ready, true);
   assert.equal(run('/bin/sh', ['-c', 'node'], { env }).stdout, 'preferred-node');
-  assert.equal(run('/bin/sh', ['-c', '"$PI_NODE" -p "40 + 2"'], { env }).stdout.trim(), '42');
+  assert.equal(run('/bin/sh', ['-c', '"$IRIS_NODE" -p "40 + 2"'], { env }).stdout.trim(), '42');
   assert.notEqual(run('/bin/sh', ['-c', 'command -v npm; command -v npx'], { env }).status, 0);
 });
 
-test('failure clears stale PI_NODE, leaves PATH intact and never includes credentials or raw errors', posixOnly, t => {
+test('failure clears stale IRIS_NODE, leaves PATH intact and never includes credentials or raw errors', posixOnly, t => {
   const { root, env } = fixture(t);
   const secret = 'private-api-key-do-not-serialize';
-  env.PI_NODE = '/stale/runtime';
+  env.IRIS_NODE = '/stale/runtime';
   env.IRIS_BOOT = secret;
   const original = env.PATH;
   const missing = setupRuntimeEnvironment({ env, execPath: join(root, secret), electron: true });
   assert.deepEqual(missing, { ready: false, diagnostic: 'runtime executable: ENOENT' });
-  assert.equal(env.PI_NODE, undefined);
+  assert.equal(env.IRIS_NODE, undefined);
   assert.equal(env.PATH, original);
   assert.ok(!JSON.stringify(missing).includes(secret));
   assert.ok(!runtimeNote(missing).includes(secret));
-  assert.match(runtimeNote(missing), /Do not assume node or PI_NODE works/);
+  assert.match(runtimeNote(missing), /Do not assume node or IRIS_NODE works/);
   writeFileSync(join(root, 'not-a-directory'), secret);
   env.PI_CODING_AGENT_DIR = join(root, 'not-a-directory');
   const blocked = setupRuntimeEnvironment({ env, electron: true });
@@ -175,7 +175,7 @@ test('insecure shim directories and symlinked runtime roots are rejected without
   assert.deepEqual(readdirSync(target), []);
 });
 
-test('paths unrepresentable in PATH retain a working absolute PI_NODE without a false node claim', posixOnly, t => {
+test('paths unrepresentable in PATH retain a working absolute IRIS_NODE without a false node claim', posixOnly, t => {
   const { root, env } = fixture(t);
   env.PI_CODING_AGENT_DIR = join(root, 'settings:colon');
   const original = env.PATH;
@@ -183,14 +183,14 @@ test('paths unrepresentable in PATH retain a working absolute PI_NODE without a 
   assert.equal(result.ready, true);
   assert.equal(result.nodeOnPath, false);
   assert.equal(env.PATH, original);
-  accessSync(env.PI_NODE, constants.X_OK);
+  accessSync(env.IRIS_NODE, constants.X_OK);
   assert.ok(!runtimeNote(result).includes('through node and'));
 });
 
 test('runtime prompt facts are accurate and confer no test, install or GUI permissions', () => {
   const prompt = runtimeNote({ ready: true, node: "/private/Pi's app/node", nodeOnPath: true });
   assert.match(prompt, /node and/);
-  assert.match(prompt, /"\$PI_NODE"/);
+  assert.match(prompt, /"\$IRIS_NODE"/);
   assert.match(prompt, /does not supply npm or npx/);
   assert.match(prompt, /changes nothing about what you may run/);
   assert.match(prompt, /the user's and the project's instructions/);
@@ -217,7 +217,7 @@ test('the working-style note: an assessment for a question, accurate reports, an
 
 test('bridge waits for session_start and adds runtime metadata without replacing other sections', t => {
   const { env } = fixture(t);
-  const keys = ['PATH', 'PI_NODE', 'PI_CODING_AGENT_DIR', 'IRIS_BOOT'];
+  const keys = ['PATH', 'IRIS_NODE', 'PI_CODING_AGENT_DIR', 'IRIS_BOOT'];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   t.after(() => { for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; } });
   delete process.env.IRIS_BOOT;

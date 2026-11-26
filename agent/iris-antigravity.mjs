@@ -6,6 +6,7 @@ import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, mkdirSync, 
 import { isAbsolute, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
+import { visualServer } from './iris-visual.mjs';
 
 // The agents this adapter runs: each is its vendor's official CLI, spoken to over ACP and signed in with the
 // person's own account there. What differs between them is here.
@@ -403,6 +404,11 @@ function toolOf(tool) {
   const raw = tool.raw ?? {};
   const named = [raw.Path, raw.path].find(value => text(value) && isAbsolute(value));
   const path = tool.paths[0] ?? named ?? null;
+  // Iris's visual tool (its MCP server, by whatever name the CLI gives it): the page is the call's argument. Cursor
+  // gives an MCP call as { providerIdentifier, toolName, args }.
+  const visual = object(raw.args) && raw.toolName === 'show_visual' ? raw.args : raw;
+  if (typeof visual.html === 'string' && (/show_visual|show a visual/i.test(`${tool.cliName ?? ''} ${tool.title ?? ''} ${raw._toolName ?? ''} ${raw.toolName ?? ''}`) || /<(html|body|canvas|svg|script)\b/i.test(visual.html))) return { name: 'mcp__iris__show_visual',
+    arguments: { title: text(visual.title) ? visual.title.slice(0, 200) : 'Visual', html: visual.html, ...(Number.isFinite(visual.height) ? { height: visual.height } : {}), ...(text(visual.id) ? { id: visual.id.slice(0, 120) } : {}) } };
   if (raw._toolName === 'askQuestion' && Array.isArray(raw.questions)) return { name: 'AskUserQuestion', arguments: { questions: raw.questions.filter(q => text(q?.prompt)).slice(0, 8)
     .map(q => ({ question: q.prompt.slice(0, 2000), options: (Array.isArray(q.options) ? q.options : []).filter(o => text(o?.label)).slice(0, 24).map(o => ({ label: o.label.slice(0, 300) })), ...(q.allowMultiple ? { multiSelect: true } : {}) })) } };
   if (tool.kind === 'execute') {
@@ -750,7 +756,10 @@ export class AntigravityAdapter {
     try {
       this.write({ type: 'cli_opening' });
       if (!saved) tr.bind({ creating: true, attempts: (tr.binding?.creating ? tr.binding.attempts ?? 1 : 0) + 1 });
-      const { result, seq } = await peer.request(method, { cwd: this.config.cwd, mcpServers: [], ...(saved ? { sessionId: saved } : {}) }, OPEN_MS);
+      // Iris's visual tool, as an MCP server of the session's own (ACP gives the environment as a list).
+      const { env: visualEnv, ...visual } = visualServer();
+      const mcpServers = [{ ...visual, env: Object.entries(visualEnv).map(([name, value]) => ({ name, value })) }];
+      const { result, seq } = await peer.request(method, { cwd: this.config.cwd, mcpServers, ...(saved ? { sessionId: saved } : {}) }, OPEN_MS);
       const sessionId = saved ?? result?.sessionId;
       if (!text(sessionId) || (saved && result?.sessionId != null && result.sessionId !== saved)) throw new Error(`${this.p.label} did not return the expected session ID.`);
       // Record a successful new session even if the pipe closes immediately after the reply.

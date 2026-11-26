@@ -117,7 +117,7 @@ function FolderMenu({ environmentId, value, onChange, close, onBrowse }) {
 }
 
 // ---------------------------------------------------------------- models
-export function ModelMenu({ value, environmentId, engine = 'pi', onChange, close }) {
+export function ModelMenu({ value, environmentId, engine = 'iris', onChange, close }) {
   const catalog = useStore(s => modelsForEnvironment(s.catalog, environmentId, engine));
   const catalogError = useStore(s => s.catalogError);
   const providers = useStore(s => s.settings?.providers ?? []);
@@ -164,7 +164,7 @@ export const modelLabel = (model, catalog) => {
 // Built-in commands handled by the desktop (or the bridge, for /goal); Pi's own skills and prompt templates
 // are listed after them.
 export const BUILTIN_COMMANDS = [
-  { name: 'goal', args: true, description: 'Set a goal Pi keeps working toward' },
+  { name: 'goal', args: true, description: 'Set a goal Iris keeps working toward' },
   { name: 'compact', description: 'Summarize the conversation to free up context' },
   { name: 'fork', description: 'Continue in a copy of this conversation' },
   { name: 'new', description: 'Start a new conversation' },
@@ -391,7 +391,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   }, []);
   useLayoutEffect(() => { size.current?.update(); }, [text]);
   // Slash commands: shown while the message is a single "/word" being typed.
-  const activeEngine = (session ? session.engine : !onCancel ? draftTarget?.engine : null) ?? 'pi';
+  const activeEngine = (session ? session.engine : !onCancel ? draftTarget?.engine : null) ?? 'iris';
   const cli = isCliEngine(activeEngine);
   // The name of the chosen model when it takes text only (Pi and Claude Code; the CLIs check their own).
   const textOnlyModel = useStore(s => {
@@ -416,6 +416,13 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const commands = slashQuery === null ? [] : mergedCommands.filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   useEffect(() => setSlashIndex(0), [slashQuery]);
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
+  // A visual handed the person a message (iris.send): the message box takes the focus, so it can be sent.
+  useEffect(() => {
+    if (onCancel) return;
+    const focus = () => { ref.current?.focus(); };
+    window.addEventListener('iris:focus-composer', focus);
+    return () => window.removeEventListener('iris:focus-composer', focus);
+  }, [onCancel]);
 
   // @file mentions: workspace search on local Mac or remote SSH host.
   const targetCwd = session ? session.cwd : draftTarget?.cwd;
@@ -678,7 +685,7 @@ export function ComposerBar({ session }) {
   // A provider exists but its models are still being read (at start, or just after adding it).
   const loadingModels = useStore(s => s.catalogLoading && (s.settings?.providers?.length ?? 0) > 0);
   const isNew = !session;
-  const engine = (isNew ? draft.engine : session.engine) ?? 'pi';
+  const engine = (isNew ? draft.engine : session.engine) ?? 'iris';
   const isClaude = engine === 'claude-code';
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const availableModels = useMemo(() => modelsForEnvironment(catalog, environmentId, engine), [catalog, environmentId, engine]);
@@ -742,7 +749,7 @@ export function ComposerBar({ session }) {
           </button>
         ) : (
           <button type="button" className={`trigger ultra-trigger ${ultraOn ? 'on' : ''}`} aria-label="Ultra mode" aria-pressed={ultraOn} onClick={toggleUltra}
-            title={ultraOn ? 'Ultra is on: Pi works on each request on its own until it is done' : 'Ultra mode: keep working autonomously until the task is done'}>
+            title={ultraOn ? 'Ultra is on: Iris works on each request on its own until it is done' : 'Ultra mode: keep working autonomously until the task is done'}>
             <Icon name={ultraOn ? 'shield' : 'infinity'} size={13.5} /><span>Ultra</span>
           </button>
         )}

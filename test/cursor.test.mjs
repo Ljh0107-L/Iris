@@ -158,3 +158,15 @@ test('an image Cursor’s model makes is the tool’s result and part of the rep
   assert.deepEqual(result.content.map(c => c.type), ['text', 'image'], 'and in the step: where it was saved, and the image');
   assert.match(result.content[0].text, /pelican\.png$/);
 });
+
+test('Cursor is given Iris’s visual tool, and its MCP call is a visual of its own', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  const a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'visualize a dot' });
+  await a.until(e => e.type === 'agent_settled', 'the turn');
+  assert.deepEqual(f.state().mcpServers, ['iris'], 'the session is given the visual tool');
+  const reply = a.events.findLast(e => e.type === 'message_end' && e.message.role === 'assistant').message;
+  const visual = reply.content.find(b => b.type === 'toolCall' && b.name === 'mcp__iris__show_visual');
+  assert.deepEqual(visual?.arguments, { title: 'Dot', html: '<canvas></canvas>' });
+});

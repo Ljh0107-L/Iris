@@ -7,7 +7,7 @@ export const CLI_ENGINES = {
   cursor: { id: 'cursor', label: 'Cursor', cli: 'Cursor CLI', bin: 'cursor-agent' },
 };
 export const isCliEngine = engine => typeof engine === 'string' && Object.hasOwn(CLI_ENGINES, engine);
-export const engineLabel = engine => CLI_ENGINES[engine]?.label ?? (engine === 'claude-code' ? 'Claude Code' : 'Pi');
+export const engineLabel = engine => CLI_ENGINES[engine]?.label ?? (engine === 'claude-code' ? 'Claude Code' : 'Iris');
 export const engineCli = engine => CLI_ENGINES[engine]?.cli ?? engineLabel(engine);
 // Whether a machine has the CLI installed and signed in is remembered per engine and machine.
 export const readinessKey = (engine, environmentId) => engine === 'antigravity' || !isCliEngine(engine) ? environmentId : `${engine}:${environmentId}`;

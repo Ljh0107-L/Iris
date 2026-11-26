@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { visualServer } from './iris-visual.mjs';
 
 const ENGINE = 'codex';
 const BINDING = 'iris-codex-thread';
@@ -469,11 +470,13 @@ export class CodexAdapter {
     const saved = tr.binding?.threadId;
     // The larger context window, for the model the conversation opens with (see contextConfig).
     const model = this.models.some(m => m.id === tr.settings?.model) ? tr.settings.model : this.models.find(m => m.isDefault)?.id ?? this.models[0]?.id;
-    const config = contextConfig(this.config.home, model);
+    // Iris's visual tool, as an MCP server of the thread's own (mcp__iris__show_visual).
+    const { name: server, ...visual } = visualServer();
+    const config = { ...contextConfig(this.config.home, model), mcp_servers: { [server]: visual } };
     let opened;
     try {
-      opened = saved ? await peer.request('thread/resume', { threadId: saved, cwd: this.config.cwd, ...policy, ...(config ? { config } : {}) }, OPEN_MS)
-        : await peer.request('thread/start', { cwd: this.config.cwd, ...policy, ...(config ? { config } : {}) }, OPEN_MS);
+      opened = saved ? await peer.request('thread/resume', { threadId: saved, cwd: this.config.cwd, ...policy, config }, OPEN_MS)
+        : await peer.request('thread/start', { cwd: this.config.cwd, ...policy, config }, OPEN_MS);
     } catch (error) {
       if (signInNeeded(error)) { this.authRequired = true; this.#updateState(); return; }
       throw new Error(saved ? `Codex could not reopen this conversation: ${error.message}` : `Codex could not start a conversation: ${error.message}`);
@@ -508,8 +511,11 @@ export class CodexAdapter {
     const input = [...(message ? [{ type: 'text', text: message, text_elements: [] }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', url: `data:${mimeType};base64,${data}` }))];
     // A message sent while Codex works joins the running turn before its next model call.
     if (this.turn?.id) {
-      await this.peer.request('turn/steer', { threadId: this.threadId, expectedTurnId: this.turn.id, input });
-      const user = { role: 'user', content: [...(message ? [{ type: 'text', text: message }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', mimeType, data }))], timestamp: Date.now() };
+      const turn = this.turn;
+      await this.peer.request('turn/steer', { threadId: this.threadId, expectedTurnId: turn.id, input });
+      // Shown where it was sent: inside the turn's reply (saved whole when the turn ends), after what was there.
+      const user = { role: 'user', content: [...(message ? [{ type: 'text', text: message }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', mimeType, data }))], timestamp: Date.now(),
+        ...(this.turn === turn ? { steer: { at: turn.content.length } } : {}) };
       this.transcript.append([{ type: 'message', message: user }]);
       this.#message(user);
       return { disposition: 'queued' };

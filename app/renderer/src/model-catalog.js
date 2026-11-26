@@ -29,15 +29,15 @@ export function clampEffort(allowed, wanted, fallback = 'medium') {
   return allowed.includes(fallback) ? fallback : allowed[0];
 }
 
-export const isModelForEngine = (model, engine = 'pi') =>
+export const isModelForEngine = (model, engine = 'iris') =>
   isCliEngine(engine) ? false : engine === 'claude-code'
     ? (Array.isArray(model?.engines) ? model.engines.includes('claude-code') : model?.api === 'anthropic-messages')
     : true;
 
-export const modelsForEnvironment = (catalog, environmentId, engine = 'pi') =>
+export const modelsForEnvironment = (catalog, environmentId, engine = 'iris') =>
   catalog.filter(m => (!m.environments || m.environments.includes(environmentId)) && isModelForEngine(m, engine));
 
-export function modelForEnvironment(catalog, environmentId, preferred, engine = 'pi') {
+export function modelForEnvironment(catalog, environmentId, preferred, engine = 'iris') {
   if (isCliEngine(engine)) return null; // options come from the CLI (agy, codex), not the API-key catalog
   const available = modelsForEnvironment(catalog, environmentId, engine);
   const matched = available.find(m => m.provider === preferred?.provider && m.id === preferred?.id);

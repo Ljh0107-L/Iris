@@ -5,7 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { relaySpawnSpec, shellQuote, sshRelayTransport } from '../core/transports.mjs';
 import { startMockLlm } from './mock-llm.mjs';
 import { root } from './harness.mjs';
@@ -26,7 +26,7 @@ const relayPath = join(work, 'iris-relay.mjs');
 copyFileSync(join(root, 'agent/iris-relay.mjs'), relayPath);
 // Where the harness runs on an Electron-provided node, the remote side must use the helper's
 // launcher: it sets ELECTRON_RUN_AS_NODE, without which the helper refuses to start.
-const remoteNode = process.versions.electron ? (process.env.PI_NODE || process.execPath) : process.execPath;
+const remoteNode = process.versions.electron ? (process.env.IRIS_NODE || process.execPath) : process.execPath;
 const spawnSpec = relaySpawnSpec({ cwd: project, node: remoteNode, piCli: join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir, extensions: [join(root, 'agent/iris-bridge.js')] });
 const boot = { providers: [{ id: 'mock-a', api: 'openai-completions', baseUrl: mock.baseUrl('mock-a'), apiKey: key, models: [{ id: 'alpha-1' }] }] };
 const sessionId = 'relay-test-' + Date.now();
@@ -34,7 +34,7 @@ const ssh = (cmd, input) => execFileSync('ssh', ['-F', opts['ssh-config'], '-o',
 const relayList = () => JSON.parse(ssh(`env IRIS_RUN_DIR=${runDir} ${shellQuote(remoteNode)} ${relayPath} list`)).sessions;
 
 function connect(sinceSeq) {
-  const s = new PiSession({ id: sessionId, boot, relay: { sinceSeq, spawn: spawnSpec },
+  const s = new AgentSession({ id: sessionId, boot, relay: { sinceSeq, spawn: spawnSpec },
     transport: sshRelayTransport({ host: 'iris-test', sshOptions: ['-F', opts['ssh-config']], node: remoteNode, relayPath, runDir }) });
   s.events = []; s.ui = [];
   s.on('event', e => s.events.push(e));

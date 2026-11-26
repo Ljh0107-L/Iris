@@ -8,8 +8,8 @@ import {
   Pencil, Plus, RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles,
   SquareTerminal, StickyNote, Sun, Target, Terminal, Timer, Trash2, TriangleAlert, Unplug, Wifi, WrapText, Wrench,
   X, Zap, Infinity as InfinityIcon,
-} from 'lucide-react';
-import piIcon from './assets/engines/pi.png';
+ Eye } from 'lucide-react';
+import irisIcon from './assets/engines/iris.png';
 import claudeCodeIcon from './assets/engines/claude-code.png';
 import codexIcon from './assets/engines/codex.png';
 import antigravityIcon from './assets/engines/antigravity.png';
@@ -19,7 +19,7 @@ const LUCIDE = {
   sun: Sun, moon: Moon, book: BookOpen, customize: BriefcaseBusiness,
   plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder, folderOpen: FolderOpen,
   chevronDown: ChevronDown, chevronRight: ChevronRight, chevronUp: ChevronUp, caretDown: ChevronDown, caretRight: ChevronRight,
-  check: Check, arrowUp: ArrowUp, arrowUpRight: ArrowUpRight, panel: PanelRight,
+  check: Check, eye: Eye, arrowUp: ArrowUp, arrowUpRight: ArrowUpRight, panel: PanelRight,
   sidebar: PanelLeft, sidebarToggle: PanelLeft, sparkle: Sparkles, shield: ShieldCheck, shieldAlert: ShieldAlert,
   file: StickyNote, fileEdit: FilePen, x: X, alert: TriangleAlert, brain: Brain, refresh: RefreshCw, server: Server,
   key: KeyRound, trash: Trash2, edit: Pencil, globe: Globe, more: Ellipsis, archive: Archive, back: ChevronLeft,
@@ -50,10 +50,10 @@ export function Icon({ name, size = 16, stroke = 1.75, className, style }) {
 
 // Each engine is shown with its own icon: Claude's (for Claude Code), the Codex app's, the Antigravity app's and
 // the Cursor app's (taken from those apps, cropped to the icon) — the vendors' marks, used only to say which engine a
-// conversation runs on — and Pi's, a glossy π in Pi's three brand colours made to sit beside them.
-const ENGINE_ICONS = { pi: piIcon, 'claude-code': claudeCodeIcon, codex: codexIcon, antigravity: antigravityIcon, cursor: cursorIcon };
-export function EngineLogo({ engine = 'pi', size = 16, className = '', title }) {
-  return <img className={`engine-logo ${className}`} src={ENGINE_ICONS[engine] ?? piIcon} width={size} height={size} alt={title ?? ''} aria-hidden={title ? undefined : 'true'} draggable={false} />;
+// conversation runs on — and Iris's own, the app's icon, for Iris's agent.
+const ENGINE_ICONS = { iris: irisIcon, 'claude-code': claudeCodeIcon, codex: codexIcon, antigravity: antigravityIcon, cursor: cursorIcon };
+export function EngineLogo({ engine = 'iris', size = 16, className = '', title }) {
+  return <img className={`engine-logo ${className}`} src={ENGINE_ICONS[engine] ?? irisIcon} width={size} height={size} alt={title ?? ''} aria-hidden={title ? undefined : 'true'} draggable={false} />;
 }
 // Iris's own mark: the >_ of the app icon in its rainbow, without the tile (the geometry of build/make-icon.py).
 // On the welcome screen the underscore blinks, as a prompt's cursor does.

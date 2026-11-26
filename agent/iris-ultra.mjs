@@ -140,9 +140,9 @@ export function createUltra(pi, { enabled: initial = false, review = null, agent
       for (const entry of branch ?? []) if (entry.type === 'custom' && entry.customType === 'iris-ultra') task = entry.data?.task ?? null;
       if (reason === 'fork') { if (task) { task = null; save(); } }
       else if (task?.status === 'active') {
-        if (enabled && ['startup', 'reload'].includes(reason)) { update({ reviewing: false, reason: 'Continued after Pi restarted' }); later(1500); }
+        if (enabled && ['startup', 'reload'].includes(reason)) { update({ reviewing: false, reason: 'Continued after Iris restarted' }); later(1500); }
         // Not saved: a Pi switching files (to fork a conversation) is visiting a file another Pi owns.
-        else task = { ...task, status: 'paused', reviewing: false, reason: 'Pi restarted' };
+        else task = { ...task, status: 'paused', reviewing: false, reason: 'Iris restarted' };
       }
       activeTools(); publish();
     },

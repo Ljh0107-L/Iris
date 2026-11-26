@@ -23,6 +23,7 @@
 // 8. Gemini models behind custom endpoints whose id doesn't name the model (Volcengine Ark's ep-… ids)
 //    reach pi-ai's Gemini adapter as the model their name gives (iris-gemini.mjs).
 import { createBackground } from './iris-background.mjs';
+import { VISUAL_DESCRIPTION, VISUAL_TOOL, callVisual } from './iris-visual.mjs';
 import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
@@ -116,20 +117,20 @@ export function setupRuntimeEnvironment({ env = process.env, execPath = process.
     stage = 'runtime PATH';
     const bin = dirname(node);
     const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH';
-    // A colon (or platform delimiter) in a directory cannot be represented in PATH; PI_NODE
+    // A colon (or platform delimiter) in a directory cannot be represented in PATH; IRIS_NODE
     // still works because tools quote its absolute path rather than reparsing it as PATH.
     const representable = !bin.includes(delimiter);
     let nodeOnPath = false;
     if (representable) {
       const candidate = join(bin, platform === 'win32' ? 'node.exe' : 'node');
-      try { accessSync(candidate, constants.X_OK); nodeOnPath = statSync(candidate).isFile(); } catch { /* PI_NODE remains usable */ }
+      try { accessSync(candidate, constants.X_OK); nodeOnPath = statSync(candidate).isFile(); } catch { /* IRIS_NODE remains usable */ }
       if (env[pathKey] === undefined) env[pathKey] = bin;
       else if (!env[pathKey].split(delimiter).includes(bin)) env[pathKey] += delimiter + bin;
     }
-    env.PI_NODE = node;
+    env.IRIS_NODE = node;
     return { ready: true, node, nodeOnPath, source: electron ? 'Electron shim' : 'Node executable' };
   } catch (error) {
-    delete env.PI_NODE; // Never retain a stale executable after a failed setup.
+    delete env.IRIS_NODE; // Never retain a stale executable after a failed setup.
     if (temporary) { try { unlinkSync(temporary); } catch { /* another session is unaffected */ } }
     // Do not serialize an exception, environment, or boot record into prompts/logs.
     const code = ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'EROFS', 'ENOSPC', 'EEXIST', 'EINVAL', 'ENOTSUP'].includes(error?.code) ? error.code : 'ERROR';
@@ -137,11 +138,38 @@ export function setupRuntimeEnvironment({ env = process.env, execPath = process.
   }
 }
 
+// Iris's agent says it is Iris's. Pi's own opening line says the model works "inside pi", and its docs section
+// points at pi's manual; with an opening line of Iris's (customPrompt) Pi leaves out both, and its tool list and
+// rules too, so those two are written here as Pi writes them. A prompt of the person's own (a SYSTEM.md) is kept.
+export const IRIS_PREAMBLE = 'You are Iris, a coding agent working inside Iris, a desktop app for coding agents. You help users by reading files, executing commands, editing code, and writing new files.';
+export function irisPrompt(options) {
+  if (!options || options.customPrompt) return;
+  options.customPrompt = IRIS_PREAMBLE;
+  const hidden = new Set(options.hiddenTools ?? []);
+  const declared = (options.selectedTools ?? []).filter(name => !hidden.has(name));
+  const snippets = options.toolSnippets ?? {};
+  const listed = declared.filter(name => snippets[name]);
+  const sections = options.sections ??= {};
+  sections.tools = `${listed.length ? listed.map(name => `- ${name}: ${snippets[name]}`).join('\n') : '(none)'}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`;
+  const rules = [], seen = new Set();
+  const add = rule => { const r = String(rule ?? '').trim(); if (r && !seen.has(r)) { seen.add(r); rules.push(r); } };
+  const has = name => declared.includes(name);
+  if ((has('bash') || has('powershell')) && !has('grep') && !has('find') && !has('ls')) {
+    add(has('bash') && has('powershell') ? 'Use bash or PowerShell for file operations like listing, searching, and finding files'
+      : has('powershell') ? 'Use PowerShell for file operations like listing, searching, and finding files' : 'Use bash for file operations like ls, rg, find');
+  }
+  for (const name of declared) for (const rule of options.toolGuidelines?.[name] ?? []) add(rule);
+  for (const rule of options.promptGuidelines ?? []) add(rule);
+  add('Be concise in your responses');
+  add('Show file paths clearly when working with files');
+  sections.rules = rules.map(rule => `- ${rule}`).join('\n');
+}
+
 export function runtimeNote(runtime) {
   return [
     runtime?.ready
-      ? `Node is available through ${runtime.nodeOnPath ? 'node and ' : ''}the absolute executable in PI_NODE (${JSON.stringify(runtime.node)}). Use "$PI_NODE" to select Pi's runtime explicitly; existing PATH entries retain priority.`
-      : `Pi's Node fallback is unavailable (${runtime?.diagnostic ?? 'session setup has not run'}). Do not assume node or PI_NODE works.`,
+      ? `Node is available through ${runtime.nodeOnPath ? 'node and ' : ''}the absolute executable in IRIS_NODE (${JSON.stringify(runtime.node)}). Use "$IRIS_NODE" to select Iris's runtime explicitly; existing PATH entries retain priority.`
+      : `Iris's Node fallback is unavailable (${runtime?.diagnostic ?? 'session setup has not run'}). Do not assume node or IRIS_NODE works.`,
     'Iris does not supply npm or npx with this fallback; do not assume either is installed.',
     "This runtime being available changes nothing about what you may run: follow the user's and the project's instructions on tests, builds, installs and GUI applications.",
     'Prefer bounded lookup in known paths (for example command -v node), not a filesystem-wide find / search. Report missing tools instead of installing them without permission.',
@@ -582,7 +610,7 @@ export default function irisBridge(pi) {
         else if (verb === 'message') subagents.message(id, Buffer.from(payload ?? '', 'base64').toString('utf8'), { from: 'user' }).promise.catch(() => {});
         else if (verb === 'background-sync') background.sync();
         else if (verb === 'background-stop') {
-          if (background.get(id).startedAt !== Number(payload)) throw new Error('This job belongs to an earlier Pi process. Refresh its state before stopping it.');
+          if (background.get(id).startedAt !== Number(payload)) throw new Error('This job belongs to an earlier Iris process. Refresh its state before stopping it.');
           background.stop(id);
         }
         else subagents.sync();
@@ -641,6 +669,7 @@ export default function irisBridge(pi) {
     if (event.messageType === 'user') { subagents.newRequest(); agentsResetAt = Date.now(); } // the per-request agent limit starts over
     else if (ultra.drives && Date.now() - agentsResetAt >= 3600e3) { subagents.newRequest(); agentsResetAt = Date.now(); }
     const options = event.systemPromptOptions;
+    irisPrompt(options);
     const note = options && projectlessNote(options.cwd);
     if (note) (options.sections ??= {}).projectless = note;
     if (options) {
@@ -790,6 +819,26 @@ export default function irisBridge(pi) {
   });
 
   // ---------------------------------------------------------------- files for the user
+  // A visual for the person (an animation, a diagram, something to play with), shown in the conversation: the
+  // same tool the other agents get from Iris's MCP server (iris-visual.mjs), built in here.
+  pi.registerTool({
+    name: VISUAL_TOOL,
+    label: 'Show a visual',
+    description: VISUAL_DESCRIPTION,
+    promptSnippet: 'Show the person an HTML visual (an animation, a diagram, an interactive explanation)',
+    parameters: Type.Object({
+      title: Type.String({ maxLength: 200, description: 'A short name for the visual, shown above it' }),
+      html: Type.String({ description: 'The complete HTML page' }),
+      height: Type.Optional(Type.Number({ minimum: 160, maximum: 900, description: 'Its natural height in pixels. Default 420.' })),
+      id: Type.Optional(Type.String({ maxLength: 120, description: 'The same id again replaces the visual shown with it before' })),
+    }),
+    async execute(_toolCallId, params) {
+      const answer = callVisual(params);
+      if (answer.isError) throw new Error(answer.content[0].text);
+      return { content: answer.content, details: { kind: 'iris-visual' } };
+    },
+  });
+
   // Finished files the model hands over: shown in the conversation as cards with Open and Download,
   // which saves them to the user's Mac, also from an SSH host.
   pi.registerTool({

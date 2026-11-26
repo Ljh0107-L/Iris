@@ -6,7 +6,7 @@ import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localTransport } from '../core/transports.mjs';
 import irisBridge from '../agent/iris-bridge.js';
 
@@ -92,7 +92,7 @@ async function fixture(t, api, { empty = false, reasoningOnly = false, automatic
     res.end();
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const session = new PiSession({ id: 'compact', boot: { config: { speed }, providers: [{ id: provider, ...(modelApiOnly ? {} : { api }), baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test-only',
+  const session = new AgentSession({ id: 'compact', boot: { config: { speed }, providers: [{ id: provider, ...(modelApiOnly ? {} : { api }), baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test-only',
     models: [{ id: modelId, api, contextWindow: 800000, cost: { input: 2, output: 10, cacheRead: 0, cacheWrite: 0 } }] }] },
     transport: localTransport({ node: process.execPath, piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), cwd: dir, agentDir, extensions: [resolve('agent/iris-bridge.js')] }) });
   t.after(async () => { await session.stop(); server.closeAllConnections(); await new Promise(r => server.close(r)); rmSync(dir, { recursive: true, force: true }); });

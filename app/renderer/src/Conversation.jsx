@@ -3,7 +3,7 @@ import { engineLabel, isCliEngine } from './engines.js';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
 import { changesOf, displayBlocks, failureTitle, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
-import { api, editMessage, firstSentAt, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
+import { api, editMessage, firstSentAt, lastActivityAt, restartConversation, setComposerDraft, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, onFollowRequest, openChanges, openFile, openSettings, requestFollow, useStore } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
 import { ImagePreview } from './ImagePreview.jsx';
@@ -258,6 +258,79 @@ function ToolGroup({ calls, tools, live }) {
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
       {open && <div className="tool-group-body">{calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)}</div>}
+    </div>
+  );
+}
+
+// A visual an agent showed (Iris's show_visual tool): its page, running in a sandboxed frame under an address of
+// its own (main's iris-visual scheme: its own scripts and a few CDNs, nothing else), with its title. It can
+// fill the window, and start again from the beginning.
+function VisualCard({ call, tool, live, superseded = false }) {
+  const detailState = useHistoryDetails([call.__historyRef]);
+  const { sessionId } = useContext(DisclosureContext) ?? {};
+  const frameRef = useRef(null);
+  const [older, showOlder] = useState(false);
+  const html = typeof call.arguments?.html === 'string' ? call.arguments.html : null;
+  const title = String(call.arguments?.title ?? '').trim() || 'Visual';
+  const height = Math.min(900, Math.max(160, Number(call.arguments?.height) || 420));
+  const refused = tool?.status === 'error' ? (tool.result?.content ?? []).map(c => c?.text ?? '').join('\n').trim() : null;
+  const ready = !!html && (!!tool || !live); // a page still being written is not loaded half-way
+  const [url, setUrl] = useState(null);
+  const [error, setError] = useState(null);
+  const [run, setRun] = useState(0); // starting again: a frame of its own
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    if (!ready || refused) return;
+    let alive = true;
+    api('visualUrl', html).then(u => { if (alive) { setUrl(u); setError(null); } }, e => { if (alive) setError(String(e?.message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); });
+    return () => { alive = false; };
+  }, [ready, html, refused]);
+  // The page handing the person a message to send (iris.send): it goes in their message box, for them to send.
+  useEffect(() => {
+    const onMessage = event => {
+      if (!frameRef.current || event.source !== frameRef.current.contentWindow || event.data?.iris !== 'send' || !sessionId) return;
+      const text = String(event.data.text ?? '').trim().slice(0, 4000);
+      if (!text) return;
+      setComposerDraft(sessionId, 'text', () => text);
+      window.dispatchEvent(new CustomEvent('iris:focus-composer'));
+      notify('The visual put a message in the message box. Send it when you are ready.');
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [sessionId]);
+  useEffect(() => {
+    if (!full) return;
+    const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); setFull(false); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [full]);
+  if (!html && detailState.pending) return <HistoryLoading {...detailState} />;
+  const lost = !html && !live; // (an agent that gave no page)
+  if (superseded && !older) return (
+    <div className="visual-card folded" data-tool-id={call.id}>
+      <div className="visual-head"><Icon name="sparkle" size={13} /><span className="visual-title">{title}</span><span className="visual-later">Updated later in the conversation</span>
+        <button type="button" className="tool-button" onClick={() => showOlder(true)} title="Show this version" aria-label="Show this version"><Icon name="chevronDown" size={14} /></button></div>
+    </div>
+  );
+  const save = async () => {
+    try { const saved = await api('saveVisual', html, title); if (saved) notify(`Saved ${saved.split('/').pop()}`); }
+    catch (error) { notify(String(error?.message ?? error).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'); }
+  };
+  const frame = url && <iframe ref={frameRef} key={run} className="visual-frame" src={url} title={title} sandbox="allow-scripts" style={full ? undefined : { height }} />;
+  return (
+    <div className={`visual-card ${full ? 'full' : ''}`} data-tool-id={call.id} role="group" aria-label={`Visual: ${title}`}>
+      <div className="visual-head">
+        <Icon name="sparkle" size={13} />
+        <span className="visual-title">{title}</span>
+        {html && <button type="button" className="tool-button" onClick={save} title="Save as a web page" aria-label="Save the visual as a web page"><Icon name="download" size={14} /></button>}
+        {url && <button type="button" className="tool-button" onClick={() => setRun(n => n + 1)} title="Start again" aria-label="Start the visual again"><Icon name="refresh" size={14} /></button>}
+        {url && <button type="button" className="tool-button" onClick={() => setFull(f => !f)} title={full ? 'Back to the conversation (Esc)' : 'Fill the window'} aria-label={full ? 'Exit full window' : 'Fill the window'}><Icon name={full ? 'minimize' : 'maximize'} size={14} /></button>}
+      </div>
+      {refused ? <div className="visual-note error">Not shown: {refused}</div>
+        : lost ? <div className="visual-note error">Not shown: the agent gave no page.</div>
+        : error ? <div className="visual-note error">Not shown: {error}</div>
+        : !ready ? <div className="visual-note" style={{ height: Math.min(height, 240) }}><Spinner size={14} kind="orbit" /> Drawing…</div>
+        : frame}
     </div>
   );
 }
@@ -825,6 +898,25 @@ function AskBlock({ call, tool }) {
 }
 
 // While Pi or Claude Code works: what it is doing, for how long, and how many tokens it has produced this turn.
+const QUIET_MS = 15000, STALL_MS = 180000;
+// A turn the agent has said nothing in for minutes, with no step running: say so, and offer what helps.
+function StallRow({ session, quiet }) {
+  const [busy, setBusy] = useState(null);
+  const run = async (what, action) => {
+    setBusy(what);
+    try { await action(); } catch (error) { notify(String(error?.message ?? error).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'); }
+    finally { setBusy(null); }
+  };
+  return (
+    <div className="working stalled" role="status">
+      <Icon name="alert" size={14} />
+      <span className="stalled-text">No output for {seconds(quiet)}. {engineLabel(session.engine)} may be stuck.</span>
+      <button type="button" className="button small" disabled={!!busy} onClick={() => run('stop', () => api('abort', session.id))}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</button>
+      <button type="button" className="button small" disabled={!!busy} title="End the agent’s process and start it again from the conversation’s history"
+        onClick={() => run('restart', () => restartConversation(session.id))}>{busy === 'restart' ? 'Restarting…' : 'Restart'}</button>
+    </div>
+  );
+}
 function WorkingRow({ session, transcript, sending = false }) {
   const [, tick] = useState(0);
   const envPrep = useStore(s => session?.environmentId ? s.envStatus[session.environmentId] : null);
@@ -879,12 +971,20 @@ function WorkingRow({ session, transcript, sending = false }) {
     : !live || !live.content?.length || lastBlock?.type === 'thinking' ? 'Thinking'
     : lastBlock?.type === 'toolCall' ? 'Working' : 'Writing';
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
+  // How long the agent has said nothing (no event at all). A while: said, so a long wait for the model reads as
+  // that. Long: it may be stuck, and it can be stopped or restarted from here. (A step that is running says so
+  // on its own line instead; this one shows only while no step runs.)
+  const heard = session ? lastActivityAt(session.id) : null;
+  const quiet = heard && startedAt && heard >= startedAt ? Date.now() - heard : startedAt ? elapsed : 0;
+  const waiting = state === 'Thinking' ? 'Waiting for the model' : state;
+  if (session && !pending && quiet >= STALL_MS) return <StallRow session={session} quiet={quiet} />;
   return (
     <div className="working">
       <Spinner size={14} spectrum kind={state === 'Writing' ? 'orbit' : 'tumble'} />
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
       {tokens > 0 && <span className="working-meta">{formatTokens(tokens)} tokens</span>}
-      <span className="shimmer">{session?.activityLabel ?? state}</span>
+      <span className="shimmer">{session?.activityLabel ?? (quiet >= QUIET_MS ? waiting : state)}</span>
+      {quiet >= QUIET_MS && <span className="working-meta" title="Nothing has come from the agent for this long">no output for {seconds(quiet)}</span>}
     </div>
   );
 }
@@ -1128,7 +1228,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'orphanResult': return <ToolCall key={block.key} call={{ id: block.message.toolCallId, name: block.message.toolName ?? 'tool', arguments: { description: 'Command result' } }} tool={transcript.tools[block.message.toolCallId]} />;
             case 'pendingHistory': return <div key={block.key} className="block-notice">This part of the conversation is read when it comes into view.</div>;
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && (!isCliEngine(session?.engine) || session?.engine === 'codex') && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && (!isCliEngine(session?.engine) || session?.engine === 'codex') && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.steer && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} block={block} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
@@ -1140,6 +1240,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'ccTask': return <ClaudeTaskCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} />;
             case 'ccTodo': return <ClaudeTodoCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={working} />;
             case 'progress': return <ProgressReport key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} live={!!transcript.live} />;
+            case 'visual': return <VisualCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={!!transcript.live} superseded={!!block.superseded} />;
             case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
             case 'agentReports': return renderAgentReport?.(block) ?? null;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;

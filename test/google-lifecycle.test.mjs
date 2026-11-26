@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localTransport } from '../core/transports.mjs';
 import { stageExtensions } from '../app/main/extensions.mjs';
 
@@ -37,7 +37,7 @@ test('staged Google provider retries a broken call without executing it, then ex
     send([], 'STOP'); res.end();
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const session = new PiSession({ id: 'google-native-loop', boot: { providers: [{ id: 'google-loop', api: 'google-generative-ai',
+  const session = new AgentSession({ id: 'google-native-loop', boot: { providers: [{ id: 'google-loop', api: 'google-generative-ai',
     apiKey: 'test-key', baseUrl: `http://127.0.0.1:${server.address().port}/proxy/google`,
     models: [{ id: 'ep-native-test', name: 'Gemini 4 Argon', reasoning: true, contextWindow: 1048576, maxTokens: 64000 }],
   }] }, transport: localTransport({ node: process.execPath, piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'),

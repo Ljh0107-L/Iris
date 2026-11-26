@@ -2528,3 +2528,31 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 .setting-rows.cursor-models > .row-head { padding: 9px 0; }
 .nav-item .engine-logo.nav-logo { border-radius: 4px; }
 .cli-menu-scroll { max-height: min(420px, calc(100vh - 220px)); }
+
+/* A visual an agent showed (show_visual): its title and buttons above, the page below in a sandboxed frame. Filling
+   the window, it covers the app until Esc. */
+.visual-card { margin: 4px 0 10px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-raised); }
+.visual-head { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--hairline); color: var(--muted); font-size: var(--fs-sm); }
+.visual-head > svg { flex-shrink: 0; color: var(--faint); }
+.visual-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }
+.visual-frame { display: block; width: 100%; border: 0; background: transparent; }
+.visual-note { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; color: var(--faint); font-size: var(--fs-sm); }
+.visual-note.error { justify-content: flex-start; color: var(--red); white-space: pre-wrap; }
+.visual-card.full { position: fixed; inset: 12px; z-index: 900; margin: 0; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35); }
+.visual-card.full .visual-frame { flex: 1; height: auto; }
+
+/* A turn that has said nothing for minutes: what may be wrong, and what can be done. */
+.working.stalled { color: var(--amber); gap: 8px; flex-wrap: wrap; }
+.working.stalled .stalled-text { color: var(--text-2); }
+.working.stalled .button.small { padding: 2px 10px; }
+
+/* Hand off to another agent: continue or review, then which agent. */
+.handoff { display: flex; flex-direction: column; gap: 12px; }
+.handoff .segmented { display: flex; gap: 2px; padding: 2px; border-radius: 8px; align-self: flex-start; }
+.handoff .segmented button { padding: 5px 12px; border-radius: 6px; font-size: var(--fs-sm); color: var(--text-2); }
+.handoff-note { margin: 0; color: var(--muted); font-size: var(--fs-sm); line-height: 1.5; }
+.handoff-engines { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.handoff-engine { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); color: var(--text); font-size: var(--fs-md); text-align: left; }
+.handoff-engine:hover { background: var(--row-hover); }
+.visual-card.folded .visual-head { border-bottom: 0; }
+.visual-later { flex-shrink: 0; font-size: var(--fs-xs); color: var(--faint); }

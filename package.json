@@ -1,6 +1,6 @@
 {
   "name": "iris",
-  "version": "0.1.17",
+  "version": "0.2.0",
   "description": "One desktop app for your coding agents: Pi, Claude Code, Codex and Antigravity, on this Mac and over SSH",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "dist": "vite build && electron-builder --mac --publish never",
     "test": "node --test \"test/*.test.mjs\"",
     "test:ui": "vite build && node test/conversation-ui.mjs && node test/git-review-ui.mjs",
+    "test:real": "npm run build && IRIS_REAL_CLI=1 node test/real-cli.mjs",
     "test:integration": "vite build && sh test/integration.sh"
   },
   "license": "MIT",
@@ -59,6 +60,7 @@
       "core/**",
       "dist/renderer/**",
       "build/icon.png",
+      "THIRD_PARTY_NOTICES.md",
       "!**/*.map"
     ],
     "asar": false,

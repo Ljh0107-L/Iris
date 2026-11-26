@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { chromium } from 'playwright-core';
 
-const session = { id: 'talk', title: 'Trace the login flow', environmentId: 'local', environmentLabel: 'This computer', project: 'web', cwd: '/tmp/web', status: 'connected', engine: 'pi', model: { provider: 'mock', id: 'mock' } };
+const session = { id: 'talk', title: 'Trace the login flow', environmentId: 'local', environmentLabel: 'This computer', project: 'web', cwd: '/tmp/web', status: 'connected', engine: 'iris', model: { provider: 'mock', id: 'mock' } };
 const settings = { defaults: { environmentId: 'local', model: session.model }, providers: [], builtinProviders: { mock: 'Mock provider' }, environments: {}, recentFolders: {}, recentEnvironments: [] };
 const environments = [{ id: 'local', kind: 'local', label: 'This computer' }, { id: 'ssh:lab', kind: 'ssh', label: 'Lab host', added: true, enabled: true }];
 // 120 turns: far more rows than stay mounted. One early reply and one folded tool result hold the needles.
@@ -44,7 +44,7 @@ try {
   await page.exposeFunction('fixtureInvoke', async (method, ...args) => {
     ipcCalls.push({ method, args });
     if (method === 'bootstrap') return { settings, environments, sessions: [session], home: '/tmp' };
-    if (method === 'catalog') return [{ provider: 'mock', id: 'mock', name: 'Offline fixture', api: 'openai-responses', engines: ['pi'], input: ['text'], reasoning: true, speeds: [] }];
+    if (method === 'catalog') return [{ provider: 'mock', id: 'mock', name: 'Offline fixture', api: 'openai-responses', engines: ['iris'], input: ['text'], reasoning: true, speeds: [] }];
     if (method === 'historyPage') return { messages: history, next: null, snapshot: { identity: 'fixture', end: 1 } };
     if (method === 'updateStatus') return { state: 'idle' };
     if (method === 'jobs') return { version: 0, jobs: [] };
@@ -134,6 +134,51 @@ try {
   assert.equal(await page.locator('.markdown.streaming').count(), 0);
   assert.equal(await page.evaluate(() => window.firstBlock.isConnected), true, 'nothing is rebuilt when the reply finishes either');
   assert.equal(await page.locator('.user-row.queued').count(), 0, 'the queue is cleared when the run settles');
+
+  // ---- a turn the agent says nothing in: after a while the line says how long, after minutes that it may be stuck,
+  // with Stop and Restart
+  await page.evaluate(({ id }) => {
+    const send = event => window.fixtureEvent({ channel: 'event', payload: { id, event } });
+    window.fixtureEvent({ channel: 'status', payload: { id, status: 'connected', streaming: true } });
+    send({ type: 'message_start', message: { role: 'assistant', timestamp: Date.now() } });
+  }, { id: session.id });
+  await page.locator('div.working').waitFor();
+  // (the page's clock moved on, as if that much time had passed)
+  const later = ms => page.evaluate(ms => { const real = window.__realNow ??= Date.now.bind(Date); Date.now = () => real() + ms; }, ms);
+  await later(20000);
+  await page.locator('div.working', { hasText: /no output for 2\ds/ }).waitFor({ timeout: 3000 });
+  assert.match(await page.locator('div.working .shimmer').innerText(), /Waiting for the model/);
+  await later(200000);
+  const stalled = page.locator('div.working.stalled');
+  await stalled.waitFor({ timeout: 3000 });
+  assert.match(await stalled.innerText(), /No output for 3m \d+s\. .* may be stuck\./);
+  await stalled.getByRole('button', { name: 'Restart' }).click();
+  for (let i = 0; i < 50 && !ipcCalls.some(c => c.method === 'restartConversation'); i++) await page.waitForTimeout(20);
+  assert.deepEqual(ipcCalls.findLast(c => c.method === 'restartConversation')?.args, [session.id]);
+  await page.evaluate(() => { Date.now = window.__realNow; });
+  await page.evaluate(({ id }) => {
+    const send = event => window.fixtureEvent({ channel: 'event', payload: { id, event } });
+    send({ type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'text', text: 'Back.' }] } });
+    send({ type: 'agent_settled' });
+    window.fixtureEvent({ channel: 'status', payload: { id, status: 'connected', streaming: false } });
+  }, { id: session.id });
+
+  // ---- hand the conversation to another agent: a new conversation in the same folder, its message written
+  await page.locator('.session-row', { hasText: session.title }).first().hover();
+  await page.locator('.session-row', { hasText: session.title }).first().getByRole('button', { name: 'Conversation actions' }).click();
+  await page.getByRole('button', { name: 'Hand off to another agent…' }).click();
+  const dialog = page.locator('.handoff');
+  await dialog.waitFor();
+  assert.deepEqual((await dialog.locator('.handoff-engine').allInnerTexts()).map(t => t.trim()), ['Claude Code', 'Codex', 'Cursor', 'Antigravity'], 'every agent but this one');
+  await dialog.getByRole('radio', { name: 'Review the work' }).click();
+  await dialog.locator('.handoff-engine', { hasText: 'Codex' }).click();
+  const handed = page.locator('.dock textarea[aria-label="Message"]');
+  await page.waitForFunction(() => /^Please review the work Iris did in /.test(document.querySelector('.dock textarea[aria-label="Message"]')?.value ?? ''));
+  assert.match(await handed.inputValue(), /What was asked:\n- /);
+  assert.match(await handed.inputValue(), /do not edit files unless I ask\.$/);
+  await handed.fill('');
+  await page.locator('.session-row', { hasText: session.title }).first().click();
+  await page.locator('.user-bubble', { hasText: 'Question 119' }).first().waitFor({ timeout: 10000 }).catch(() => {});
 
   // ---- a reload while a CLI's turn is under way (opening the conversation again, a resync) keeps what is known
   // of its finished steps: only the step still running shows as running

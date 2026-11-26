@@ -9,7 +9,8 @@ import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from '.
 import { downloadLocal, downloadRemote } from './file-download.mjs';
 import { gitReview, remoteGitReviewScript, decodeGitReview } from './git-review.mjs';
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { VISUAL_LIBRARIES, VISUAL_MAX_BYTES } from '../../agent/iris-visual.mjs';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
 import { Terminals, spawnPty } from './terminals.mjs';
@@ -53,7 +54,34 @@ else app.on('second-instance', () => showWindow());
 
 // Pages shown in the file pane are served to it under a scheme of their own (see previewUrl): a page then
 // loads its styles, scripts and images by relative links, from this Mac or from an SSH host alike.
-protocol.registerSchemesAsPrivileged([{ scheme: 'iris-preview', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
+protocol.registerSchemesAsPrivileged([{ scheme: 'iris-preview', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+  { scheme: 'iris-visual', privileges: { standard: true, secure: true } }]);
+
+// A visual an agent showed (its show_visual tool, agent/iris-visual.mjs): the page is served under an address of
+// its own (iris-visual://<hash>/), in a sandboxed frame, with a policy that lets it run its own scripts and load
+// libraries from a few CDNs, and nothing else: no other network, no files, nothing of the app.
+const visuals = new Map(); // hash -> html
+const VISUAL_POLICY = (() => {
+  const cdn = VISUAL_LIBRARIES.join(' ');
+  return [`default-src 'none'`, `script-src 'unsafe-inline' 'unsafe-eval' blob: ${cdn}`, `style-src 'unsafe-inline' ${cdn} https://fonts.googleapis.com`,
+    `font-src data: ${cdn} https://fonts.gstatic.com`, `img-src data: blob: ${cdn}`, `media-src data: blob:`, `worker-src blob:`, `connect-src ${cdn}`, `frame-src 'none'`, `form-action 'none'`].join('; ');
+})();
+function visualUrl(html) {
+  if (typeof html !== 'string' || !html.trim() || Buffer.byteLength(html) > VISUAL_MAX_BYTES) throw new Error('This visual cannot be shown.');
+  const hash = createHash('sha256').update(html).digest('hex').slice(0, 32);
+  visuals.delete(hash); visuals.set(hash, html); // most recent last
+  while (visuals.size > 200) visuals.delete(visuals.keys().next().value);
+  return `iris-visual://v${hash}/`;
+}
+// What every visual page can call: iris.send(text) puts a message in the person's message box (the
+// conversation's window decides what to do with it; see VisualCard).
+const VISUAL_HELPER = `<script>window.iris={send(text){parent.postMessage({iris:'send',text:String(text??'').slice(0,4000)},'*')}};</script>`;
+function serveVisual(request) {
+  const page = visuals.get(new URL(request.url).hostname.slice(1));
+  const html = page == null ? null : VISUAL_HELPER + page;
+  const headers = { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8', 'content-security-policy': VISUAL_POLICY };
+  return html == null ? new Response('This visual is no longer open.', { status: 404, headers }) : new Response(html, { headers });
+}
 
 let store, manager, window, usage;
 const environments = () => listEnvironments({ sshConfig: process.env.IRIS_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} });
@@ -320,6 +348,7 @@ const api = {
   focusSession: id => { manager.focus(id); return true; },
   warmFolder: id => manager.warmFolder(id),
   prompt: (id, text, attachments, options) => manager.prompt(id, text, attachments ?? [], options ?? {}),
+  restartConversation: id => manager.restart(id),
   editMessage: (id, ordinal, originalText, text, attachments) => manager.editMessage(id, ordinal, originalText, text, attachments ?? []),
   fork: id => manager.fork(id),
   deleteSession: id => manager.delete(id),
@@ -466,6 +495,21 @@ const api = {
   openExternal: url => /^https?:\/\//.test(url) ? openInBrowser(url) : false,
   openPath: path => process.env.IRIS_INSECURE_TEST_STORAGE === '1' ? ((globalThis.__irisOpened ??= []).push(path), '') : shell.openPath(path),
   previewUrl: (id, path) => previewUrl(id, path),
+  visualUrl: html => visualUrl(html),
+  // A visual saved as the page it is, to open in a browser or send on.
+  async saveVisual(html, title) {
+    if (typeof html !== 'string' || !html.trim()) throw new Error('This visual has no page to save.');
+    const name = `${String(title ?? 'Visual').replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 80) || 'Visual'}.html`;
+    let target;
+    if (process.env.IRIS_TEST_SAVE_DIR) target = join(process.env.IRIS_TEST_SAVE_DIR, name);
+    else {
+      const choice = await dialog.showSaveDialog(window, { defaultPath: join(app.getPath('downloads'), name), filters: [{ name: 'Web page', extensions: ['html'] }] });
+      if (choice.canceled || !choice.filePath) return null;
+      target = choice.filePath;
+    }
+    writeFileSync(target, html);
+    return target;
+  },
   // Translation of the agent's thinking (the right panel). Off unless turned on in Settings → Translation, with
   // one of the models already set up in Settings → Models (its provider, address and key are used as they are).
   setTranslation(choice) {
@@ -553,7 +597,10 @@ const shellEnv = !primary || process.env.IRIS_INSECURE_TEST_STORAGE === '1' || p
 app.whenReady().then(async () => {
   if (!primary) return;
   protocol.handle('iris-preview', servePreview);
+  protocol.handle('iris-visual', serveVisual);
   updater = new Updater({ app, net, cacheDir: join(app.getPath('userData'), 'updates'), send });
+  // About Iris: whose work it builds on (THIRD_PARTY_NOTICES.md has the licence).
+  app.setAboutPanelOptions({ applicationName: 'Iris', applicationVersion: app.getVersion(), credits: 'Iris’s agent is built on Pi by Mario Zechner (MIT License).', copyright: 'MIT License · Iris contributors' });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: app.name, submenu: [
       { role: 'about' },

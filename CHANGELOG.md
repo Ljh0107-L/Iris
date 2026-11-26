@@ -2,6 +2,27 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.0
+
+**New**
+
+- **Visuals.** Ask any agent to show you something (an algorithm stepping through its data, a protocol in motion, a chart of what it computed) and it can draw an animated or interactive page right in the conversation. Every agent gets the same `show_visual` tool: Iris's own built in, Claude Code, Codex, Cursor and Antigravity as an MCP server Iris gives each conversation, on this Mac and on SSH hosts. The page runs in a sandbox that may load libraries from cdnjs, jsDelivr and unpkg and reach nothing else. A visual can start again, fill the window and be saved as a web page; shown again under the same id it is kept current (earlier versions fold away); and a button in it can put a message in your message box (`iris.send`), for you to send.
+- **Hand off to another agent.** From a conversation's menu, **Hand off to another agent…** or **Review with another agent…** opens a new conversation in the same folder, on the same machine, with a first message written: what was asked, what the agent last reported, and the files it changed. Read it, change it, send it.
+- **Restart agent**, in a conversation's menu: its agent's process (and what it was doing) ends and starts again from the conversation's history.
+- **A turn that goes quiet says so.** The line under a turn says how long nothing has come from the agent ("Waiting for the model · no output for 25s"); after three minutes with no step running it says the agent may be stuck, with **Stop** and **Restart**.
+
+**Changed**
+
+- **Pi is now Iris.** Iris's own agent is called Iris everywhere: in the agent picker, with the app's icon, in messages and errors, and to the model itself (its prompt opens with Iris, not "inside pi"). It is built on [Pi](https://github.com/earendil-works/pi) by Mario Zechner, under the MIT License: see THIRD_PARTY_NOTICES.md (also in the app, and in About Iris). Conversations keep working as they were.
+- **A message handed to Codex's turn under way (Option+Enter) shows where you sent it**, inside the reply, not above it.
+
+**For developers**
+
+- `npm run test:real` drives the app against your real, signed-in Codex (and Cursor with `-- --cursor`): questions, long commands, agents, stopping and steering a turn, visuals, restarting. It spends real model calls and never runs in CI.
+- Iris's own agent's engine id is `iris` (was `pi`); `PiSession` is `AgentSession`; the runtime variable given to commands is `IRIS_NODE` (was `PI_NODE`).
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.1.17
 
 **Fixed**

@@ -65,7 +65,7 @@ let state = {
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
   composerDrafts: {},                       // text/images per conversation; the text is kept across restarts (saveDrafts)
-  draft: { environmentId: 'local', cwd: null, model: null, engine: 'pi', thinkingLevel: 'medium', effort: 'medium', speed: 'standard', ultra: false, ultracode: false },
+  draft: { environmentId: 'local', cwd: null, model: null, engine: 'iris', thinkingLevel: 'medium', effort: 'medium', speed: 'standard', ultra: false, ultracode: false },
 };
 
 const set = patch => { state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }; for (const l of listeners) l(); };
@@ -170,6 +170,7 @@ function queueDelta(id, event) {
 window.iris.subscribe(({ channel, payload }) => {
   switch (channel) {
     case 'event': {
+      lastActivity.set(payload.id, Date.now()); // (the status line says how long the agent has been quiet)
       if (payload.event.type === 'message_update') {
         if (!transcriptOf(payload.id).rewinding) queueDelta(payload.id, payload.event); // else: old branch, superseded by an edit
         break;
@@ -317,12 +318,20 @@ export function runCommand(name, { menu = false } = {}) {
   else if (name === 'find' && state.view === 'session' && state.activeId) set({ findRequest: { id: state.activeId } });
 }
 
+// When each conversation's agent last said anything (any event): a turn quiet for long may be stuck.
+const lastActivity = new Map();
+export const lastActivityAt = id => lastActivity.get(id) ?? null;
+export async function restartConversation(id) {
+  lastActivity.delete(id);
+  await api('restartConversation', id);
+}
+
 export async function bootstrap() {
   api('updateStatus').then(update => set({ update })).catch(() => {});
   const boot = await api('bootstrap');
   showFullscreen(boot.fullscreen);
   const d = boot.settings.defaults;
-  const engine = ['claude-code', 'antigravity', 'codex', 'cursor'].includes(d.engine) ? d.engine : 'pi';
+  const engine = ['claude-code', 'antigravity', 'codex', 'cursor'].includes(d.engine) ? d.engine : 'iris';
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     sessionUpdate: state.sessionUpdate ?? boot.sessionUpdate,
@@ -348,7 +357,7 @@ export async function bootstrap() {
   if (!d.engine && !boot.settings.providers?.length) {
     void Promise.all(['codex', 'antigravity'].map(cli => refreshCliReadiness('local', cli).then(() => state.cliReadiness[readinessKey(cli, 'local')]))).then(([codex, antigravity]) => {
       const ready = codex === 'ready' ? 'codex' : antigravity === 'ready' ? 'antigravity' : null;
-      if (ready && state.draft.engine === 'pi' && !state.draft.model && state.draft.environmentId === 'local') setDraft({ engine: ready });
+      if (ready && state.draft.engine === 'iris' && !state.draft.model && state.draft.environmentId === 'local') setDraft({ engine: ready });
     });
   }
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
@@ -870,7 +879,10 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
     // own copy of it replaces this one when it arrives (over SSH that is a round trip or two later).
     // (Codex's /goal is a command, not a message: what shows for it is the goal above the message box.)
     const command = session.engine === 'codex' && !attachments.length && /^\/goal(\s|$)/.test(text.trim());
-    const shown = !command && (text.trim() || attachments.length) ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}) } : null;
+    // Handed to Codex's turn under way (Option+Enter): shown where it is sent, inside the reply being written.
+    const steers = session.engine === 'codex' && !!session.streaming && !interrupts && Array.isArray(transcriptOf(id).live?.content);
+    const shown = !command && (text.trim() || attachments.length) ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}),
+      ...(steers ? { steer: { at: transcriptOf(id).live.content.length } } : {}) } : null;
     if (shown) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, shown] });
     try { await sending(id, () => api('prompt', id, text, attachments, { interrupt: interrupts })); }
     catch (error) { if (shown) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== shown) }); throw error; }
@@ -984,6 +996,21 @@ export async function editMessage(id, ordinal, originalText, text, attachments =
   catch (error) { reloadTranscript(id); throw error; }
 }
 
+// Hand a conversation to another agent (see handoff.js): a new conversation in the same folder on the same machine,
+// its first message written and left for the person to read, change and send.
+export function openHandoff(sessionId, mode = 'continue') { set({ handoff: { sessionId, mode } }); }
+export function closeHandoff() { set({ handoff: null }); }
+export async function handOff(sessionId, engine, mode) {
+  const { handoffText } = await import('./handoff.js');
+  const session = state.sessions.find(s => s.id === sessionId);
+  if (!session) return;
+  const t = transcriptOf(sessionId);
+  const text = handoffText({ engine: session.engine ?? 'iris', messages: t.messages ?? [], tools: t.tools ?? {}, cwd: session.cwd, mode });
+  set({ handoff: null });
+  newSession();
+  setDraft({ environmentId: session.environmentId, cwd: session.cwd, engine });
+  setComposerDraft('new', 'text', () => text);
+}
 export function newSession() { navigate({ view: 'new', activeId: null }); set({ view: 'new', activeId: null, paletteOpen: false, sidebarPeek: false }); }
 
 // ---------------------------------------------------------------- file preview

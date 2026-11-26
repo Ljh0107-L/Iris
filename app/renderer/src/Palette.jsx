@@ -48,17 +48,17 @@ export function Palette() {
     const out = [];
     const kind = TABS[tab];
     if (kind === 'All' || kind === 'Conversations') {
-      const engineOf = s => s.engine ?? 'pi';
+      const engineOf = s => s.engine ?? 'iris';
       const items = sessions.filter(s => match(`${s.title} ${s.project} ${s.environmentLabel} ${engineLabel(engineOf(s))} ${s.engine === 'claude-code' ? 'cc' : ''}`)).slice(0, kind === 'All' ? 6 : 50)
         .map(s => ({ key: s.id, logo: engineOf(s), label: s.title,
-          detail: `${s.project} · ${s.environmentLabel}${engineOf(s) === 'pi' ? '' : ` · ${engineLabel(engineOf(s))}`}`, run: () => openSession(s.id) }));
+          detail: `${s.project} · ${s.environmentLabel}${engineOf(s) === 'iris' ? '' : ` · ${engineLabel(engineOf(s))}`}`, run: () => openSession(s.id) }));
       if (items.length) out.push({ title: q ? 'Conversations' : 'Recents', items });
       // Conversations whose messages mention it (not already listed by title): opened with Find filled in.
       const listed = new Set(items.map(item => item.key));
       const messageHits = said.q === q ? said.hits.filter(hit => !listed.has(hit.id) && sessions.some(s => s.id === hit.id)).slice(0, kind === 'All' ? 6 : 30) : [];
       if (messageHits.length) out.push({ title: 'Messages', items: messageHits.map(hit => {
         const s = sessions.find(x => x.id === hit.id);
-        return { key: `said:${hit.id}`, logo: s.engine ?? 'pi', label: s.title, snippet: hit.snippet, detail: hit.snippet,
+        return { key: `said:${hit.id}`, logo: s.engine ?? 'iris', label: s.title, snippet: hit.snippet, detail: hit.snippet,
           run: () => { openSession(hit.id); set({ findRequest: { id: hit.id, query: query.trim() } }); } };
       }) });
     }
@@ -75,7 +75,7 @@ export function Palette() {
     }
     if (kind === 'All') {
       const actions = [
-        { key: 'new', icon: 'plus', label: 'New conversation', run: () => { newSession(); setDraft({ engine: 'pi' }); } },
+        { key: 'new', icon: 'plus', label: 'New conversation', run: () => { newSession(); setDraft({ engine: 'iris' }); } },
         ...['claude-code', 'codex', 'antigravity', 'cursor'].map(engine => ({ key: `new-${engine}`, logo: engine, label: `New ${engineLabel(engine)} conversation`, run: () => { newSession(); setDraft({ engine }); } })),
         { key: 'models', icon: 'key', label: 'Models & API keys', run: () => openSettings(true, 'providers') },
         { key: 'accounts', icon: 'key', label: 'Subscriptions: Codex and Antigravity sign-in', run: () => openSettings(true, 'subscriptions') },

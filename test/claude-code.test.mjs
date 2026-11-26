@@ -505,6 +505,7 @@ async function managerFixture(t) {
   const runDir = join(dir, 'run'); mkdirSync(runDir);
   const ext = join(dir, 'ext'); mkdirSync(ext);
   copyFileSync(resolve('agent/iris-claude.mjs'), join(ext, 'iris-claude.mjs'));
+  copyFileSync(resolve('agent/iris-visual.mjs'), join(ext, 'iris-visual.mjs')); // (the visual tool it registers)
   const relayPath = join(dir, 'relay.mjs'); copyFileSync(resolve('agent/iris-relay.mjs'), relayPath);
   const work = join(dir, 'work'); mkdirSync(work);
   const log = join(dir, 'claude.log');
@@ -523,7 +524,7 @@ async function managerFixture(t) {
   manager.catalog = async () => [
     { provider: 'gw', id: 'gw-claude', name: 'GW Claude', api: 'anthropic-messages', contextWindow: 200000, maxTokens: 32000, baseUrl: 'https://gw.example/v1', cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } },
     { provider: 'gw', id: 'gw-claude-2', name: 'GW Claude 2', api: 'anthropic-messages', contextWindow: 200000, baseUrl: 'https://gw.example/v1' },
-    { provider: 'deepseek', id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', api: 'openai-completions', baseUrl: 'https://api.deepseek.com', engines: ['pi', 'claude-code'] },
+    { provider: 'deepseek', id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', api: 'openai-completions', baseUrl: 'https://api.deepseek.com', engines: ['iris', 'claude-code'] },
     { provider: 'openai', id: 'gpt-x', name: 'GPT X', api: 'openai-responses' },
   ];
   t.after(async () => {

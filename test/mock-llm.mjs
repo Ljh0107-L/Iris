@@ -164,7 +164,7 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     }
     const special = /\[\[subagents-(runtime|length|length-repeat|length-tools)\]\]/.exec(userText);
     if (!subagent && special && last.role !== 'tool') {
-      const runtimeCommand = `node -p "'runtime=' + Boolean(process.versions.electron)"; "$PI_NODE" -p "'pi-node=' + Boolean(process.versions.electron)"`;
+      const runtimeCommand = `node -p "'runtime=' + Boolean(process.versions.electron)"; "$IRIS_NODE" -p "'pi-node=' + Boolean(process.versions.electron)"`;
       const task = special[1] === 'runtime' ? `[[bash:${runtimeCommand}]]` : `[[child-${special[1]}]]`;
       send({ role: 'assistant', content: '' });
       send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({

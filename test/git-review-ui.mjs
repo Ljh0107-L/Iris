@@ -59,8 +59,8 @@ try {
     if (method === 'cliOptions') return [];
     if (method === 'bootstrap') return { settings, environments, sessions, home: profile };
     if (method === 'catalog') return [
-      { provider: 'mock', id: 'mock', name: 'Offline fixture', api: 'openai-responses', engines: ['pi'], input: ['text'], reasoning: true, speeds: ['standard', 'fast'] },
-      { provider: 'mock', id: 'alternate', name: 'Alternate fixture', api: 'anthropic-messages', engines: ['pi', 'claude-code'], reasoning: true, speeds: ['standard', 'fast'] },
+      { provider: 'mock', id: 'mock', name: 'Offline fixture', api: 'openai-responses', engines: ['iris'], input: ['text'], reasoning: true, speeds: ['standard', 'fast'] },
+      { provider: 'mock', id: 'alternate', name: 'Alternate fixture', api: 'anthropic-messages', engines: ['iris', 'claude-code'], reasoning: true, speeds: ['standard', 'fast'] },
     ];
     if (method === 'listDir') return { path: args[1] || '/home/audit', entries: [] };
     if (['setModel', 'setUltra', 'setEffort', 'setUltracode'].includes(method)) {
@@ -388,7 +388,7 @@ try {
   // Claude Code: the agent is chosen beside folder and machine; the model menu below then lists its models
   // only (Anthropic Messages), with 5-level effort, Ultracode, upload progress, tool & question cards.
   await page.getByRole('button', { name: 'Agent', exact: true }).click();
-  assert.deepEqual(await page.locator('.harness-row .harness-title').allTextContents(), ['Codex', 'Antigravity', 'Cursor', 'Claude Code', 'Pi']);
+  assert.deepEqual(await page.locator('.harness-row .harness-title').allTextContents(), ['Codex', 'Antigravity', 'Cursor', 'Claude Code', 'Iris']);
   await page.locator('.harness-row', { hasText: 'Claude Code' }).click();
   assert.equal(await page.evaluate(() => window.__irisState().draft.engine), 'claude-code');
   assert.equal(await page.locator('.composer-tray-head .harness-trigger').innerText(), 'Claude Code');
@@ -396,7 +396,7 @@ try {
   assert.equal(await page.locator('.model-menu .menu-item', { hasText: 'Offline fixture' }).count(), 0, 'non-Anthropic models are not offered for Claude Code');
   await page.locator('.model-menu .menu-item', { hasText: 'Alternate fixture' }).click();
   assert.equal(await page.evaluate(() => window.__irisState().draft.model.id), 'alternate', 'Claude Code picks an Anthropic Messages model');
-  assert.equal(await page.locator('.ultra-trigger').count(), 0, 'Pi Ultra stays out of Claude Code');
+  assert.equal(await page.locator('.ultra-trigger').count(), 0, 'Iris’s Ultra stays out of Claude Code');
   assert.equal(await page.locator('.ultracode-trigger').count(), 1, 'Claude Code offers Ultracode');
   await page.getByRole('button', { name: 'Effort', exact: true }).click();
   const effortItems = await page.locator('.popover .menu-item .menu-label').allTextContents();
@@ -437,7 +437,7 @@ try {
   const agySession = { ...session, id: 'agy-ui', title: 'Summarise with Antigravity', engine: 'antigravity', model: null, cli: { options: [] } };
   sessions.unshift(codexSession, agySession);
   await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
-  assert.deepEqual(await page.locator('.session-row img.session-engine-logo').evaluateAll(nodes => [...new Set(nodes.map(n => n.alt))].sort()), ['Antigravity', 'Claude Code', 'Codex', 'Pi'], 'every conversation is marked with its agent, before its title');
+  assert.deepEqual(await page.locator('.session-row img.session-engine-logo').evaluateAll(nodes => [...new Set(nodes.map(n => n.alt))].sort()), ['Antigravity', 'Claude Code', 'Codex', 'Iris'], 'every conversation is marked with its agent, before its title');
   assert.ok(await page.locator('.session-row-main').first().evaluate(row => row.firstElementChild.matches('.session-engine') && !!row.firstElementChild.querySelector('img.session-engine-logo')));
   await page.getByRole('button', { name: 'Delegate with Codex' }).click();
   await page.locator('.title-button img.title-engine-logo[alt="Codex"]').waitFor();

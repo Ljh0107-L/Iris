@@ -67,14 +67,14 @@ test('standalone Antigravity deploys no Pi runtime and keeps old session data', 
   assert.deepEqual(facts.unreachable, []);
   assert.equal(existsSync(join(f.root, 'pi')), false);
   assert.equal(facts.history, join(f.root, 'cli', history));
-  assert.deepEqual(readdirSync(dirname(facts.adapter)).sort(), [adapter, 'iris-codex.mjs', 'iris-cursor.mjs', history, relay], 'the Codex and Cursor adapters are deployed beside it');
+  assert.deepEqual(readdirSync(dirname(facts.adapter)).sort(), [adapter, 'iris-codex.mjs', 'iris-cursor.mjs', history, relay, 'iris-visual.mjs'], 'the Codex and Cursor adapters, and the agents’ visual tool, are deployed beside it');
   assert.equal(readFileSync(facts.relay, 'utf8'), '// fixture relay\n');
   assert.equal(readFileSync(facts.adapter, 'utf8'), '// fixture adapter\n');
   for (const entry of existing) assert.equal(readFileSync(join(f.root, entry), 'utf8'), entry);
   assert.equal(probes, 1);
   assert.equal(f.calls.length, 2, 'inspection and all assets in one upload');
   const uploads = f.calls.filter(call => call.input);
-  assert.deepEqual(JSON.parse(uploads[0].input).map(asset => asset.name), [relay, adapter, 'iris-codex.mjs', 'iris-cursor.mjs', history]);
+  assert.deepEqual(JSON.parse(uploads[0].input).map(asset => asset.name), [relay, adapter, 'iris-codex.mjs', 'iris-cursor.mjs', history, 'iris-visual.mjs']);
 
   const warm = await prepareRemote(f.env, { ...f.options, providerHosts: ['models.invalid:443'] }, deps);
   assert.equal(warm.node, facts.node);

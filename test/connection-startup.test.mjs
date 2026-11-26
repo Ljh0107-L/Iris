@@ -10,7 +10,7 @@ import test from 'node:test';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote, remoteInspectionScript } from '../app/main/remote-setup.mjs';
 import { EXTENSION_FILES, EXTENSION_PACKAGE, stageExtensions } from '../app/main/extensions.mjs';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { egressEnv, sshRelayTransport } from '../core/transports.mjs';
 
 const deferred = () => {
@@ -33,16 +33,16 @@ function managerFixture(t, { remoteSetup } = {}) {
   };
   const manager = new SessionManager({ store, environments: () => [env, { id: 'local', kind: 'local', label: 'Local' }],
     local: { agentDir: dir, node: process.execPath, runDir: dir, piCli: 'unused' }, remoteSetup });
-  // These tests replace PiSession.start/request/stop; no relay is spawned or stopped.
+  // These tests replace AgentSession.start/request/stop; no relay is spawned or stopped.
   manager.stopRelay = async () => {};
-  t.mock.method(PiSession.prototype, 'stop', async () => {});
+  t.mock.method(AgentSession.prototype, 'stop', async () => {});
   t.after(() => manager.shutdown());
   return { manager, dir, env, store };
 }
 function fakeSessions(t, { onStart, onRequest } = {}) {
   const calls = [];
   let number = 0;
-  t.mock.method(PiSession.prototype, 'start', async function () {
+  t.mock.method(AgentSession.prototype, 'start', async function () {
     number++;
     this.attachInfo = { created: number === 1, pid: 123, startedAt: 456 };
     this.initialState = { sessionFile: '/fixture/session.jsonl', sessionId: 'fixture', thinkingLevel: 'medium', isStreaming: false };
@@ -50,7 +50,7 @@ function fakeSessions(t, { onStart, onRequest } = {}) {
     this.emit('attached', this.attachInfo);
     return this;
   });
-  t.mock.method(PiSession.prototype, 'request', async function (type, payload = {}) {
+  t.mock.method(AgentSession.prototype, 'request', async function (type, payload = {}) {
     calls.push({ session: this, type, ...payload });
     return await onRequest?.(this, type, payload) ?? {};
   });
@@ -58,7 +58,7 @@ function fakeSessions(t, { onStart, onRequest } = {}) {
 }
 
 test('settled waiters can be cancelled without leaving listeners or timers', async () => {
-  const session = new PiSession({ id: 'fixture', transport: {} });
+  const session = new AgentSession({ id: 'fixture', transport: {} });
   const controller = new AbortController();
   const pending = session.nextSettled(60000, { signal: controller.signal });
   controller.abort();
@@ -408,7 +408,7 @@ test('providers changed during startup are synced, then concurrent edits share o
   manager.providersChanged(); gate.resolve(); await starting;
   assert.equal(calls.filter(call => call.message?.startsWith('/iris-providers ')).length, 1);
   const update = deferred(); let updates = 0;
-  t.mock.method(PiSession.prototype, 'request', async function (_type, payload) {
+  t.mock.method(AgentSession.prototype, 'request', async function (_type, payload) {
     if (payload?.message?.startsWith('/iris-providers ')) { updates++; if (updates === 1) await update.promise; }
     return {};
   });

@@ -9,7 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localRelayTransport, relaySpawnSpec, shellQuote } from '../core/transports.mjs';
 import { startEgressProxy } from '../core/egress-proxy.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
@@ -52,7 +52,7 @@ async function fixture(t, { startDaemon = true, mode, delay = 0 } = {}) {
   const spec = relaySpawnSpec({ cwd: dir, node: process.execPath, piCli: peer, agentDir: dir,
     extraEnv: { TEST_RPC_MODE: mode ?? '', TEST_READY_DELAY: String(delay) } });
   const connect = (id = 'test', spawnSpec = spec) => {
-    const session = new PiSession({ id, transport: localRelayTransport({ node: process.execPath, relayPath, runDir }), relay: { spawn: spawnSpec } });
+    const session = new AgentSession({ id, transport: localRelayTransport({ node: process.execPath, relayPath, runDir }), relay: { spawn: spawnSpec } });
     sessions.push(session); return session;
   };
   return { dir, runDir, relayPath, relay, connect, cleanups };
@@ -337,7 +337,7 @@ test('closing during remote preparation prevents a late spawn or visible error',
   manager.prepare = () => preparing;
   manager.stopRelay = async () => {};
   let starts = 0;
-  t.mock.method(PiSession.prototype, 'start', async () => { starts++; throw new Error('should not spawn'); });
+  t.mock.method(AgentSession.prototype, 'start', async () => { starts++; throw new Error('should not spawn'); });
   const statuses = []; manager.on('status', s => statuses.push(s));
   await manager.prewarm({ environmentId: 'remote', cwd: f.dir });
   const id = [...manager.spares.values()][0].id;
@@ -490,8 +490,8 @@ test('Stop hard-stops after rejected Abort even when streaming state is stale', 
 test('startup state and compaction events keep an unfocused Pi out of the idle sweep', { timeout: 10000 }, async t => {
   const f = await fixture(t);
   const manager = managerFor(t, f);
-  const start = PiSession.prototype.start;
-  t.mock.method(PiSession.prototype, 'start', async function (...args) {
+  const start = AgentSession.prototype.start;
+  t.mock.method(AgentSession.prototype, 'start', async function (...args) {
     await start.apply(this, args);
     this.initialState.isCompacting = true;
     return this;
@@ -611,8 +611,8 @@ test('cancelled forks never persist a second record pointing at the source file'
   const manager = managerFor(t, f);
   const file = join(f.dir, 'source.jsonl'); writeFileSync(file, 'source history\n');
   manager.store.sessions.push({ id: 'source', title: 'Source', environmentId: 'local', cwd: f.dir, piSessionFile: file });
-  const request = PiSession.prototype.request;
-  t.mock.method(PiSession.prototype, 'request', function (type, ...args) {
+  const request = AgentSession.prototype.request;
+  t.mock.method(AgentSession.prototype, 'request', function (type, ...args) {
     if (type === 'clone') return Promise.resolve({ cancelled: true });
     return request.call(this, type, ...args);
   });

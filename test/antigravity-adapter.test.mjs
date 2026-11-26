@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { attachJsonlReader, serializeJsonLine } from '../core/jsonl.mjs';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localRelayTransport } from '../core/transports.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote } from '../app/main/remote-setup.mjs';
@@ -624,7 +624,7 @@ test('local relay owns adapter and fake CLI, reattaches to the same session and 
   const address = join(env.IRIS_RUN_DIR, 'relay.sock');
   await until(() => existsSync(address), 'relay listener');
   const connect = async () => {
-    const session = new PiSession({ id: 'mock-antigravity', boot: { antigravity: f.config },
+    const session = new AgentSession({ id: 'mock-antigravity', boot: { antigravity: f.config },
       transport: localRelayTransport({ node: process.execPath, relayPath: relay, runDir: env.IRIS_RUN_DIR }),
       relay: { spawn: { cwd: f.cwd, argv: [process.execPath, adapter], env: secretEnv } } });
     f.onCleanup(() => session.stop(100));

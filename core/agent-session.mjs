@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { attachJsonlReader, serializeJsonLine } from './jsonl.mjs';
 
-export class PiSession extends EventEmitter {
+export class AgentSession extends EventEmitter {
   #child = null;
   #pending = new Map();
   #nextId = 0;

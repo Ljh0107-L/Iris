@@ -28,9 +28,10 @@ const ANTIGRAVITY_ENGINE = 'antigravity';
 const RELAY_FILE = 'iris-relay.mjs';
 const ANTIGRAVITY_ADAPTER = 'iris-antigravity.mjs';
 const HISTORY_FILE = 'iris-history.mjs';
+const VISUAL_FILE = 'iris-visual.mjs';
 const CODEX_ADAPTER = 'iris-codex.mjs';
 const CURSOR_ADAPTER = 'iris-cursor.mjs'; // Cursor's entry: it runs the Antigravity adapter (ACP) with Cursor's profile
-const CLI_FILES = [RELAY_FILE, ANTIGRAVITY_ADAPTER, CODEX_ADAPTER, CURSOR_ADAPTER, HISTORY_FILE];
+const CLI_FILES = [RELAY_FILE, ANTIGRAVITY_ADAPTER, CODEX_ADAPTER, CURSOR_ADAPTER, HISTORY_FILE, VISUAL_FILE];
 const SCRATCH = ['/opt/tmp', '/data', '/data00', '/data0', '/mnt/data', '/scratch', '/var/tmp', '/tmp'];
 const NODE_MIRRORS = ['https://nodejs.org/dist/latest-v22.x', 'https://npmmirror.com/mirrors/node/latest-v22.x'];
 
@@ -301,11 +302,11 @@ export async function piBundle(piPackageDir, cacheDir) {
 async function uploadPi(env, root, bundle, onProgress) {
   const q = shellQuote(root);
   const bytes = statSync(bundle.path).size, size = Math.round(bytes / 1048576);
-  onProgress(`Uploading Pi from this Mac… 0 / ${size} MB`);
+  onProgress(`Uploading Iris’s agent from this Mac… 0 / ${size} MB`);
   let last = -1;
   await runSsh(env, `set -e; rm -rf ${q}/pi.new; mkdir -p ${q}/pi.new/node_modules; tar -xzf - -C ${q}/pi.new/node_modules; printf '{"private":true}\\n' > ${q}/pi.new/package.json; rm -rf ${q}/pi.old; [ -d ${q}/pi ] && mv ${q}/pi ${q}/pi.old; mv ${q}/pi.new ${q}/pi; rm -rf ${q}/pi.old`, {
     upload: { path: bundle.path, size: bytes }, timeout: 1800000, // streamed from disk, never held in memory
-    onUpload: f => { const done = Math.min(size, Math.floor(f * size)); if (done !== last) { last = done; onProgress(`Uploading Pi from this Mac… ${done} / ${size} MB`); } },
+    onUpload: f => { const done = Math.min(size, Math.floor(f * size)); if (done !== last) { last = done; onProgress(`Uploading Iris’s agent from this Mac… ${done} / ${size} MB`); } },
   });
 }
 
@@ -407,13 +408,13 @@ export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, 
     const canNpm = !process.env.IRIS_FORCE_PI_UPLOAD && state.npm?.[0] === '1' && state.registry?.[0] === '1';
     let installed = false;
     if (canNpm) {
-      onProgress(`Installing Pi ${piVersion}…`);
+      onProgress(`Installing Iris’s agent (Pi ${piVersion})…`);
       installed = await run(env, `set -e; export PATH=${bin}:"$PATH" TMPDIR=${q}/tmp npm_config_cache=${q}/npm-cache npm_config_fetch_timeout=20000 npm_config_fetch_retries=1; mkdir -p ${q}/pi; cd ${q}/pi; [ -f package.json ] || printf '{"private":true}\\n' > package.json; npm install --ignore-scripts --no-audit --no-fund --loglevel=error @earendil-works/pi-coding-agent@${piVersion}`, { timeout: 240000 })
         .then(() => true, () => false);
     }
     if (!installed) {
-      if (!piPackageDir) throw new Error(`Installing Pi on ${env.label} failed`);
-      onProgress('Packaging Pi…');
+      if (!piPackageDir) throw new Error(`Installing Iris’s agent on ${env.label} failed`);
+      onProgress('Packaging Iris’s agent…');
       await uploadPi(env, root, await piBundle(piPackageDir, cacheDir), onProgress);
     }
   }
@@ -429,6 +430,7 @@ export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, 
     [CODEX_ADAPTER, readFileSync(new URL(`../../agent/${CODEX_ADAPTER}`, import.meta.url))],
     [CURSOR_ADAPTER, readFileSync(new URL(`../../agent/${CURSOR_ADAPTER}`, import.meta.url))],
     [HISTORY_FILE, readFileSync(new URL(`../../agent/${HISTORY_FILE}`, import.meta.url))],
+    [VISUAL_FILE, readFileSync(new URL(`../../agent/${VISUAL_FILE}`, import.meta.url))], // the agents' visual tool (an MCP server)
   ] : [
     ...EXTENSION_FILES.map(name => [name, readFileSync(name === 'iris-bridge.js' ? bridgePath : join(dirname(bridgePath), name))]),
     relay,

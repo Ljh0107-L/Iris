@@ -15,7 +15,8 @@ import { Palette } from './Palette.jsx';
 import { Modal, Popover, Spinner, Trigger } from './ui.jsx';
 import { antigravityTurnSpeed, emptyTranscript, findBlocks, formatTokens } from './transcript.js';
 import { sortedBackgroundJobs } from './background-jobs.js';
-import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, runCommand, sendPrompt, setFilePaneOpen, setSidebarAuto, sidebarShown, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+import { ENGINE_ORDER } from './handoff.js';
+import { api, bootstrap, closeConfirm, closeHandoff, handOff, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, runCommand, sendPrompt, setFilePaneOpen, setSidebarAuto, sidebarShown, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
 // The session's goal (/goal): objective, state, and pause / resume / clear.
 function GoalBanner({ session }) {
@@ -63,6 +64,39 @@ function UltraBanner({ session }) {
       {['paused', 'stalled', 'needs_attention'].includes(task.status) && ultra.enabled && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
       {task.status !== 'active' && <button className="goal-close" aria-label="Dismiss" title="Dismiss" onClick={() => run('dismiss')}><Icon name="x" size={13} /></button>}
     </div>{task.status === 'needs_attention' && <div className="ultra-review-gaps" role="status"><strong>{task.reason}</strong><pre>{task.review?.text}</pre></div>}</div>
+  );
+}
+
+// Hand a conversation to another agent: continue its work there, or have it reviewed. The new conversation opens
+// with the message written, to read and send (handoff.js says what it holds).
+function HandoffHost() {
+  const handoff = useStore(s => s.handoff);
+  const session = useStore(s => s.sessions.find(x => x.id === s.handoff?.sessionId));
+  const [mode, setMode] = useState('continue');
+  useEffect(() => { if (handoff) setMode(handoff.mode ?? 'continue'); }, [handoff?.sessionId, handoff?.mode]);
+  if (!handoff || !session) return null;
+  const from = session.engine ?? 'iris';
+  const engines = ENGINE_ORDER.filter(engine => engine !== from);
+  return (
+    <Modal title="Hand off to another agent" width={460} onClose={closeHandoff}>
+      <div className="handoff">
+        <div className="segmented" role="radiogroup" aria-label="What the other agent does">
+          {[['continue', 'Continue the work'], ['review', 'Review the work']].map(([value, label]) => (
+            <button key={value} type="button" role="radio" aria-checked={mode === value} className={mode === value ? 'on' : ''} onClick={() => setMode(value)}>{label}</button>
+          ))}
+        </div>
+        <p className="handoff-note">{mode === 'review'
+          ? `A new conversation in the same folder asks the agent you pick to review what ${engineLabel(from)} did, without editing.`
+          : `A new conversation in the same folder, with what was asked, what ${engineLabel(from)} last reported and the files it changed. You can edit the message before sending it.`}</p>
+        <div className="handoff-engines">
+          {engines.map(engine => (
+            <button key={engine} type="button" className="handoff-engine" onClick={() => void handOff(session.id, engine, mode)}>
+              <EngineLogo engine={engine} size={22} /><span>{engineLabel(engine)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -322,7 +356,7 @@ function Header({ session, view }) {
     <header className={`main-head drag ${activeSession || opening ? '' : 'welcome-head'} ${sidebar ? '' : 'no-sidebar'}`}>
       {!sidebar && <div className="window-tools no-drag"><button className="tool-button" onClick={toggleSidebar} aria-label="Show sidebar"><Icon name="sidebarToggle" size={18} /></button></div>}
       {opening && <div className="header-context">
-        <span className="title-button opening" title={session.title}><EngineLogo engine={session.engine ?? 'pi'} size={16} className="title-engine-logo" title={engineLabel(session.engine)} /><span>{session.title}</span></span>
+        <span className="title-button opening" title={session.title}><EngineLogo engine={session.engine ?? 'iris'} size={16} className="title-engine-logo" title={engineLabel(session.engine)} /><span>{session.title}</span></span>
         {!local && session.environmentLabel && <span className="header-env-badge"><Icon name="terminal" size={11} />{session.environmentLabel}</span>}
       </div>}
       {activeSession ? <>
@@ -330,7 +364,7 @@ function Header({ session, view }) {
           ? <input className="title-input no-drag" autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => { setRenaming(false); if (title.trim()) api('rename', session.id, title.trim()); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false); }} />
           : <div className="header-context">
               <button ref={anchor} className="title-button no-drag" onClick={() => setMenu(m => !m)} aria-expanded={menu} title={session.title}>
-                <EngineLogo engine={session.engine ?? 'pi'} size={16} className="title-engine-logo" title={engineLabel(session.engine)} /><span>{session.title}</span><Icon name="chevronDown" size={12} />
+                <EngineLogo engine={session.engine ?? 'iris'} size={16} className="title-engine-logo" title={engineLabel(session.engine)} /><span>{session.title}</span><Icon name="chevronDown" size={12} />
               </button>
               {!local && session.environmentLabel && (
                 <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
@@ -423,6 +457,7 @@ export function App() {
       {settingsOpen && <SettingsPage />}
       {paletteOpen && <Palette />}
       <ConfirmHost />
+      <HandoffHost />
       {toasts}
     </div>
   );

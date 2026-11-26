@@ -866,7 +866,7 @@ export function createSubagentTool({
   // A message to an agent: queued while it works, otherwise the start of another run.
   function message(id, text, { from = 'parent', background = true } = {}) {
     const entry = entries.get(id);
-    if (!entry) throw new Error(departed.has(id) || !id ? `Agent ${id} is no longer available. Start a new agent with what it needs.` : `No agent with id ${id} in this session (agents don't survive a restart of Pi). Start a new agent with what it needs.`);
+    if (!entry) throw new Error(departed.has(id) || !id ? `Agent ${id} is no longer available. Start a new agent with what it needs.` : `No agent with id ${id} in this session (agents don't survive a restart of Iris's agent). Start a new agent with what it needs.`);
     if (entry.record.status === 'cancelled' || entry.stop.signal.aborted) throw new Error(`Agent ${entry.record.name} was stopped; start a new agent instead.`);
     const body = from === 'user' ? `Message from the user, sent to you directly:\n${text}` : text;
     recordSubagentStep(entry.record, { id: `input:${entry.record.runs}:${entry.record.steps.length}:${Date.now()}`, type: 'input', from, text: clip(text, 8000) });
@@ -1000,10 +1000,10 @@ export function createSubagentTool({
       }
       const orphans = [...last.values()].filter(a => isActiveAgent(a) && !entries.has(a.id));
       for (const agent of orphans) {
-        const record = { ...agent, status: 'cancelled', failureKind: 'interrupted', error: 'Stopped: its Pi session ended before it finished.', retained: false, finishedAt: Date.now(), updatedAt: Date.now() };
+        const record = { ...agent, status: 'cancelled', failureKind: 'interrupted', error: 'Stopped: its session ended before it finished.', retained: false, finishedAt: Date.now(), updatedAt: Date.now() };
         try {
           notify?.({ customType: 'iris-agent', display: true,
-            content: `Automated message from Iris, not from the user: agent ${describeAgent(record)} stopped because its Pi session ended before it finished. Its work may be incomplete; it can't be continued.`,
+            content: `Automated message from Iris, not from the user: agent ${describeAgent(record)} stopped because its session ended before it finished. Its work may be incomplete; it can't be continued.`,
             details: { kind: 'iris-agent', key: `${agent.id}:interrupted`, agent: record, run: agent.runs ?? 0, agentRuns: [] } }, {});
         } catch { /* best effort */ }
       }

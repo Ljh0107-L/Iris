@@ -29,7 +29,7 @@ IRIS_USER_DATA=/tmp/iris-dev IRIS_DEFAULT_WORKSPACE=/tmp/iris-dev/workspace npm 
 | `core/` | The agent protocol client, transports and the egress proxy. Shared by the app and the tests. |
 | `test/` | `*.test.mjs` are unit tests. The other `.mjs` files are drivers for the UI and SSH suites. |
 
-All four agents reach the app through one event protocol (Pi's RPC). When you add something for one agent, check what the other three should do.
+All five agents reach the app through one event protocol (Pi's RPC, which Iris's own agent speaks natively). When you add something for one agent, check what the other four should do.
 
 ## Tests
 

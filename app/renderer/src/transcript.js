@@ -469,7 +469,18 @@ export function ultraProgress(call, tool) {
 // Display blocks: user bubbles, assistant text/thinking, and groups of consecutive tool calls.
 export function displayBlocks(t) {
   const blocks = [];
-  const all = t.live ? [...t.messages, t.live] : t.messages;
+  const listed = t.live ? [...t.messages, t.live] : t.messages;
+  // A message handed to a turn under way (Option+Enter: Codex reads it before its next model call) is saved
+  // before the turn's reply, which Codex saves whole when it ends. It is shown where it was sent: inside that
+  // reply, after what was there by then (steer.at, an index into the reply's content).
+  const steered = new Map(); // reply -> [{ at, message }]
+  const all = listed.filter((message, i) => {
+    if (message.role !== 'user' || !Number.isInteger(message.steer?.at)) return true;
+    const reply = listed.slice(i + 1).find(m => m.role === 'assistant' || (m.role === 'user' && !Number.isInteger(m.steer?.at)));
+    if (reply?.role !== 'assistant') return true;
+    steered.set(reply, [...(steered.get(reply) ?? []), { at: message.steer.at, message }]);
+    return false;
+  });
   const declaredCalls = new Set(all.flatMap(m => m.role === 'assistant' && Array.isArray(m.content) ? m.content.filter(b => b?.type === 'toolCall').map(b => b.id) : []));
   let group = null;
   const flush = () => { if (group) { blocks.push(group); group = null; } };
@@ -487,6 +498,17 @@ export function displayBlocks(t) {
     turn = [];
   };
   let ordinal = 0, unread = false;
+  const userBlock = (message, mk, ref, steer = false) => {
+    const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
+    let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
+    if (text.startsWith('/iris-')) return;
+    // Attached files travel as a trailing list of paths (see SessionManager.prompt).
+    let files = [];
+    const att = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/.exec(text);
+    if (att) { files = att[1].trim().split('\n').map(l => l.replace(/^- /, '')); text = text.slice(0, att.index); }
+    const images = parts.filter(c => c.type === 'image' && c.data);
+    blocks.push({ kind: 'user', key: `u${mk}`, text, files, images, entryId: message.__entryId, truncated: message.__history?.truncated, historyRef: ref, ordinal: ordinal++, ...(steer ? { steer: true } : {}) });
+  };
   all.forEach((message, mi) => {
     const mk = historyKey(message);
     const ref = message.__history?.truncated ? message.__history.ref : null;
@@ -505,15 +527,7 @@ export function displayBlocks(t) {
       flush();
       closeTurn();
       turnKey = mk;
-      const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
-      let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
-      if (text.startsWith('/iris-')) return;
-      // Attached files travel as a trailing list of paths (see SessionManager.prompt).
-      let files = [];
-      const att = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/.exec(text);
-      if (att) { files = att[1].trim().split('\n').map(l => l.replace(/^- /, '')); text = text.slice(0, att.index); }
-      const images = parts.filter(c => c.type === 'image' && c.data);
-      blocks.push({ kind: 'user', key: `u${mk}`, text, files, images, entryId: message.__entryId, truncated: message.__history?.truncated, historyRef: ref, ordinal: ordinal++ });
+      userBlock(message, mk, ref);
       return;
     }
     // A goal started with /goal (the bridge's hidden prompt): show what was set.
@@ -573,7 +587,10 @@ export function displayBlocks(t) {
     const reasoning = message.usage?.reasoning ?? 0;
     let sawThinking = false;
     const firstBlock = blocks.length;
+    const steers = (steered.get(message) ?? []).slice().sort((a, b) => a.at - b.at);
+    const steerUpTo = index => { while (steers.length && steers[0].at <= index) { const { message: m } = steers.shift(); flush(); userBlock(m, historyKey(m), m.__history?.truncated ? m.__history.ref : null, true); } };
     (message.content ?? []).forEach((block, bi) => {
+      steerUpTo(bi);
       if (!block) return;
       const historyRef = contentRef(bi);
       if (block.type === 'toolCall' && historyRef) block = { ...block, __historyTruncated: true, __historyRef: historyRef };
@@ -584,6 +601,8 @@ export function displayBlocks(t) {
       // Files handed to the user are cards in the conversation, not a folded tool step.
       if (block.type === 'toolCall' && block.name === 'report_progress') { flush(); blocks.push({ kind: 'progress', key: `progress:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'present_files') { flush(); blocks.push({ kind: 'files', key: `files:${block.id}`, call: block }); return; }
+      // A visual an agent showed (Iris's show_visual tool, by MCP: mcp__iris__show_visual, or as an ACP agent names it).
+      if (block.type === 'toolCall' && isVisualCall(block)) { flush(); blocks.push({ kind: 'visual', key: `visual:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall') {
         if (!group) group = { kind: 'tools', key: `g${mk}-${bi}`, calls: [] };
         group.calls.push(block);
@@ -605,6 +624,7 @@ export function displayBlocks(t) {
         blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, text: block.thinking, streaming: thinking, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null, historyRef });
       }
     });
+    steerUpTo(Infinity); // sent after all there is so far
     // Reasoning that was billed but never shown (OpenAI o-series, hidden thinking): say so.
     if (!sawThinking && reasoning > 0 && message !== t.live) {
       const tm = message.__timing;
@@ -639,6 +659,11 @@ export function displayBlocks(t) {
   });
   flush();
   closeTurn();
+  // A visual shown again under the same id (kept current as work goes on): the newest is the one shown, and the
+  // earlier versions fold away where they were.
+  const newest = new Map();
+  for (const block of blocks) if (block.kind === 'visual' && typeof block.call.arguments?.id === 'string' && block.call.arguments.id) newest.set(block.call.arguments.id, block);
+  for (const block of blocks) if (block.kind === 'visual' && block.call.arguments?.id && newest.get(block.call.arguments.id) !== block) block.superseded = true;
   return collapseWork(blocks);
 }
 
@@ -646,6 +671,9 @@ export function displayBlocks(t) {
 // not in the DOM, and a folded step's details never are).
 const resultText = tool => (tool?.result?.content ?? []).map(c => c?.text ?? '').join('\n');
 const callText = (call, tools) => [call.name, ...Object.values(call.arguments ?? {}).map(v => typeof v === 'string' ? v : JSON.stringify(v) ?? ''), resultText(tools[call.id])].join('\n');
+// Iris's visual tool, whatever the agent calls it: mcp__iris__show_visual (Iris, Codex, Claude Code), or a name
+// ending in show_visual (Cursor and Antigravity say the server's and the tool's names their own way).
+export const isVisualCall = call => typeof call?.name === 'string' && /(^|[_:\-\s])show_visual$/i.test(call.name);
 export function blockSearchText(block, tools = {}) {
   switch (block.kind) {
     case 'user': return [block.text, ...(block.files ?? [])].join('\n');

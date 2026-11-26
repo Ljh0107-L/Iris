@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localTransport } from '../core/transports.mjs';
 import { branchMessages } from '../app/main/session-manager.mjs';
 import { applyEvent, displayBlocks, emptyTranscript, failureTitle, fromHistory, providerFailure } from '../app/renderer/src/transcript.js';
@@ -50,7 +50,7 @@ async function runCase(t, { breakStream = 'reset', always = false, abortRetry = 
     res.end();
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const session = new PiSession({ id: 'stream-recovery', boot: { config: { speed }, providers: [{ id: provider, api: 'openai-responses', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test-only', models: [{ id: model }] }] },
+  const session = new AgentSession({ id: 'stream-recovery', boot: { config: { speed }, providers: [{ id: provider, api: 'openai-responses', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test-only', models: [{ id: model }] }] },
     transport: localTransport({ node: process.execPath, piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'),
       cwd: dir, agentDir, retryPath: resolve('agent/iris-retry.mjs'), extensions: [resolve('agent/iris-bridge.js')] }) });
   t.after(async () => { await session.stop(); server.closeAllConnections(); await new Promise(r => server.close(r)); rmSync(dir, { recursive: true, force: true }); });

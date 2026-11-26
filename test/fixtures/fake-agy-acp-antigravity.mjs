@@ -25,6 +25,14 @@ const cache = () => existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, '
 // Where the sign-in is kept, as in the real CLI: `signedIn` is the keychain of a Mac, one sign-in whatever
 // the data directory; `signedInDirs` is a machine without a keychain (an SSH host), where the sign-in is a
 // file in the data directory it was made with and no other directory has it.
+// Iris gives each session its visual tool: one stdio MCP server, iris, run from iris-visual.mjs.
+const irisVisual = servers => {
+  if (Array.isArray(servers) && !servers.length) return; // (the empty conversation that reads the menus needs none)
+  assert.equal(servers?.length, 1);
+  assert.equal(servers[0].name, 'iris');
+  assert.match(servers[0].args.at(-1), /iris-visual\.mjs$/);
+  assert.ok(Array.isArray(servers[0].env));
+};
 const signedIn = () => cache().signedIn === true || cache().signedInDirs?.[dataDir] === true;
 const save = value => writeFileSync(cacheFile, JSON.stringify(value));
 const log = value => appendFileSync(logFile, JSON.stringify(value) + '\n');
@@ -93,7 +101,7 @@ lines.on('line', line => {
       break;
     case 'session/new': {
       assert.equal(r.params.cwd, scenario().workspace ?? process.cwd());
-      assert.deepEqual(r.params.mcpServers, []);
+      irisVisual(r.params.mcpServers);
       if (scenario().newFailure) { error(r.id, -32000, 'fixture-private-non-auth-server-error'); break; }
       if (!signedIn()) { authRequired(r.id); break; }
       assert.equal(cache().session, undefined, 'client tried to replace an existing CLI session');
@@ -106,7 +114,8 @@ lines.on('line', line => {
       break;
     }
     case 'session/load': case 'session/resume': {
-      assert.deepEqual(r.params, { cwd: scenario().workspace ?? process.cwd(), mcpServers: [], sessionId: SESSION });
+      irisVisual(r.params.mcpServers);
+      assert.deepEqual({ ...r.params, mcpServers: undefined }, { cwd: scenario().workspace ?? process.cwd(), mcpServers: undefined, sessionId: SESSION });
       if (!signedIn() || scenario().expireResume) { authRequired(r.id); break; }
       if (scenario().missingSession || cache().session !== SESSION) { error(r.id, -32002, 'fixture-private-stale-session-data'); break; }
       if (r.method === 'session/load') {

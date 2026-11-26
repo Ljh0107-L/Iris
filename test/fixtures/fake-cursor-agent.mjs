@@ -70,6 +70,7 @@ function serve(force) {
       case 'authenticate': if (!signedIn()) return fail(-32000, 'Authentication required'); authenticated = true; return reply({});
       case 'cursor/list_available_models': if (!authenticated) return fail(-32000, 'Authentication required'); return reply({ models: MODELS });
       case 'session/new': case 'session/load': if (!authenticated) return fail(-32000, 'Authentication required');
+        save({ mcpServers: (m.params.mcpServers ?? []).map(server => server.name) });
         return reply({ ...(m.method === 'session/new' ? { sessionId: SESSION } : {}), configOptions: configOptions() });
       case 'session/set_config_option': {
         const { configId, value } = m.params;
@@ -103,6 +104,12 @@ function serve(force) {
           // (Cursor's "notifications" are requests it does not wait on.)
           send({ id: 'img-1', method: 'cursor/generate_image', params: { toolCallId: 'call_img', description: 'a pelican on a bicycle', filePath: file } });
           await sleep(20);
+        }
+        if (/visualize/.test(text)) {
+          // An MCP call (Iris's visual tool), as Cursor reports one: named and given its input only after it began.
+          update({ sessionUpdate: 'tool_call', toolCallId: 'call_viz', title: 'MCP: tool', kind: 'other', status: 'pending', rawInput: {} });
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_viz', title: 'iris: show_visual', rawInput: { providerIdentifier: 'iris', toolName: 'show_visual', args: { title: 'Dot', html: '<canvas></canvas>' } } });
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_viz', status: 'completed', rawOutput: { success: true } });
         }
         if (/ask/.test(text)) {
           const answer = await new Promise(resolve => {

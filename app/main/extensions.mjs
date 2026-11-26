@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 // The Claude Code and Antigravity adapters are staged with the bridge so the relay can launch
 // them on SSH hosts. Pi itself does not load them as extensions.
-export const EXTENSION_FILES = ['iris-speed.mjs', 'iris-retry.mjs', 'iris-ultra.mjs', 'iris-subagent.mjs', 'iris-background.mjs', 'iris-gemini.mjs', 'iris-openai.mjs', 'iris-google.mjs', 'iris-google-args.mjs', 'iris-session-tools.mjs', 'iris-history.mjs', 'iris-claude.mjs', 'iris-antigravity.mjs', 'iris-codex.mjs', 'iris-bridge.js'];
+export const EXTENSION_FILES = ['iris-speed.mjs', 'iris-retry.mjs', 'iris-ultra.mjs', 'iris-subagent.mjs', 'iris-background.mjs', 'iris-gemini.mjs', 'iris-openai.mjs', 'iris-google.mjs', 'iris-google-args.mjs', 'iris-session-tools.mjs', 'iris-history.mjs', 'iris-claude.mjs', 'iris-antigravity.mjs', 'iris-codex.mjs', 'iris-visual.mjs', 'iris-bridge.js'];
 export const EXTENSION_PACKAGE = '{"private":true}\n';
 
 // Copies changed files atomically (a running relay may start a Pi at any moment) and returns the

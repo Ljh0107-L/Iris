@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { registerSessionTools, restoredToolNames, toolCheckpoint } from '../agent/iris-session-tools.mjs';
 import { stageExtensions } from '../app/main/extensions.mjs';
-import { PiSession } from '../core/pi-session.mjs';
+import { AgentSession } from '../core/agent-session.mjs';
 import { localTransport } from '../core/transports.mjs';
 import { startMockLlm } from './mock-llm.mjs';
 
@@ -166,7 +166,7 @@ async function rpcFixture(t, { removed = false, noCheckpoint = false } = {}) {
   const sessions = [];
   t.after(async () => { for (const s of sessions) await s.stop(); await mock.close(); rmSync(dir, { recursive: true, force: true }); });
   const start = async () => {
-    const s = new PiSession({ id: 'recovery', boot, transport: localTransport({ cwd: dir, node: process.execPath,
+    const s = new AgentSession({ id: 'recovery', boot, transport: localTransport({ cwd: dir, node: process.execPath,
       piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir, extensions: [bridge], piArgs: ['--session', file] }) });
     sessions.push(s);
     const notices = [];
