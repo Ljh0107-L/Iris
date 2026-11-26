@@ -4,6 +4,10 @@ The section for a version becomes the notes of its GitHub release.
 
 ## 0.2.5
 
+**New**
+
+- **/goal for Antigravity and Cursor**, as Iris's own agent and Codex have it: `/goal <objective>` sets an objective the agent keeps working toward, a turn after another, until it marks it achieved (or blocked) with Iris's `update_goal` tool. It is in the / menu, shows above the message box with Pause, Resume and Clear, is kept with the conversation, and stopping a turn pauses it. A `/goal` command never stops the turn under way.
+
 **Fixed**
 
 - **A stopped turn's task list no longer turns for ever, and is shown again where you are.** The step it was on is at rest (only the plan an agent is carrying out moves, while it works), and the plan as it stands, with steps of it left, stands at the end of the latest turn, under your next message, as Claude Code shows its list again; once the agent writes a new list or finishes every step, that is what is shown.
@@ -18,6 +22,7 @@ The section for a version becomes the notes of its GitHub release.
 - **Settings → Connections**: a switch or Remove that fails says so; "Ready" no longer ends in "Node" with no version after it.
 - **Files**: an empty folder says so instead of showing nothing; Copy path in the tree copies the whole path, as the pane's menu does.
 - **Git review**: its wrap, refresh and close buttons say what they do on hover, and wrap has the same icon as in Files.
+- **Antigravity: picking another model for a new conversation keeps its thinking menu.** Antigravity lists the efforts of the model in use only, so the menu went as soon as another model was picked; what each model has is now learned as it is used, and shown when it is picked again.
 
 **Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
 

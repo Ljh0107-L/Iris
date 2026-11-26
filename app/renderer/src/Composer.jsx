@@ -169,6 +169,8 @@ export const modelLabel = (model, catalog) => {
 // list replaces this once it is open.
 const DRAFT_CLI_COMMANDS = {
   codex: [{ name: 'goal', argumentHint: '<objective>', description: 'Set a goal Codex keeps working toward: /goal <objective>, /goal pause, /goal resume, /goal clear' }],
+  antigravity: [{ name: 'goal', argumentHint: '<objective>', description: 'Set a goal Antigravity keeps working toward: /goal <objective>, /goal pause, /goal resume, /goal clear' }],
+  cursor: [{ name: 'goal', argumentHint: '<objective>', description: 'Set a goal Cursor keeps working toward: /goal <objective>, /goal pause, /goal resume, /goal clear' }],
 };
 export const BUILTIN_COMMANDS = [
   { name: 'goal', args: true, description: 'Set a goal Iris keeps working toward' },

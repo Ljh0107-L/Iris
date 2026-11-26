@@ -159,6 +159,12 @@ try {
       return null;
     }
     if (method === 'updateStatus') return { state: 'idle' };
+    if (method === 'prompt' && /^\/goal /.test(args[1] ?? '')) {
+      const word = args[1].slice(6).trim();
+      const goal = word === 'clear' ? null : { objective: 'Ship the parser', status: word === 'pause' ? 'paused' : 'active' };
+      await page.evaluate(({ id, goal }) => window.fixtureEvent({ channel: 'goal', payload: { id, goal } }), { id: args[0], goal });
+      return { disposition: 'handled' };
+    }
     if (method === 'prompt') {
       const verb = args[1]?.match(/^\/iris-ultra (resume|pause|dismiss)$/)?.[1];
       if (!verb) throw new Error('UI test must not send model prompts');
@@ -510,6 +516,20 @@ try {
   assert.equal(await card('Usage').locator('.usage-speed-kind').innerText(), 'Estimated turn TPS');
   assert.equal(await page.locator('.agents-pill').count() + await card('Background tasks').count(), 0);
   await page.screenshot({ path: join(screenshots, 'right-panel-antigravity.png') });
+  // Its /goal (kept by Iris's adapter): a command, not a message of yours, and it does not stop the turn under way;
+  // the goal shows above the message box, and pauses from there.
+  const agyBox = page.getByRole('textbox', { name: 'Message', exact: true });
+  await agyBox.fill('/goal Ship the parser');
+  await agyBox.press('Enter');
+  await page.locator('.goal-banner', { hasText: 'Ship the parser' }).waitFor();
+  const goalCall = ipcCalls.findLast(c => c.method === 'prompt' && c.args[0] === 'agy-ui');
+  assert.equal(goalCall.args[1], '/goal Ship the parser');
+  assert.equal(goalCall.args[3]?.interrupt, false);
+  assert.equal(await page.locator('.user-bubble', { hasText: '/goal Ship the parser' }).count(), 0, 'not shown as a message');
+  await page.locator('.goal-banner .goal-action', { hasText: 'Pause' }).click();
+  await page.locator('.goal-banner .goal-state', { hasText: 'Paused' }).waitFor();
+  await page.locator('.goal-banner .goal-close').click();
+  await page.locator('.goal-banner').waitFor({ state: 'detached' });
   await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
   await page.locator('.title-button img.title-engine-logo[alt="Claude Code"]').waitFor();
   await page.getByRole('button', { name: 'Conversation details', exact: true }).click();

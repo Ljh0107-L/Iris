@@ -3,12 +3,12 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { VISUAL_MAX_BYTES, VISUAL_TOOL, callVisual, serve, visualServer } from '../agent/iris-visual.mjs';
+import { GOAL_TOOL, VISUAL_MAX_BYTES, VISUAL_TOOL, callVisual, serve, visualServer } from '../agent/iris-visual.mjs';
 import { displayBlocks, isVisualCall } from '../app/renderer/src/transcript.js';
 
-function server() {
+function server(options = {}) {
   const input = new PassThrough(), output = new PassThrough();
-  serve({ input, output, version: '9.9.9' });
+  serve({ input, output, version: '9.9.9', ...options });
   let buffer = '';
   const answers = new Map(), waiting = new Map();
   output.on('data', chunk => {
@@ -38,6 +38,17 @@ test('it speaks MCP: it introduces itself, lists show_visual, and says a page wa
   assert.equal((await s.ask('tools/call', { name: 'other' })).error.code, -32602);
   assert.equal((await s.ask('resources/list')).error.code, -32601);
   assert.deepEqual((await s.ask('ping')).result, {});
+});
+
+test('with the goal tool (Antigravity and Cursor, whose /goal Iris keeps): update_goal is listed and answered; others do not have it', async () => {
+  const s = server({ goal: true });
+  const { result: { tools } } = await s.ask('tools/list');
+  assert.deepEqual(tools.map(t => t.name), [VISUAL_TOOL, GOAL_TOOL]);
+  assert.deepEqual(tools[1].inputSchema.properties.status.enum, ['complete', 'blocked', 'paused']);
+  assert.match((await s.ask('tools/call', { name: GOAL_TOOL, arguments: { status: 'complete' } })).result.content[0].text, /Goal status is now complete/);
+  assert.equal((await s.ask('tools/call', { name: GOAL_TOOL, arguments: { status: 'done' } })).result.isError, true);
+  const plain = server();
+  assert.equal((await plain.ask('tools/call', { name: GOAL_TOOL, arguments: { status: 'complete' } })).error.code, -32602, 'not for Codex or Claude Code');
 });
 
 test('a page that cannot be shown says why, so the model can try again', () => {

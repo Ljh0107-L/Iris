@@ -131,6 +131,8 @@ export function describeCall(call) {
     case 'Workflow': return { verb: 'Workflow', subject: a.description || a.name || String(a.prompt ?? '').split('\n')[0].slice(0, 80) || 'Run workflow' };
     case 'NotebookEdit': return { verb: 'Edited notebook', subject: baseOf(path), detail: a.edit_mode ?? '', title: path };
     case 'EnterPlanMode': return { verb: 'Entered plan mode', subject: '' };
+    case 'update_goal': case 'mcp__iris__update_goal': return { verb: { complete: 'Marked the goal achieved', blocked: 'Marked the goal blocked', paused: 'Paused the goal' }[a.status] ?? 'Updated the goal', subject: '' };
+    case 'get_goal': return { verb: 'Read the goal', subject: '' };
     case 'ExitPlanMode': return { verb: 'Proposed plan', subject: String(a.plan ?? '').split('\n').map(l => l.replace(/^#+\s*/, '').trim()).find(Boolean) || '' };
     case 'EnterWorktree': return { verb: 'Entered worktree', subject: a.name ?? a.path ?? '' };
     case 'ExitWorktree': return { verb: 'Exited worktree', subject: a.action ?? '' };

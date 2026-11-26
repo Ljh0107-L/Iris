@@ -164,7 +164,7 @@ test('negotiates image input, CLI commands and context, and persists turn speed 
   assert.equal(state.cli.image, true);
   assert.equal(state.cli.permissionMode, 'bypassPermissions');
   assert.deepEqual(f.log()[0].boot.argv, ['acp', '--dangerously-skip-permissions']);
-  assert.deepEqual((await peer.request('get_commands')).commands, [{ name: 'test-skill', description: 'Test skill', source: 'antigravity', argumentHint: '<input>' }]);
+  assert.deepEqual((await peer.request('get_commands')).commands.map(c => [c.name, c.source, c.argumentHint]), [['goal', 'antigravity', '<objective>'], ['test-skill', 'antigravity', '<input>']], 'its /goal (Iris’s), then the CLI’s own');
   assert.deepEqual(await peer.request('get_session_stats'), { contextUsage: { tokens: 250, contextWindow: 1000, percent: 25 } });
   const image = { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' };
   await peer.request('prompt', { message: '', images: [image] });
@@ -189,6 +189,55 @@ async function ask(peer, message) {
 }
 
 const answer = (peer, question, payload) => peer.send({ type: 'extension_ui_response', id: question.id, ...payload });
+
+const goals = peer => peer.events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'iris-goal').map(e => e.statusText ? JSON.parse(e.statusText) : null);
+
+test('/goal: the agent keeps working, turn after turn, until it marks the goal achieved with Iris’s update_goal tool', { timeout: 15000 }, async t => {
+  const f = fixture(t, { goalDoneAt: 3 }, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  assert.equal(state.cli.commands[0].name, 'goal', 'offered with the CLI’s own commands');
+  // Iris's MCP server is started with its goal tool for this agent.
+  const server = f.calls('session/new').at(-1).params.mcpServers[0];
+  assert.ok(server.env.some(v => v.name === 'IRIS_GOAL_TOOL' && v.value === '1'));
+  assert.deepEqual(await peer.request('prompt', { message: '/goal make the tests pass' }), { disposition: 'handled' });
+  await until(() => goals(peer).at(-1)?.status === 'complete', 'the goal to be achieved', 8000);
+  await until(() => peer.events.filter(event('agent_settled')).length === 3, 'three turns');
+  await sleep(150);
+  assert.equal(peer.events.filter(event('agent_start')).length, 3, 'no turn after it was achieved');
+  assert.deepEqual(goals(peer).at(-1), { objective: 'make the tests pass', status: 'complete', turns: 2 });
+  // Saved with the conversation: the goal's prompts are goal rows (not messages of yours), the tool a step.
+  const history = (await readHistory(state.sessionFile)).messages;
+  const prompts = history.filter(m => m.role === 'custom' && m.customType === 'iris-goal');
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[0].content, /^The user set a goal[\s\S]*<objective>\nmake the tests pass\n<\/objective>/);
+  assert.match(prompts[1].content, /^Continue working toward the active goal/);
+  assert.equal(history.filter(m => m.role === 'user').length, 0);
+  assert.deepEqual(lastAssistant(history).content.find(b => b.type === 'toolCall'), { type: 'toolCall', id: lastAssistant(history).content.find(b => b.type === 'toolCall').id, name: 'update_goal', arguments: { status: 'complete' } });
+  // Opened again: the goal is said again.
+  await peer.stop();
+  const again = f.start(state.sessionFile);
+  await again.request('get_state');
+  await until(() => goals(again).at(-1)?.status === 'complete', 'the goal said again');
+});
+
+test('/goal: stopping its turn pauses it; resume carries on; clear ends it', { timeout: 15000 }, async t => {
+  const f = fixture(t, { goalHold: 1, goalDoneAt: 2 }, true);
+  const peer = f.start();
+  await peer.request('get_state');
+  await peer.request('prompt', { message: '/goal ship it' });
+  await peer.next(e => e.type === 'message_update' && e.assistantMessageEvent?.delta === 'Working on the goal');
+  await peer.request('abort');
+  await until(() => goals(peer).at(-1)?.status === 'paused', 'the goal to pause');
+  await sleep(150);
+  assert.equal(peer.events.filter(event('agent_start')).length, 1, 'no turn after the stop');
+  await peer.request('prompt', { message: '/goal resume' });
+  await until(() => goals(peer).at(-1)?.status === 'complete', 'the goal to be achieved after resuming', 8000);
+  await peer.request('prompt', { message: '/goal clear' });
+  await until(() => goals(peer).at(-1) === null, 'the goal to be cleared');
+  const failed = await peer.rpc('prompt', { message: '/goal resume' });
+  assert.match(failed.error, /no goal to resume/);
+});
 
 test('the task list is one Tasks card kept current, and an agent Antigravity starts is a task with its role and brief', { timeout: 12000 }, async t => {
   const f = fixture(t, {}, true);
@@ -541,7 +590,7 @@ test('ignores optional unsupported config/auth methods without a model or API fa
   await cached.request('prompt', { message: 'simple' });
   await cached.next(event('agent_settled'));
   assert.equal(lastAssistant((await cached.request('get_messages')).messages).content[0].text, 'No settings needed.');
-  assert.deepEqual(await cached.request('get_commands'), { commands: [] });
+  assert.deepEqual((await cached.request('get_commands')).commands.map(c => c.name), ['goal'], 'only Iris’s /goal: the CLI offers none');
   assert.equal(await cached.request('get_session_stats'), null);
 });
 

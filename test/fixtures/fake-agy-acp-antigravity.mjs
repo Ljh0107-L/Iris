@@ -18,6 +18,7 @@ if (!terminalLogin) assert.deepEqual(plainArgs, ['acp', ...(bypass ? ['--dangero
 const noted = join(process.env.HOME ?? '', '.iris-agy-fixture');
 const fixture = process.env.IRIS_AGY_FIXTURE_DIR ?? (existsSync(join(process.cwd(), '.iris-agy-scenario.json')) || !existsSync(noted) ? process.cwd() : readFileSync(noted, 'utf8').trim());
 const scenarioFile = join(fixture, '.iris-agy-scenario.json');
+let goalTurns = 0;
 const cacheFile = join(fixture, '.iris-fake-agy-cache.json');
 const logFile = join(fixture, '.iris-fake-agy.jsonl');
 const scenario = () => JSON.parse(readFileSync(scenarioFile, 'utf8'));
@@ -150,6 +151,17 @@ lines.on('line', line => {
       assert.equal(r.params.prompt.length, 1);
       assert.equal(r.params.prompt[0].type, 'text');
       const text = r.params.prompt[0].text;
+      // A goal's turns (Iris's /goal): progress, then Iris's update_goal tool on the turn the scenario says (goalDoneAt).
+      if (text.startsWith('The user set a goal') || text.startsWith('Continue working toward the active goal')) {
+        goalTurns += 1;
+        if (goalTurns === scenario().goalDoneAt) {
+          const call = { toolCallId: `g-${goalTurns}`, kind: 'other', title: 'mcp__iris__update_goal', rawInput: { status: 'complete' } };
+          update('tool_call', { ...call, status: 'in_progress' }); update('tool_call_update', { ...call, status: 'completed' });
+          chunk('Done: verified.'); reply(r.id, { stopReason: 'end_turn' }); break;
+        }
+        if (scenario().goalHold === goalTurns) { turn = { id: r.id, text }; chunk('Working on the goal'); break; } // (a turn to stop)
+        chunk(`Progress ${goalTurns}.`); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
       if (text === 'expire') {
         save({ ...cache(), signedIn: false });
         authRequired(r.id); break;

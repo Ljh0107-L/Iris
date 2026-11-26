@@ -50,7 +50,23 @@ export function callVisual(args) {
   return { content: [{ type: 'text', text: `Shown to the person in Iris${title ? ` as "${title.slice(0, 120)}"` : ''}.` }] };
 }
 
-export function serve({ input = process.stdin, output = process.stdout, version = '0', onEnd } = {}) {
+// The goal's tool, for an agent whose /goal Iris keeps (Antigravity and Cursor: their adapter starts this server
+// with IRIS_GOAL_TOOL=1). The adapter sees the call and keeps the goal's status; this server only answers it.
+export const GOAL_TOOL = 'update_goal';
+export const GOAL_SCHEMA = {
+  type: 'object',
+  properties: { status: { type: 'string', enum: ['complete', 'blocked', 'paused'], description: 'The goal\'s new status.' } },
+  required: ['status'],
+  additionalProperties: false,
+};
+const GOAL_DESCRIPTION = 'Update the session goal (set with /goal). Set status to "complete" only when the objective has actually been achieved and verified and no required work remains. Set "blocked" only when the same blocking condition has repeated for at least three consecutive goal turns and you cannot progress without the user. Set "paused" only at the user\'s explicit request.';
+export function callGoal(args) {
+  const status = args?.status;
+  if (!['complete', 'blocked', 'paused'].includes(status)) return { isError: true, content: [{ type: 'text', text: 'Give status: "complete", "blocked" or "paused".' }] };
+  return { content: [{ type: 'text', text: `Goal status is now ${status}.` }] };
+}
+
+export function serve({ input = process.stdin, output = process.stdout, version = '0', onEnd, goal = process.env.IRIS_GOAL_TOOL === '1' } = {}) {
   const send = message => output.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
   const answer = (id, result) => send({ id, result });
   const fail = (id, code, message) => send({ id, error: { code, message } });
@@ -70,10 +86,12 @@ export function serve({ input = process.stdin, output = process.stdout, version 
           capabilities: { tools: {} }, serverInfo: { name: 'iris', title: 'Iris', version },
           instructions: 'show_visual shows the person an HTML visual (animation, diagram, interactive explanation) in the conversation.' }); break;
         case 'ping': answer(id, {}); break;
-        case 'tools/list': answer(id, { tools: [{ name: VISUAL_TOOL, title: 'Show a visual', description: VISUAL_DESCRIPTION, inputSchema: VISUAL_SCHEMA }] }); break;
+        case 'tools/list': answer(id, { tools: [{ name: VISUAL_TOOL, title: 'Show a visual', description: VISUAL_DESCRIPTION, inputSchema: VISUAL_SCHEMA },
+          ...(goal ? [{ name: GOAL_TOOL, title: 'Update goal', description: GOAL_DESCRIPTION, inputSchema: GOAL_SCHEMA }] : [])] }); break;
         case 'tools/call':
-          if (params?.name !== VISUAL_TOOL) fail(id, -32602, `Unknown tool: ${params?.name}`);
-          else answer(id, callVisual(params.arguments));
+          if (params?.name === VISUAL_TOOL) answer(id, callVisual(params.arguments));
+          else if (goal && params?.name === GOAL_TOOL) answer(id, callGoal(params.arguments));
+          else fail(id, -32602, `Unknown tool: ${params?.name}`);
           break;
         default: fail(id, -32601, `Method not found: ${method}`);
       }

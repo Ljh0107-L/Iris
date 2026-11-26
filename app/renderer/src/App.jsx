@@ -305,7 +305,8 @@ function SessionView({ session }) {
           <div className="composer-shell">
             <ConnectionBanner session={session} />
             {cli && <CliLogin session={session} />}
-            {((!isClaude && !cli) || session.engine === 'codex') && <GoalBanner session={session} />}
+            {/* (Iris's own goal, and each CLI's: Codex's own, Antigravity's and Cursor's kept by their adapter. Claude Code's /goal is its own command.) */}
+            {!isClaude && <GoalBanner session={session} />}
             {!isClaude && !cli && <UltraBanner session={session} />}
             <Composer session={session} autoFocus placeholder={placeholder} onSubmit={(text, attachments, options) => sendPrompt(session.id, text, attachments, options)} footer={<ComposerBar session={session} />} />
           </div>

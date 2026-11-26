@@ -761,8 +761,9 @@ export async function openSession(id, { record = true } = {}) {
   try {
     await reloadTranscript(id);
     if (!isCliSession) refreshStats(id);
-    // Codex keeps a goal with its thread: shown again when the conversation is.
-    if (engine === 'codex') api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
+    // A CLI's goal (Codex keeps it with its thread; Antigravity's and Cursor's adapter with the conversation):
+    // shown again when the conversation is.
+    if (isCliSession) api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
     if (engine !== 'claude-code' && !isCliSession) {
       api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
       api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
@@ -819,7 +820,7 @@ export async function startSession(text, attachments = []) {
     environmentId: draft.environmentId, environmentLabel, engine: draft.engine, cwd: draft.cwd ?? '', streaming: true };
   const clearPending = s => { const { [pendingId]: _, ...remaining } = s.pendingSessions; return remaining; };
   set({ view: 'session', activeId: pendingId, pendingSessions: { ...state.pendingSessions, [pendingId]: pendingSession },
-    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: (text || attachments.length) && !(draft.engine === 'codex' && !attachments.length && /^\/goal(\s|$)/.test(text.trim())) ? [{ role: 'user', timestamp: sentAt, content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
+    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: (text || attachments.length) && !(isCliEngine(draft.engine) && !attachments.length && /^\/goal(\s|$)/.test(text.trim())) ? [{ role: 'user', timestamp: sentAt, content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
   try {
     if (models) {
       await models;
@@ -888,11 +889,12 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
     // A message sent while the CLI works stops the turn and starts one on the message, as with Pi: it shows
     // at once, as a message of its own after the turn, and is replaced by the CLI's own copy when the turn
     // begins. With Codex, Option+Enter instead hands it to the turn under way (read before its next model call).
-    const interrupts = !!session.streaming && !(session.engine === 'codex' && queue);
+    // (/goal is a command, not a message, with every CLI (Codex's own; Antigravity's and Cursor's kept by their
+    // adapter): what shows for it is the goal above the message box, and it does not stop the turn under way.)
+    const command = !attachments.length && /^\/goal(\s|$)/.test(text.trim());
+    const interrupts = !!session.streaming && !command && !(session.engine === 'codex' && queue);
     // What was sent is on the page the moment it is sent, whatever the agent and wherever it runs: the agent's
     // own copy of it replaces this one when it arrives (over SSH that is a round trip or two later).
-    // (Codex's /goal is a command, not a message: what shows for it is the goal above the message box.)
-    const command = session.engine === 'codex' && !attachments.length && /^\/goal(\s|$)/.test(text.trim());
     // Handed to Codex's turn under way (Option+Enter): shown where it is sent, inside the reply being written.
     const steers = session.engine === 'codex' && !!session.streaming && !interrupts && Array.isArray(transcriptOf(id).live?.content);
     const shown = !command && (text.trim() || attachments.length) ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}),
