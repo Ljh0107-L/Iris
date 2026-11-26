@@ -286,7 +286,7 @@ function SessionView({ session }) {
     : questions.length ? (cli ? 'Choose an answer above, or type your own…' : 'Answer the agent’s question…')
     : cli && session.cli?.authRequired ? 'Sign in to send a message…'
     : !isClaude && !cli && ultraWorking ? 'Add to the task, @ to mention, / for actions'
-    : session.streaming ? '↵ to send now · ⌥↵ to add after this step'
+    : session.streaming ? (cli && session.engine !== 'codex' ? '↵ to send now, stopping this turn' : '↵ to send now · ⌥↵ to add after this step')
     : cli ? `Message ${engineLabel(session.engine)} · / for commands`
     : 'Ask anything, @ to mention, / for actions';
   return (
@@ -449,8 +449,9 @@ export function App() {
       else if (e.metaKey && e.key.toLowerCase() === 'n') { e.preventDefault(); runCommand('new'); }
       else if (e.metaKey && e.key === '\\') { e.preventDefault(); runCommand('sidebar'); }
       else if (e.metaKey && e.key === ',') { e.preventDefault(); runCommand('settings'); }
-      else if (e.key === 'Escape' && getState().settingsOpen && !document.querySelector('.modal')) openSettings(false);
-      else if (e.key === 'Escape' && getState().sidebarAuto && getState().sidebarPeek) toggleSidebar();
+      // (Marked as used: what is under it, an agent's view, does not close with the same Esc.)
+      else if (e.key === 'Escape' && getState().settingsOpen && !document.querySelector('.modal')) { e.preventDefault(); openSettings(false); }
+      else if (e.key === 'Escape' && getState().sidebarAuto && getState().sidebarPeek) { e.preventDefault(); toggleSidebar(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

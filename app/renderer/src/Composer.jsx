@@ -528,6 +528,9 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     }
   };
   const canSend = !blocked && !!(text.trim() || attachments.length);
+  // A message can wait for the step under way (Option+Enter) with Iris, Claude Code and Codex; Antigravity and Cursor
+  // have no such thing, and a message sent while they work always stops the turn.
+  const queues = !cli || activeEngine === 'codex';
   const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={22} stroke={1.45} /></button>;
   // One button: while the agent works, Stop; once something is written, Send in its place (sending stops the
   // turn and starts the message's own, or with Option adds it after the step under way).
@@ -538,7 +541,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     }} aria-label="Stop" title={session?.compacting ? 'Stop compaction' : 'Stop generation'}><Icon name="stop" size={16} /></button>
     : null;
   const sendButton = (!working || canSend || onCancel)
-    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={e => submit({ queue: e.altKey })} aria-label="Send" title={sendBlock || (imagesRefused ? `${textOnlyModel} can’t read images` : null) || (working ? 'Send now and interrupt (Enter) · Queue for after this step (⌥Enter)' : 'Send (Enter)')}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
+    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={e => submit({ queue: e.altKey })} aria-label="Send" title={sendBlock || (imagesRefused ? `${textOnlyModel} can’t read images` : null) || (working ? queues ? 'Send now and interrupt (Enter) · Queue for after this step (⌥Enter)' : 'Send now and interrupt (Enter)' : 'Send (Enter)')}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
     : null;
   const sendControl = <div className="composer-actions">{sendButton}{stopButton}</div>;
   const showMentionMenu = !!mention && (mentionLoading || mentionFiles.length > 0);

@@ -1,5 +1,5 @@
 // Full-window Settings, modelled on DSH's settings sections and Codex's Connections page.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { EngineLogo, Icon } from './Icons.jsx';
 import { CursorSettings, SubscriptionSettings } from './CliEngines.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, Trigger } from './ui.jsx';
@@ -376,7 +376,15 @@ const WEEKS = 53;
 // A year of daily token counts, one column per week (Sunday on top), like a contribution graph.
 function Heatmap({ days }) {
   const [hover, setHover] = useState(null);
-  const box = useRef(null);
+  const [shift, setShift] = useState(0);
+  const box = useRef(null), tip = useRef(null);
+  // The tip stays inside the graph: over a day at either end it moves in, instead of spilling past the pane (which
+  // then grew scroll bars).
+  useLayoutEffect(() => {
+    if (!hover || !tip.current || !box.current) return;
+    const width = tip.current.offsetWidth, room = box.current.clientWidth, left = hover.x - width / 2;
+    setShift(Math.max(0, -left) + Math.min(0, room - (left + width)));
+  }, [hover]);
   const { columns, months, max } = useMemo(() => {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const start = new Date(today); start.setDate(start.getDate() - start.getDay() - (WEEKS - 1) * 7);
@@ -411,7 +419,7 @@ function Heatmap({ days }) {
       <div className="heatmap-months" style={{ gridTemplateColumns: `repeat(${WEEKS}, 1fr)` }}>
         {months.map(m => <span key={m.column} style={{ gridColumn: `${m.column + 1} / span 3` }}>{m.label}</span>)}
       </div>
-      {hover && <div className="heat-tip" style={{ left: hover.x, top: hover.y }}>
+      {hover && <div className="heat-tip" ref={tip} style={{ left: hover.x + shift, top: hover.y }}>
         <span>{MONTHS[hover.date.getMonth()]} {hover.date.getDate()}</span>
         <b>{hover.tokens ? `${fmtTokens(hover.tokens)} tokens` : 'No usage'}</b>
       </div>}

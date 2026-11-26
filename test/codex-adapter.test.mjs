@@ -257,6 +257,17 @@ test('a message sent while Codex works joins the turn, and Stop interrupts it', 
   assert.deepEqual((await a.rpc('get_messages')).data.messages[1].steer, { at: 0 }, 'saved with where in the reply it was sent');
 });
 
+test('a command stopped with its turn is cancelled, not failed', { timeout: 20000 }, async t => {
+  const f = fixture(t), a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: 'run a long command' });
+  await a.next(e => e.type === 'tool_execution_start');
+  await a.rpc('abort');
+  const ended = await a.next(e => e.type === 'tool_execution_end');
+  assert.deepEqual([ended.isError, ended.result.details.interrupted, ended.result.content[0].text], [true, true, 'Interrupted.']);
+  await a.next(settled);
+});
+
 test('signed out: the conversation says so, and Settings can check and sign out without opening one', { timeout: 20000 }, async t => {
   const f = fixture(t);
   const before = await account({ bin: f.bin, cwd: f.dir, version: '1', env: f.env });

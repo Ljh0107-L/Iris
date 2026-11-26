@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Transcript } from './Conversation.jsx';
 import { AgentMessageForm } from './Subagents.jsx';
-import { closeSubagent, openFile, stopAgent, useStore } from './store.js';
+import { closeSubagent, getState, openFile, stopAgent, useStore } from './store.js';
 import { agentStatusLabel, engineAgentTranscript } from './agents.js';
 import { subagentTranscript } from './subagent-transcript.js';
 import { formatTokens } from './transcript.js';
@@ -20,9 +20,14 @@ export function AgentView({ session, agent }) {
     const timer = setInterval(() => tick(n => n + 1), 1000);
     return () => clearInterval(timer);
   }, [running]);
-  // Esc goes back to the conversation (unless it is closing something else first, or typing).
+  // Esc goes back to the conversation, unless it is closing something else first (Settings, the palette, a menu)
+  // or something is being typed. (The message box has the focus most of the time: empty, Esc goes back from it too.)
   useEffect(() => {
-    const onKey = e => { if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.popover, .modal') && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? '')) closeSubagent(session.id); };
+    const typing = el => /^(INPUT|TEXTAREA)$/.test(el?.tagName ?? '') && !(el.matches('.composer textarea') && !el.value);
+    const onKey = e => {
+      if (e.key !== 'Escape' || e.defaultPrevented || getState().settingsOpen || getState().paletteOpen || document.querySelector('.popover, .modal') || typing(document.activeElement)) return;
+      closeSubagent(session.id);
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [session.id]);

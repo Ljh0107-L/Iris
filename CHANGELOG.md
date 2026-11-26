@@ -7,6 +7,11 @@ The section for a version becomes the notes of its GitHub release.
 **Fixed**
 
 - **A stopped turn's task list no longer turns for ever, and is shown again where you are.** The step it was on is at rest (only the plan an agent is carrying out moves, while it works), and the plan as it stands, with steps of it left, stands at the end of the latest turn, under your next message, as Claude Code shows its list again; once the agent writes a new list or finishes every step, that is what is shown.
+- **A step stopped with its turn reads "Cancelled", not "Failed"** (Claude Code and Codex said "Interrupted" in red; Antigravity and Cursor already did), and so do steps read back from a saved conversation.
+- **When an agent's process stops in the middle of a turn, nothing of the turn reads "Running…" any more**: what it had written is kept, as a stopped reply, and its steps still running are cancelled. (A connection being made again is not this: an agent on a host works on meanwhile.)
+- **The tip over a day of Token activity stays inside the graph** (Settings → Usage): over the latest days it spilled past the pane, which grew scroll bars.
+- **Esc in an agent's view**: from the empty message box it goes back to the conversation (it did nothing while the box had the focus, which is most of the time); closing Settings or the palette with it no longer closes the agent's view under them too.
+- **The message box no longer offers ⌥↵ "add after this step" for Antigravity and Cursor**, which have no such thing: a message sent while they work stops the turn, and the box says so.
 
 **Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
 

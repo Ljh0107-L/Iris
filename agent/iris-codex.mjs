@@ -894,7 +894,7 @@ export class CodexAdapter {
       this.jobs.start(itemId, { command: shellCommand(tool.item.command) || tool.call.arguments?.command || '', description: tool.call.arguments?.description ?? null, cwd: tool.item.cwd ?? this.config.cwd ?? '', startedAt: tool.start, tail: tool.output });
       this.#toolEnd(tool, false, 'Still running in the background (see Background tasks).', { background: 'running' });
     }
-    for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, stopReason === 'aborted' || !agentTools.has(tool), stopReason === 'aborted' ? 'Interrupted.' : agentTools.has(tool) ? 'The agent was still running when this turn ended.' : 'Codex did not report the result.');
+    for (const tool of [...turn.tools.values()].flat()) if (!tool.message) this.#toolEnd(tool, stopReason === 'aborted' || !agentTools.has(tool), stopReason === 'aborted' ? 'Interrupted.' : agentTools.has(tool) ? 'The agent was still running when this turn ended.' : 'Codex did not report the result.', stopReason === 'aborted' ? { interrupted: true } : null);
     const u = turn.usage;
     const usage = u ? usageOf(u) : undefined;
     // A turn is saved as one reply. Its speed is measured per model request (requests); when Codex counted

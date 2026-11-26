@@ -70,6 +70,11 @@ function handle(m) {
         }, 300);
         return;
       }
+      // A command that runs until the turn is stopped.
+      if (text.includes('long command')) {
+        send({ method: 'item/started', params: { threadId: 'thread-1', turnId: active, item: { type: 'commandExecution', id: 'long-cmd', command: "/bin/zsh -lc 'sleep 600'", cwd, processId: '4243', status: 'inProgress', aggregatedOutput: null, commandActions: [{ type: 'unknown', command: 'sleep 600' }] } } });
+        return;
+      }
       // A visual (Iris's MCP tool): the page is the file FAKE_CODEX_VISUAL_FILE (read each time), FAKE_CODEX_VISUAL, or a small one of its own.
       if (text.includes('show a visual')) {
         const item = { type: 'mcpToolCall', id: 'vis-' + turn, server: 'iris', tool: 'show_visual', arguments: { title: 'Polygon and circle', html: (process.env.FAKE_CODEX_VISUAL_FILE ? fs.readFileSync(process.env.FAKE_CODEX_VISUAL_FILE, 'utf8') : process.env.FAKE_CODEX_VISUAL) || '<div style="padding:24px;font:16px sans-serif;color:#ddd">A small page<div style="height:180px;background:#2a5"></div></div>' } };

@@ -10,11 +10,17 @@ export const emptyTranscript = () => ({ messages: [], live: null, tools: {}, loa
 
 // How a tool call ended. One the person stopped (Stop, or a message sent while the agent worked) was
 // cancelled, not a failure of the tool.
-const endedAs = (isError, details) => !isError ? 'done' : details?.interrupted ? 'cancelled' : 'error';
+// A step stopped with its turn (Stop, or a message sent while it ran) is cancelled, not failed: whether the agent
+// marked it so, or only said so ("Interrupted", Claude Code's "[Request interrupted by user…]", "Operation aborted").
+const stoppedText = result => {
+  const text = (Array.isArray(result?.content) ? result.content : []).filter(c => c?.type === 'text').map(c => c.text ?? '').join('\n').trim();
+  return /^interrupted\b|^\[request interrupted by user/i.test(text) || isAbortText(text);
+};
+const endedAs = (isError, details, result) => !isError ? 'done' : details?.interrupted || stoppedText(result) ? 'cancelled' : 'error';
 function toolsFromMessages(messages) {
   const tools = {};
   for (const message of messages) {
-    if (message.role === 'toolResult') tools[message.toolCallId] = { status: endedAs(message.isError, message.details), ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), ...(message.__history?.truncated ? { historyRef: message.__history.ref } : {}), result: { content: message.content, details: message.details } };
+    if (message.role === 'toolResult') tools[message.toolCallId] = { status: endedAs(message.isError, message.details, message), ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), ...(message.__history?.truncated ? { historyRef: message.__history.ref } : {}), result: { content: message.content, details: message.details } };
   }
   return tools;
 }
@@ -445,10 +451,23 @@ export function applyEvent(t, event) {
     case 'tool_execution_update':
       return { ...t, tools: { ...t.tools, [event.toolCallId]: { ...t.tools[event.toolCallId], status: 'running', result: event.partialResult } } };
     case 'tool_execution_end':
-      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: endedAs(event.isError, event.result?.details), result: event.result, durationMs: event.durationMs } } };
+      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: endedAs(event.isError, event.result?.details, event.result), result: event.result, durationMs: event.durationMs } } };
     default:
       return t;
   }
+}
+
+// The agent is gone mid-turn (its process stopped, or it was stopped hard): nothing of the turn is under way any
+// more, and no event will say so. The reply it was writing is kept as it stood, as a stopped one, and its steps
+// still running are cancelled; else they would read "Running…" for ever. (A connection being made again is not
+// this: an agent on a host works on meanwhile, and says how its steps ended once Iris is back.)
+export function settleStopped(t) {
+  const running = Object.entries(t.tools ?? {}).filter(([, tool]) => tool?.status === 'running');
+  if (!t.live && !running.length) return t;
+  const tools = { ...t.tools };
+  for (const [id, tool] of running) tools[id] = { ...tool, status: 'cancelled', result: tool.result ?? { content: [{ type: 'text', text: 'The agent stopped before this step ended.' }], details: { interrupted: true } } };
+  const reply = t.live && (t.live.content ?? []).some(Boolean) ? { ...t.live, stopReason: 'aborted' } : null;
+  return { ...t, tools, live: null, completedLiveKey: null, messages: reply ? [...t.messages, reply] : t.messages };
 }
 
 // Reported milestones are ordinary readable transcript content, not folded command details.

@@ -529,7 +529,7 @@ export class ClaudeAdapter {
   #interruptTurn() {
     if (!this.streaming) return;
     if (this.live) this.#finishLive('aborted');
-    for (const [id, pending] of this.pendingTools) this.emit({ type: 'tool_execution_end', toolCallId: id, toolName: pending.name, result: { content: [{ type: 'text', text: 'Interrupted' }], details: { engine: 'claude-code' } }, isError: true });
+    for (const [id, pending] of this.pendingTools) this.emit({ type: 'tool_execution_end', toolCallId: id, toolName: pending.name, result: { content: [{ type: 'text', text: 'Interrupted' }], details: { engine: 'claude-code', interrupted: true } }, isError: true });
     this.pendingTools.clear();
     if (this.compacting) { const reason = this.autoCompacting ? 'auto' : 'manual'; this.compacting = false; this.autoCompacting = false; this.emit({ type: 'compaction_end', reason, aborted: true }); this.compactDone?.({ compacted: false }); this.compactDone = null; }
     this.queued = 0;
@@ -1179,7 +1179,7 @@ export class ClaudeAdapter {
       this.#errorMessage(text);
     }
     for (const [id, pending] of this.pendingTools) {
-      this.emit({ type: 'tool_execution_end', toolCallId: id, toolName: pending.name, result: { content: [{ type: 'text', text: 'Interrupted' }], details: { engine: 'claude-code' } }, isError: true });
+      this.emit({ type: 'tool_execution_end', toolCallId: id, toolName: pending.name, result: { content: [{ type: 'text', text: 'Interrupted' }], details: { engine: 'claude-code', ...(this.interrupting ? { interrupted: true } : {}) } }, isError: true });
     }
     this.pendingTools.clear();
     // Messages sent while it worked and not yet taken up start another turn of the same run. If none

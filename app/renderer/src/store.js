@@ -6,7 +6,7 @@ import { relativeSessionPath } from './file-paths.js';
 import { clampEffort, claudeEffortsFor, effortsFor, modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
 import { readAppearance, applyAppearance, chosenAppearance } from './appearance.js';
 import { useRef, useSyncExternalStore } from 'react';
-import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
+import { applyEvent, emptyTranscript, fromHistory, rewindTo, settleStopped } from './transcript.js';
 import { historyKey, mergeHistory, mergeReloadedHistory } from './history.js';
 import { HistoryBuffer, prepareHistoryPage } from './history-buffer.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
@@ -242,7 +242,12 @@ window.iris.subscribe(({ channel, payload }) => {
       if (payload.status === 'error' || payload.status === 'disconnected') {
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
       }
-      if (payload.status === 'disconnected') set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
+      if (payload.status === 'disconnected') {
+        set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
+        flushDeltas(payload.id);
+        const t = transcriptOf(payload.id), settled = settleStopped(t);
+        if (settled !== t) setTranscript(payload.id, settled);
+      }
       break;
     }
     case 'sessions':

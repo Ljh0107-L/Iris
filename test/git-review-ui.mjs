@@ -553,6 +553,25 @@ try {
   await page.locator('.cc-task-card', { hasText: 'Inspect parser module' }).waitFor();
   await page.locator('.cc-task-head', { hasText: 'Inspect parser module' }).click();
   await page.locator('.cc-task-step', { hasText: 'example.js' }).waitFor();
+  // The agent opened in the conversation's place: Esc that closes Settings over it leaves it open; Esc from the
+  // empty message box goes back; Esc while something is typed in it does not.
+  await page.locator('.cc-task-card', { hasText: 'Inspect parser module' }).locator('.cc-task-open').click();
+  const agentDock = page.locator('.agent-dock');
+  await agentDock.waitFor();
+  await page.keyboard.press('Meta+Comma');
+  await page.locator('.settings-page-root').waitFor();
+  await page.keyboard.press('Escape');
+  await page.locator('.settings-page-root').waitFor({ state: 'detached' });
+  assert.equal(await agentDock.count(), 1, 'closing Settings leaves the agent open');
+  const box = page.getByRole('textbox', { name: 'Message', exact: true });
+  if (await box.count()) {
+    await box.fill('half a thought');
+    await box.press('Escape');
+    assert.equal(await agentDock.count(), 1, 'Esc while typing keeps the agent open');
+    await box.fill('');
+    await box.press('Escape');
+  } else await page.keyboard.press('Escape');
+  await agentDock.waitFor({ state: 'detached' });
   await page.getByRole('button', { name: 'Ultracode', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.ultracode-trigger')?.getAttribute('aria-pressed') === 'true');
   const ccInput = page.getByRole('textbox', { name: 'Message', exact: true });

@@ -62,6 +62,12 @@ try {
     if (method === 'cliSignIn') return (cli.signIn = Promise.withResolvers()).promise; // the browser's part: the test finishes or abandons it
     if (method === 'cliReadiness') return 'missing';
     if (method === 'prompt') return { disposition: args[3]?.interrupt ? 'started' : 'queued' };
+    if (method === 'usageSummary') {
+      const key = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const today = new Date(), yesterday = new Date(Date.now() - 86400000);
+      return { totals: { tokens: 406_700_000, input: 8_900_000, cacheRead: 396_600_000, cacheWrite: 0, output: 1_200_000 }, today: key(today),
+        days: { [key(today)]: 227_900_000, [key(yesterday)]: 176_600_000 }, models: [{ provider: 'antigravity', model: 'gemini-4-neon', tokens: 178_500_000 }] };
+    }
     return null;
   });
   await page.addInitScript(() => {
@@ -443,6 +449,25 @@ try {
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
   await page.waitForFunction(() => !document.querySelector('.cc-todo-card[data-tool-id="new-plan"] .spinner'));
   assert.deepEqual(await dots(newPlan), ['none'], 'stopped: at rest');
+
+  // Settings → Usage: the tip over a day at either end of the graph stays inside it; the pane grows no scroll bars.
+  await page.keyboard.press('Meta+Comma');
+  await page.locator('.settings-page-root').waitFor();
+  await page.locator('.settings-page-root').getByRole('button', { name: 'Usage', exact: true }).click();
+  await page.locator('.heatmap').waitFor();
+  for (const which of ['last', 'first']) {
+    const cell = page.locator('.heat-cell:not(.future)')[which]();
+    await cell.hover();
+    await page.locator('.heat-tip').waitFor();
+    const fit = await page.evaluate(() => {
+      const tip = document.querySelector('.heat-tip').getBoundingClientRect(), map = document.querySelector('.heatmap').getBoundingClientRect();
+      const pane = document.querySelector('.settings-content');
+      return { inside: tip.left >= map.left - 0.5 && tip.right <= map.right + 0.5, wide: pane.scrollWidth > pane.clientWidth };
+    });
+    assert.deepEqual(fit, { inside: true, wide: false }, `the tip over the ${which} day stays inside the graph`);
+    await page.mouse.move(5, 5);
+  }
+  await page.keyboard.press('Escape');
 
   assert.deepEqual(errors, [], 'no page errors');
   console.log('PASS built renderer: streamed reply applied once per frame, queued message with Option+Enter, Find in conversation across unrendered rows and folded steps');
