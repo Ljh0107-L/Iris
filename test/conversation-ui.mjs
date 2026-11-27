@@ -431,17 +431,26 @@ try {
     finally { await page.emulateMedia({ reducedMotion: 'reduce' }); }
   };
   assert.deepEqual(await dots(oldPlan), ['none'], 'the step under way of a stopped plan is at rest');
+  // (The runs after it finished: it stays where it was left. A run stopped now leaves the plan as it stands.)
+  await fire([{ status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } },
+    ...call('stopped-plan', 'TodoWrite', { todos: [{ content: 'Check the build', status: 'completed' }, { content: 'Run the benchmark', status: 'in_progress' }] }, 0), done('stopped-plan', 'TodoWrite'),
+    { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'aborted', content: [{ type: 'toolCall', id: 'stopped-plan', name: 'TodoWrite', arguments: { todos: [{ content: 'Check the build', status: 'completed' }, { content: 'Run the benchmark', status: 'in_progress' }] } }] } },
+    { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
+  await page.locator('.cc-todo-card[data-tool-id="stopped-plan"]').waitFor();
   await fire([{ type: 'message_end', message: { role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: 'Reply in Chinese from now on' }] } },
     { status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } }]);
   await page.locator('.user-bubble', { hasText: 'Reply in Chinese from now on' }).waitFor();
   await settle();
   assert.equal(await page.evaluate(() => {
     const bubble = [...document.querySelectorAll('.user-bubble')].findLast(el => el.textContent.includes('Reply in Chinese from now on'));
-    const plans = [...document.querySelectorAll('.cc-todo-card')];
-    return plans.length === 1 && plans[0].dataset.toolId === 'old-plan' && !!(bubble.compareDocumentPosition(plans[0]) & Node.DOCUMENT_POSITION_FOLLOWING);
-  }), true, 'the plan is shown once, under the latest message');
-  assert.equal(await oldPlan.locator('.spinner').count(), 0, 'a run that is not carrying it out does not turn it');
-  assert.deepEqual(await dots(oldPlan), ['none']);
+    const after = [...document.querySelectorAll('.cc-todo-card')].filter(card => bubble.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const before = [...document.querySelectorAll('.cc-todo-card')].filter(card => !after.includes(card));
+    // (The old list, of the same turn as the stopped one, was superseded by it.)
+    return JSON.stringify({ after: after.map(c => c.dataset.toolId), before: before.map(c => c.dataset.toolId) });
+  }), JSON.stringify({ after: ['stopped-plan'], before: [] }), 'the plan is shown once, under the latest message');
+  const stoppedPlan = page.locator('.cc-todo-card[data-tool-id="stopped-plan"]');
+  assert.equal(await stoppedPlan.locator('.spinner').count(), 0, 'a run that is not carrying it out does not turn it');
+  assert.deepEqual(await dots(stoppedPlan), ['none']);
   // The agent takes the plan up again: its new list is the one being carried out, and turns while it works.
   await fire([...call('new-plan', 'TodoWrite', { todos: [{ content: 'Check the build', status: 'completed' }, { content: 'Run the benchmark', status: 'in_progress', activeForm: 'Running the benchmark' }] }, 0)]);
   const newPlan = page.locator('.cc-todo-card[data-tool-id="new-plan"]');
@@ -450,6 +459,19 @@ try {
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
   await page.waitForFunction(() => !document.querySelector('.cc-todo-card[data-tool-id="new-plan"] .spinner'));
   assert.deepEqual(await dots(newPlan), ['none'], 'stopped: at rest');
+  // A run after it that finishes (the agent answering something else, its plan not brought up to date): the plan no
+  // longer follows the conversation, it stays where it was left.
+  await fire([{ type: 'message_end', message: { role: 'user', timestamp: Date.now(), content: [{ type: 'text', text: 'What was the problem?' }] } },
+    { status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } },
+    { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'text', text: 'The benchmark hung on card 3.' }] } },
+    { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
+  await page.locator('.markdown', { hasText: 'The benchmark hung on card 3.' }).waitFor();
+  await settle();
+  assert.equal(await page.evaluate(() => {
+    const bubble = [...document.querySelectorAll('.user-bubble')].findLast(el => el.textContent.includes('What was the problem?'));
+    return [...document.querySelectorAll('.cc-todo-card')].filter(card => bubble.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).length;
+  }), 0, 'a plan does not follow the conversation once a later run has finished');
+  assert.equal(await newPlan.count(), 1, 'it is still there, where it was left');
 
   // A shell that cannot be opened says why in the terminal, and Enter tries again.
   cli.termFails = true;

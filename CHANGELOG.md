@@ -2,6 +2,16 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.6
+
+**Fixed**
+
+- **Opening a conversation an agent went on working in no longer freezes the window.** Iris takes up what it missed (on a host, all of a long run's steps and their output at once), and drew the whole conversation again for each of those events: tens of thousands for a run of hours, seconds to minutes of a frozen window. They are now taken up together, once a frame: a run of 19,000 events that froze it for 7 s takes half a second.
+- **A task list an agent left behind no longer follows the conversation.** Only the plan of a run that was stopped (or failed) is shown again at the latest turn, and only until a later run finishes; the list of a run that finished stays where it was left, done or not.
+- **/goal with Antigravity and Cursor: called achieved while the agent's own task list still has steps left, it is asked once** to finish them or bring the list up to date (they may be done and not marked), and taken at its word when it says so again.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.5
 
 **New**

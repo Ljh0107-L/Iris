@@ -232,6 +232,18 @@ test('/goal: the agent keeps working, turn after turn, until it marks the goal a
   await until(() => goals(again).at(-1)?.status === 'complete', 'the goal said again');
 });
 
+test('/goal: called achieved while its own task list has steps left, it is asked once to finish them or bring the list up to date', { timeout: 15000 }, async t => {
+  const f = fixture(t, { goalPlan: true }, true);
+  const peer = f.start();
+  const state = await peer.request('get_state');
+  await peer.request('prompt', { message: '/goal stress the cards and restore them' });
+  await until(() => goals(peer).at(-1)?.status === 'complete', 'the goal to be achieved', 8000);
+  assert.equal(peer.events.filter(event('agent_start')).length, 2, 'one more turn, then taken at its word');
+  const prompts = (await readHistory(state.sessionFile)).messages.filter(m => m.role === 'custom' && m.customType === 'iris-goal');
+  assert.match(prompts[1].content, /^You marked the goal complete, but your own task list still has steps that are not done:\n\n- Restore the cards\n/);
+  assert.match(prompts[1].content, /Continue working toward the active goal/);
+});
+
 test('/goal: stopping its turn pauses it; resume carries on; clear ends it', { timeout: 15000 }, async t => {
   const f = fixture(t, { goalHold: 1, goalDoneAt: 2 }, true);
   const peer = f.start();

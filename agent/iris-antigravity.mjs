@@ -68,6 +68,13 @@ ${objective}
 - Before deciding the goal is achieved, verify every requirement of the objective against current evidence (files, command output, tests). Uncertain or indirect evidence means not achieved: keep working.
 - When the objective is achieved and verified, call the update_goal tool with status "complete".
 - Use status "blocked" only when the same blocking condition has repeated for at least three consecutive goal turns and you cannot make progress without the user. Never mark blocked because the work is hard or slow.`;
+// Said once when the agent calls the goal achieved while its own task list still has steps left (it may have done
+// them and not said so, or not done them): it finishes them, or brings the list up to date, then says so again.
+const goalUnfinished = steps => `You marked the goal complete, but your own task list still has steps that are not done:
+
+${steps.map(step => `- ${step}`).join('\n')}
+
+Before the goal can be complete: finish these steps, or update the task list to show each is done or no longer needed (with the evidence for it). Then call the update_goal tool again.`;
 // The call to Iris's update_goal tool, by whatever name the CLI gives it: the status it sets.
 const goalStatusOf = tool => {
   const raw = object(tool.raw) ? tool.raw : {};
@@ -989,6 +996,7 @@ export class AntigravityAdapter {
     const asks = asksOf(tool);
     if (asks) tool.asks = asks;
     const goalStatus = goalStatusOf(tool);
+    if (tool === turn.plan) this.planTodos = stepsOf({ title: tool.title, rawInput: tool.raw }) ?? this.planTodos;
     const known = tool === turn.plan ? { name: 'TodoWrite', arguments: { todos: stepsOf({ title: tool.title, rawInput: tool.raw }) ?? [] } }
       : goalStatus ? { name: 'update_goal', arguments: { status: goalStatus } }
       : asks ? { name: 'AskUserQuestion', arguments: { questions: asks.map(ask => ({ question: ask.question, options: ask.options.map(label => ({ label })), ...(ask.multi ? { multiSelect: true } : {}) })) } }
@@ -1010,7 +1018,7 @@ export class AntigravityAdapter {
     if (update.status === 'completed' || update.status === 'failed') {
       if (tool.message) return; // the Tasks card of an earlier call, updated above
       tool.finished = true;
-      if (goalStatus && update.status === 'completed' && this.transcript?.goal) this.#saveGoal({ status: goalStatus });
+      if (goalStatus && update.status === 'completed' && this.transcript?.goal) this.#goalUpdated(goalStatus);
       this.#toolEnd(tool, update.status === 'failed', update.status === 'failed' ? 'Tool failed.' : tool.fallback ?? 'Tool completed.');
     } else if (!tool.finished && !turn.cancelled && tool.result.length) {
       this.write({ type: 'tool_execution_update', toolCallId: call.id, toolName: call.name, args: call.arguments,
@@ -1107,6 +1115,14 @@ export class AntigravityAdapter {
     this.transcript.saveGoal(goal);
     this.#publishGoal();
   }
+  // The agent's update_goal. Achieved while its task list still has steps left: asked once to finish them or bring
+  // the list up to date (the goal stays active); said again, it is taken at its word.
+  #goalUpdated(status) {
+    const goal = this.transcript.goal;
+    const left = (this.planTodos ?? []).filter(todo => todo.status !== 'completed').map(todo => todo.content);
+    if (status === 'complete' && goal.status === 'active' && left.length && !goal.checked) { this.#saveGoal({ checked: true, unfinished: left.slice(0, 20) }); return; }
+    this.#saveGoal({ status });
+  }
   async #goalCommand(word) {
     await this.#ensureReady();
     if (!this.sessionId) throw new Error(`Sign in to ${this.p.label} before setting a goal.`);
@@ -1132,9 +1148,9 @@ export class AntigravityAdapter {
       // (A message of yours may have gone first: its turn's end brings the goal's next one.)
       const goal = this.transcript?.goal;
       if (this.turn || goal?.status !== 'active' || this.cancelEpoch !== epoch) return;
-      const first = goal.started === false;
-      this.#saveGoal(first ? { started: true } : { turns: (goal.turns ?? 0) + 1 });
-      await this.#prompt(first ? goalStart(goal.objective) : goalContinuation(goal.objective), [], epoch, { goal: true });
+      const first = goal.started === false, unfinished = goal.unfinished;
+      this.#saveGoal(first ? { started: true } : { turns: (goal.turns ?? 0) + 1, unfinished: undefined });
+      await this.#prompt(first ? goalStart(goal.objective) : unfinished?.length ? `${goalUnfinished(unfinished)}\n\n${goalContinuation(goal.objective)}` : goalContinuation(goal.objective), [], epoch, { goal: true });
     }).catch(error => {
         if (this.transcript?.goal?.status === 'active') this.#saveGoal({ status: 'paused' });
         this.write({ type: 'extension_ui_request', id: randomUUID(), method: 'notify', notifyType: 'error', message: `The goal is paused: ${error.message}` });

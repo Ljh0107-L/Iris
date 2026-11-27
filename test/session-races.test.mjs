@@ -10,7 +10,8 @@ const store = await import('../app/renderer/src/store.js');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const reply = (text, timestamp = 1) => ({ role: 'assistant', content: [{ type: 'text', text }], timestamp, stopReason: 'stop' });
 const page = (messages = []) => ({ messages, next: null, snapshot: { identity: "test" } });
-const event = (id, e) => receive({ channel: 'event', payload: { id, event: e } });
+// (Events are taken up once a frame; here, at once, as the tests read the state right after.)
+const event = (id, e) => { receive({ channel: 'event', payload: { id, event: e } }); store.applyPendingEvents(); };
 const reset = () => store.set({ activeId: null, view: 'new', pendingSessions: {}, cliReadiness: {}, transcripts: {}, sessions: [], catalog: [], history: [], future: [],
   draft: { environmentId: 'local', cwd: '/tmp', model: { provider: 'mock', id: 'mock' }, ultra: false } });
 

@@ -152,9 +152,14 @@ lines.on('line', line => {
       assert.equal(r.params.prompt[0].type, 'text');
       const text = r.params.prompt[0].text;
       // A goal's turns (Iris's /goal): progress, then Iris's update_goal tool on the turn the scenario says (goalDoneAt).
-      if (text.startsWith('The user set a goal') || text.startsWith('Continue working toward the active goal')) {
+      if (text.startsWith('The user set a goal') || text.includes('Continue working toward the active goal')) {
         goalTurns += 1;
-        if (goalTurns === scenario().goalDoneAt) {
+        // (goalPlan: its task list says a step is left, yet it calls the goal complete, every turn.)
+        if (scenario().goalPlan && goalTurns === 1) {
+          const steps = { toolCallId: 'p-1', kind: 'other', title: 'Run update_steps', rawInput: { steps: [{ status: 'done', title: 'Probe the cards' }, { status: 'pending', title: 'Restore the cards' }] } };
+          update('tool_call', { ...steps, status: 'in_progress' }); update('tool_call_update', { ...steps, status: 'completed' });
+        }
+        if (scenario().goalPlan || goalTurns === scenario().goalDoneAt) {
           const call = { toolCallId: `g-${goalTurns}`, kind: 'other', title: 'mcp__iris__update_goal', rawInput: { status: 'complete' } };
           update('tool_call', { ...call, status: 'in_progress' }); update('tool_call_update', { ...call, status: 'completed' });
           chunk('Done: verified.'); reply(r.id, { stopReason: 'end_turn' }); break;

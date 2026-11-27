@@ -1214,7 +1214,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
   };
   const committed = useRef({ sessionId: session?.id, blocks: [] });
   const blocksCache = useRef({});
-  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], listsAtTurnEnd(displayBlocksCached(transcript, blocksCache.current))), [transcript, session?.id]);
+  // (When the latest run that finished began: a task list of a stopped run is carried on until a later one finishes.)
+  const completedAfter = useMemo(() => transcript.messages.reduce((at, m) => m.role === 'assistant' && ['stop', 'length'].includes(m.stopReason) && m.timestamp > (at ?? -Infinity) ? m.timestamp : at, null), [transcript.messages]);
+  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], listsAtTurnEnd(displayBlocksCached(transcript, blocksCache.current), { completedAfter })), [transcript, session?.id, completedAfter]);
   useLayoutEffect(() => { committed.current = { sessionId: session?.id, blocks }; }, [blocks, session?.id]);
   useLayoutEffect(() => {
     if (readOnly || !session?.id) return;

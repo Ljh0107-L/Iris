@@ -143,27 +143,54 @@ export async function downloadFile(sessionId, path) {
   }
 }
 
-// Streamed deltas arrive many times per frame. Each one applied on its own re-rendered the whole
-// conversation per token; they are collected and applied together once per frame instead. Any other
-// event of that conversation applies the waiting deltas first, so the order of events never changes.
-const pendingDeltas = new Map(); // session id -> [message_update event]
-let deltaFrame = false;
-function flushDeltas(only) {
-  for (const [id, events] of [...pendingDeltas]) {
+// A conversation's events come many at a time: streamed deltas many times per frame, and, when Iris attaches again
+// to an agent that went on working, the whole run it missed at once (thousands of steps and their output). Each one
+// applied on its own re-rendered the whole conversation: a long run read again froze the window for seconds. They
+// are collected and applied together once per frame instead, in the order they came; what follows from them (a
+// reply's timing kept, the context asked for, the conversation read again once a run settles) is done after.
+const pendingEvents = new Map(); // session id -> [event]
+let eventFrame = false;
+function flushEvents(only) {
+  for (const [id, events] of [...pendingEvents]) {
     if (only !== undefined && id !== only) continue;
-    pendingDeltas.delete(id);
+    pendingEvents.delete(id);
     let next = transcriptOf(id);
     if (next.rewinding) continue; // old branch, superseded by an edit
-    for (const event of events) next = applyEvent(next, event);
+    const replies = [];
+    let stats = false, compacted = null, settled = false;
+    for (const event of events) {
+      next = applyEvent(next, event);
+      if (event.type === 'message_end' && event.message?.role === 'assistant') {
+        replies.push(next.messages.at(-1));
+        // Context grows with every model call, not only when the whole agent run settles.
+        if (!isCliEngine(event.message.provider)) stats = true;
+      }
+      if (event.type === 'compaction_end') compacted = event;
+      if (event.type === 'agent_settled') settled = true;
+    }
     setTranscript(id, next);
+    for (const reply of replies) saveTiming(id, reply);
+    if (compacted) {
+      if (compacted.errorMessage && !compacted.aborted) notify(compacted.errorMessage, 'error');
+      reloadTranscript(id); refreshStats(id);
+    }
+    if (settled) {
+      firstSent.delete(id);
+      if (state.activeId === id && !transcriptOf(id).history?.viewingOlder) reloadTranscript(id);
+      if (!isCliEngine(state.sessions.find(s => s.id === id)?.engine)) stats = true;
+      if (transcriptOf(id).queued?.length) setTranscript(id, { ...transcriptOf(id), queued: [] });
+    }
+    if (stats) scheduleStats(id);
   }
 }
-function queueDelta(id, event) {
-  if (!pendingDeltas.has(id)) pendingDeltas.set(id, []);
-  pendingDeltas.get(id).push(event);
-  if (deltaFrame) return;
-  deltaFrame = true;
-  const run = () => { if (deltaFrame) { deltaFrame = false; flushDeltas(); } };
+// (Everything waiting applied now: for tests, which read the state right after an event.)
+export const applyPendingEvents = () => flushEvents();
+function queueEvent(id, event) {
+  if (!pendingEvents.has(id)) pendingEvents.set(id, []);
+  pendingEvents.get(id).push(event);
+  if (eventFrame) return;
+  eventFrame = true;
+  const run = () => { if (eventFrame) { eventFrame = false; flushEvents(); } };
   globalThis.requestAnimationFrame?.(run);
   setTimeout(run, 100); // a hidden window gets no frames
 }
@@ -172,30 +199,7 @@ window.iris.subscribe(({ channel, payload }) => {
   switch (channel) {
     case 'event': {
       lastActivity.set(payload.id, Date.now()); // (the status line says how long the agent has been quiet)
-      if (payload.event.type === 'message_update') {
-        if (!transcriptOf(payload.id).rewinding) queueDelta(payload.id, payload.event); // else: old branch, superseded by an edit
-        break;
-      }
-      flushDeltas(payload.id);
-      if (transcriptOf(payload.id).rewinding) break; // old branch, superseded by an edit
-      { const next = applyEvent(transcriptOf(payload.id), payload.event);
-        setTranscript(payload.id, next);
-        if (payload.event.type === 'message_end' && payload.event.message?.role === 'assistant') {
-          saveTiming(payload.id, next.messages.at(-1));
-          // Context grows with every model call, not only when the whole agent run settles.
-          // Update it on the same boundary as the usage/TPS card.
-          if (!isCliEngine(payload.event.message.provider)) scheduleStats(payload.id);
-        }
-        if (payload.event.type === 'compaction_end') {
-          if (payload.event.errorMessage && !payload.event.aborted) notify(payload.event.errorMessage, 'error');
-          reloadTranscript(payload.id); refreshStats(payload.id);
-        } }
-      if (payload.event.type === 'agent_settled') {
-        firstSent.delete(payload.id);
-        if (state.activeId === payload.id && !transcriptOf(payload.id).history?.viewingOlder) reloadTranscript(payload.id);
-        if (!isCliEngine(state.sessions.find(s => s.id === payload.id)?.engine)) scheduleStats(payload.id);
-        if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
-      }
+      if (!transcriptOf(payload.id).rewinding) queueEvent(payload.id, payload.event); // else: old branch, superseded by an edit
       break;
     }
     case 'settings':
@@ -244,7 +248,7 @@ window.iris.subscribe(({ channel, payload }) => {
       }
       if (payload.status === 'disconnected') {
         set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
-        flushDeltas(payload.id);
+        flushEvents(payload.id);
         const t = transcriptOf(payload.id), settled = settleStopped(t);
         if (settled !== t) setTranscript(payload.id, settled);
       }
@@ -392,7 +396,7 @@ export function prefetchHistory(id) {
   void buffer.prefetch(cursor, () => state.activeId === id && historyBuffers.get(id) === buffer && !deleting.has(id));
 }
 export async function reloadTranscript(id) {
-  flushDeltas(id); // the reload merges with what has streamed so far
+  flushEvents(id); // the reload merges with what has streamed so far
   const seq = (historySeq.get(id) ?? 0) + 1; historySeq.set(id, seq);
   const initial = transcriptOf(id);
   const baseline = new Set(initial.messages.map(historyKey));
@@ -878,7 +882,7 @@ export async function startSession(text, attachments = []) {
 
 // Text sent while Pi is waiting on a question answers that question instead of starting a new turn.
 export async function sendPrompt(id, text, attachments = [], { queue = false } = {}) {
-  flushDeltas(id);
+  flushEvents(id);
   requestFollow(id);
   const session = state.sessions.find(s => s.id === id);
   if (isCliEngine(session?.engine)) {
@@ -1001,7 +1005,7 @@ export async function archiveSession(id) {
 }
 
 export async function editMessage(id, ordinal, originalText, text, attachments = []) {
-  flushDeltas(id);
+  flushEvents(id);
   requestFollow(id);
   historySeq.set(id, (historySeq.get(id) ?? 0) + 1);
   historyBuffers.get(id)?.clear();
@@ -1059,7 +1063,7 @@ export function openChanges(id, changes) {
 export { set };
 
 // Read-only access for tests and debugging.
-window.__irisState = () => { flushDeltas(); return state; };
+window.__irisState = () => { flushEvents(); return state; };
 
 export const askConfirm = confirm => set({ confirm });
 export const closeConfirm = () => set({ confirm: null });

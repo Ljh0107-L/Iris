@@ -44,3 +44,29 @@ test('only a list written in the run under way is the plan being carried out', a
   assert.deepEqual(current({ tools: {}, messages: [user('go'), { role: 'assistant', stopReason: 'aborted', content: [todo('c', 'in_progress')] }], live: { role: 'assistant', stopReason: 'pending', content: [] } }), [['cc-todo:c', false]]);
   assert.deepEqual(current({ tools: {}, messages: [user('go'), { role: 'assistant', stopReason: 'aborted', content: [todo('d', 'in_progress')] }, user('in Chinese')], live: { role: 'assistant', stopReason: 'pending', content: [] } }), [['cc-todo:d', false]]);
 });
+
+test('a plan is carried on only while its run was stopped, and until a later run finishes; one a finished run left stays', async () => {
+  const { listsAtTurnEnd } = await import('../app/renderer/src/transcript.js');
+  const left = (ended, at = 10) => ({ ...list('l1', ['in_progress', 'pending']), ended, at });
+  const turns = plan => [{ kind: 'user', key: 'u1' }, plan, { kind: 'text', key: 't1' }, { kind: 'user', key: 'u2' }, { kind: 'text', key: 't2' }];
+  // The run finished (the agent ended there, its list not brought up to date): it stays where it was left.
+  assert.deepEqual(listsAtTurnEnd(turns(left('stop'))).map(b => b.key), ['u1', 't1', 'l1', 'u2', 't2']);
+  // Stopped: carried on to the latest turn...
+  assert.deepEqual(listsAtTurnEnd(turns(left('aborted'))).map(b => b.key), ['u1', 't1', 'u2', 't2', 'l1']);
+  assert.deepEqual(listsAtTurnEnd(turns(left('error'))).map(b => b.key), ['u1', 't1', 'u2', 't2', 'l1']);
+  // ...until a run begun after it has finished.
+  assert.deepEqual(listsAtTurnEnd(turns(left('aborted', 10)), { completedAfter: 20 }).map(b => b.key), ['u1', 't1', 'l1', 'u2', 't2']);
+  assert.deepEqual(listsAtTurnEnd(turns(left('aborted', 10)), { completedAfter: 5 }).map(b => b.key), ['u1', 't1', 'u2', 't2', 'l1']);
+});
+
+test('each task list knows how its run ended', async () => {
+  const { displayBlocks } = await import('../app/renderer/src/transcript.js');
+  const todo = id => ({ type: 'toolCall', id, name: 'TodoWrite', arguments: { todos: [{ content: 'x', status: 'in_progress' }] } });
+  const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
+  const ended = t => displayBlocks(t).filter(b => b.kind === 'ccTodo').map(b => [b.key, b.ended]);
+  assert.deepEqual(ended({ tools: {}, live: { role: 'assistant', stopReason: 'pending', content: [] }, messages: [
+    user('a'), { role: 'assistant', stopReason: 'toolUse', content: [todo('a')] }, { role: 'assistant', stopReason: 'stop', content: [] },
+    user('b'), { role: 'assistant', stopReason: 'aborted', content: [todo('b')] },
+    user('c'), { role: 'assistant', stopReason: 'toolUse', content: [todo('c')] }] }),
+  [['cc-todo:a', 'stop'], ['cc-todo:b', 'aborted'], ['cc-todo:c', null]]);
+});
