@@ -2,6 +2,18 @@
 
 The section for a version becomes the notes of its GitHub release.
 
+## 0.2.7
+
+**Fixed**
+
+- **The end of the conversation no longer jumps up and down while an agent runs short commands.** The working line stays from the start of a turn to its end and carries the one moving mark (its dots change shape for thinking, writing and a step under way); a step under way names itself and shimmers on its own line instead of taking the mark, which made the line under the turn go and come back with every command.
+- **/goal shows where it was set.** `/goal <objective>` is on the page the moment it is sent, and Codex now keeps it in the conversation as Iris's own agent, Antigravity and Cursor do (set while a turn runs, it stands after that turn's reply).
+- **A turn an agent begins by itself is a turn of its own**: the next step toward a goal, a goal resumed after a stop, Claude Code taken up by a background task. It is marked with a quiet "Continued toward the goal" (or "Continued") line, has its own copy button, and the working line times and counts it alone, not with every turn since your last message. A resumed goal no longer reads as more of the run that was interrupted.
+- **A message sent to stop a turn stays where you sent it**: the stopped reply no longer shows under it and then jumps above it once the agent takes it up.
+- **The speed and the working line no longer flicker as a turn ends**: for a frame, the turn read as over while its reply still streamed, and the Usage card showed the speed of the turn before.
+
+**Install:** download the `.dmg` for your Mac (`arm64` for Apple Silicon, `x64` for Intel), drag Iris to Applications, then right-click → Open the first time (the app is signed ad hoc, not notarized). From an earlier version, **Iris → Check for Updates…** installs it.
+
 ## 0.2.6
 
 **Fixed**
