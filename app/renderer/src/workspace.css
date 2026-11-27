@@ -2700,3 +2700,8 @@ body.window-inactive .session-engine-logo, body.window-inactive .title-engine-lo
 
 .cc-task-open { flex-shrink: 0; padding: 1px 8px; border-radius: var(--r-sm); font-size: var(--fs-xs); color: var(--muted); border: 1px solid var(--border); }
 .cc-task-open:hover { color: var(--text); background: var(--row-hover); }
+
+/* A run the agent began itself: a quiet line, its mark the goal's when it works toward one. */
+.block-notice.run-continued { margin-top: 10px; }
+.block-notice.run-continued:has(svg)::before { display: none; }
+.block-notice.run-continued svg { color: var(--accent); opacity: .75; flex-shrink: 0; }

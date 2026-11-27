@@ -269,7 +269,7 @@ test('a long goal keeps its marker and detail reference until the full objective
   assert.equal(preview.historyRef.id, 'goal');
   assert.ok(preview.objective.startsWith('Keep the first line.'));
   assert.ok(preview.objective.length < objective.length);
-  assert.equal(continuation.kind, 'break');
+  assert.equal(continuation.kind, 'continued');
   const full = await readHistory(file, { ref: preview.historyRef });
   const [loaded] = displayBlocks(fromHistory([full]));
   assert.equal(loaded.key, preview.key);

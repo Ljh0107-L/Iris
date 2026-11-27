@@ -105,5 +105,12 @@ export function subagentTranscript(task = {}) {
   // tool updates stay in place; do not reorder the trace or synthesize a model request.
   const last = messages.at(-1);
   const live = active && last?.role === 'assistant' && last.stopReason === 'pending' ? messages.pop() : null;
+  // One run, step after step: only a message of yours (an input) ends one. Each step before the last of a run is a
+  // step on the way (as a model request that goes on to a tool is), not a run that ended.
+  messages.forEach((message, i) => {
+    if (message.role !== 'assistant' || message.stopReason !== 'stop') return;
+    const next = messages.slice(i + 1).find(m => m.role === 'assistant' || m.role === 'user') ?? live;
+    if (next?.role === 'assistant') messages[i] = { ...message, stopReason: 'toolUse' };
+  });
   return { messages, live, tools, loaded: true, error: null };
 }

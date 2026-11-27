@@ -432,7 +432,7 @@ export function applyEvent(t, event) {
         // A relay may attach timing gathered on the host before any replay. Never overwrite it with
         // receipt-time measurements, including when we attached in the middle of a response.
         const timing = message.__timing ?? (t.live?.__t0 != null ? { source: 'renderer', complete: true, start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, deltas: t.live.__deltas ?? 0, thinkingChars: t.live.__thinkingChars ?? 0, think: t.live.__thinkStart != null ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null);
-        return { ...t, live: null, completedLiveKey: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
+        return { ...t, live: null, completedLiveKey: null, messages: beforeSent(t.messages, timing ? { ...message, __timing: timing } : message, { ended: true }) };
       }
       // Your message arrived from Pi: it replaces the optimistic copy shown while editing, and the dimmed
       // copy of a message sent while Pi was working.
@@ -442,7 +442,9 @@ export function applyEvent(t, event) {
         const i = queued.findIndex(q => sent === q.text || sent.startsWith(q.text));
         return { ...t, queued: i < 0 ? queued : queued.filter((_, j) => j !== i), messages: [...t.messages.filter(m => !m.__optimistic), message] };
       }
-      return { ...t, messages: [...t.messages, message] };
+      // The agent's own record of a goal you set: it takes the place of the one shown when you sent it.
+      const goalSet = message.role === 'custom' && message.customType === 'iris-goal' && String(message.content ?? '').startsWith('The user set a goal');
+      return { ...t, ...(goalSet ? { pendingGoal: null } : {}), messages: beforeSent(t.messages, message) };
     }
     case 'compaction_start': return { ...t, compacting: true };
     case 'compaction_end': return { ...t, compacting: false };
@@ -457,6 +459,21 @@ export function applyEvent(t, event) {
   }
 }
 
+// Where the messages you have just sent to stop the run under way begin (they are the last ones), while it has not
+// stopped yet. (A message handed to the turn under way, Codex's Option+Enter, is shown inside its reply instead.)
+export function pendingFrom(messages) {
+  let i = messages.length;
+  while (i > 0 && messages[i - 1]?.role === 'user' && messages[i - 1].__optimistic && messages[i - 1].__interrupting && !Number.isInteger(messages[i - 1].steer?.at)) i--;
+  return i;
+}
+// The end of the run your message stops goes before it; once that run has ended, the message no longer waits on it.
+const beforeSent = (messages, message, { ended = false } = {}) => {
+  const at = pendingFrom(messages);
+  if (at === messages.length) return [...messages, message];
+  const sent = messages.slice(at).map(m => ended ? { ...m, __interrupting: undefined } : m);
+  return [...messages.slice(0, at), message, ...sent];
+};
+
 // The agent is gone mid-turn (its process stopped, or it was stopped hard): nothing of the turn is under way any
 // more, and no event will say so. The reply it was writing is kept as it stood, as a stopped one, and its steps
 // still running are cancelled; else they would read "Running…" for ever. (A connection being made again is not
@@ -467,7 +484,7 @@ export function settleStopped(t) {
   const tools = { ...t.tools };
   for (const [id, tool] of running) tools[id] = { ...tool, status: 'cancelled', result: tool.result ?? { content: [{ type: 'text', text: 'The agent stopped before this step ended.' }], details: { interrupted: true } } };
   const reply = t.live && (t.live.content ?? []).some(Boolean) ? { ...t.live, stopReason: 'aborted' } : null;
-  return { ...t, tools, live: null, completedLiveKey: null, messages: reply ? [...t.messages, reply] : t.messages };
+  return { ...t, tools, live: null, completedLiveKey: null, messages: reply ? beforeSent(t.messages, reply, { ended: true }) : t.messages };
 }
 
 // Reported milestones are ordinary readable transcript content, not folded command details.
@@ -488,7 +505,10 @@ export function ultraProgress(call, tool) {
 // Display blocks: user bubbles, assistant text/thinking, and groups of consecutive tool calls.
 export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
   const blocks = [];
-  const listed = t.live ? [...t.messages, t.live] : t.messages;
+  // Your message just sent, not yet taken up, comes after the reply still being written (the run it stops), not
+  // before it: else the stopped reply showed under your message, then jumped above it once the agent took it up.
+  const sent = pendingFrom(t.messages);
+  const listed = t.live ? [...t.messages.slice(0, sent), t.live, ...t.messages.slice(sent)] : t.messages;
   // A message handed to a turn under way (Option+Enter: Codex reads it before its next model call) is saved
   // before the turn's reply, which Codex saves whole when it ends. It is shown where it was sent: inside that
   // reply, after what was there by then (steer.at, an index into the reply's content).
@@ -530,6 +550,14 @@ export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
     turn = [];
   };
   let ordinal = firstOrdinal, unread = false;
+  // Whether a goal was set since your last message (the runs that follow are its).
+  let goalOpen = false;
+  const startsRun = mi => {
+    let p = mi - 1;
+    while (p >= 0 && all[p].role === 'toolResult') p--;
+    const prev = all[p];
+    return prev?.role === 'assistant' && prev !== t.live && ['stop', 'length', 'aborted'].includes(prev.stopReason) && !prev.__localCommand;
+  };
   const userBlock = (message, mk, ref, steer = false) => {
     const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
     let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
@@ -558,7 +586,7 @@ export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
     if (message.role === 'user') {
       flush();
       closeTurn();
-      turnKey = mk;
+      turnKey = mk; goalOpen = false;
       userBlock(message, mk, ref);
       return;
     }
@@ -571,11 +599,11 @@ export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
       // as a goal row so the reader can request the original objective.
       const objective = opening && (end >= opening[0].length || ref) ? content.slice(opening[0].length, end >= opening[0].length ? end : undefined) : '';
       if (objective || (ref && content.startsWith('The user set a goal'))) {
-        flush(); closeTurn(); turnKey = `goal:${mk}`;
+        flush(); closeTurn(); turnKey = `goal:${mk}`; goalOpen = true;
         blocks.push({ kind: 'goal', key: `g${mk}`, objective, historyRef: ref });
       }
-      // A goal continuation is a new prompt: the reply before it is an answer, not folded work.
-      else { flush(); blocks.push({ kind: 'break', key: `x${mk}` }); }
+      // A goal continuation is a new run, a turn of its own (its own footer), marked as begun without a message of yours.
+      else { flush(); closeTurn(); turnKey = `goal:${mk}`; blocks.push({ kind: 'continued', key: `x${mk}`, goal: true }); }
       return;
     }
     // Background agents' reports. Reports in a row share one card, a row per agent with its latest
@@ -616,6 +644,10 @@ export function displayBlocks(t, { ordinal: firstOrdinal = 0 } = {}) {
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message, historyRef: ref }); return; }
     if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mk}`, summary: message.summary, tokensBefore: message.tokensBefore, historyRef: ref }); return; }
     if (message.role !== 'assistant') return;
+    // A run the agent began itself, after one that ended, with no message of yours (Codex working on toward a goal,
+    // a goal resumed after a stop, Claude Code taken up by a background task): a turn of its own, marked as such,
+    // not glued under the last one (after "Interrupted", it read as more of the stopped run).
+    if (startsRun(mi)) { turn.pop(); flush(); closeTurn(); turn.push(message); turnKey = `run:${mk}`; blocks.push({ kind: 'continued', key: `r${mk}`, goal: goalOpen }); }
     const reasoning = message.usage?.reasoning ?? 0;
     let sawThinking = false;
     const firstBlock = blocks.length;
@@ -755,7 +787,7 @@ export function collapseWork(blocks) {
 // was written, until a later run finishes (`completedAfter`: when the latest run that finished began). A list of a
 // run that finished stays where it was left, done or not: the agent ended there.
 export function listsAtTurnEnd(blocks, { completedAfter = null } = {}) {
-  const opens = block => (block.kind === 'user' && !block.steer) || block.kind === 'goal';
+  const opens = block => (block.kind === 'user' && !block.steer) || block.kind === 'goal' || block.kind === 'continued';
   const todosOf = list => list?.call?.arguments?.todos;
   const done = list => { const todos = todosOf(list); return Array.isArray(todos) && todos.length > 0 && todos.every(todo => todo?.status === 'completed'); };
   const lastTurn = blocks.findLastIndex(opens) + 1;

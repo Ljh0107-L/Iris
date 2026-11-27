@@ -196,6 +196,11 @@ function queueEvent(id, event) {
 }
 
 window.iris.subscribe(({ channel, payload }) => {
+  // The agent's events wait for the next frame (to be applied together); whatever else is said about the
+  // conversation (its status, its state, its goal…) was said after them, so they are applied first. Else, as a turn
+  // ended, "not working" showed a frame before the reply was finished: the working line went, the reply still
+  // streamed, and the speed fell back to the turn before.
+  if (channel !== 'event' && payload?.id != null && pendingEvents.has(payload.id)) flushEvents(payload.id);
   switch (channel) {
     case 'event': {
       lastActivity.set(payload.id, Date.now()); // (the status line says how long the agent has been quiet)
@@ -904,8 +909,9 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
     const shown = !command && (text.trim() || attachments.length) ? { role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))], timestamp: Date.now(), __optimistic: true, ...(interrupts ? { __interrupting: true } : {}),
       ...(steers ? { steer: { at: transcriptOf(id).live.content.length } } : {}) } : null;
     if (shown) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, shown] });
+    const goal = command ? showGoal(id, text) : null;
     try { await sending(id, () => api('prompt', id, text, attachments, { interrupt: interrupts })); }
-    catch (error) { if (shown) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== shown) }); throw error; }
+    catch (error) { if (shown) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== shown) }); dropGoal(id, goal); throw error; }
     return;
   }
   const pending = state.questions[id]?.find(q => q.method === 'select' || q.method === 'input' || q.method === 'editor');
@@ -929,15 +935,30 @@ export async function sendPrompt(id, text, attachments = [], { queue = false } =
   // and a command ("/goal …") is not a message.
   const optimistic = !text.startsWith('/') && !(queue && streaming) ? { role: 'user', content: [{ type: 'text', text }, ...images], timestamp: Date.now(), __optimistic: true, ...(streaming && interrupt ? { __interrupting: true } : {}) } : null;
   if (optimistic) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, optimistic] });
+  const goal = /^\/goal\s/.test(text) && !attachments.length && session?.engine !== 'claude-code' ? showGoal(id, text) : null;
   // A queued message waits as a dimmed bubble until Pi reports it (message_end) or the run ends.
   const waiting = queue && streaming && !text.startsWith('/') ? { id: `queued:${Date.now()}:${Math.random().toString(36).slice(2)}`, text, images } : null;
   if (waiting) setTranscript(id, { ...transcriptOf(id), queued: [...(transcriptOf(id).queued ?? []), waiting] });
   try { await sending(id, () => api('prompt', id, text, attachments, { interrupt })); }
   catch (error) {
     if (optimistic) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== optimistic) });
+    dropGoal(id, goal);
     if (waiting) setTranscript(id, { ...transcriptOf(id), queued: (transcriptOf(id).queued ?? []).filter(q => q !== waiting && q.id !== waiting.id) });
     throw error;
   }
+}
+
+// A goal set with /goal is on the page the moment it is sent, at the end of the conversation, until the agent's own
+// record of it arrives (at once when it is idle; after the run under way otherwise, where it is then shown).
+function showGoal(id, text) {
+  const objective = /^\/goal\s+([\s\S]+)$/.exec(text.trim())?.[1]?.trim();
+  if (!objective || /^(pause|resume|clear)$/.test(objective)) return null;
+  const goal = { objective, at: Date.now() };
+  setTranscript(id, { ...transcriptOf(id), pendingGoal: goal });
+  return goal;
+}
+function dropGoal(id, goal) {
+  if (goal && transcriptOf(id).pendingGoal === goal) setTranscript(id, { ...transcriptOf(id), pendingGoal: null });
 }
 
 export function clearQueued(id) {

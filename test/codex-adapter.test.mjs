@@ -315,6 +315,31 @@ test('/goal sets Codex’s own goal: Codex starts on it itself, the turn is a re
   assert.deepEqual(goalsOf(again.events), [{ objective: 'ship the parser', status: 'complete' }]);
 });
 
+test('where a goal was set is kept with the conversation: at once when Codex is idle, after the reply of a turn under way', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  f.env.FAKE_CODEX_GOAL = 'idle';
+  const a = f.start();
+  const marks = events => events.filter(e => e.type === 'message_end' && e.message.role === 'custom' && e.message.customType === 'iris-goal').map(e => e.message.content);
+  await a.rpc('prompt', { message: '/goal ship the parser' });
+  await until(() => marks(a.events).length === 1, 'the goal to be marked');
+  assert.match(marks(a.events)[0], /^The user set a goal[\s\S]*<objective>\nship the parser\n<\/objective>$/);
+  // Set while a turn runs: after that turn's reply, where it was set as far as the conversation goes.
+  await a.rpc('prompt', { message: 'wait' });
+  await a.next(e => e.type === 'agent_start');
+  await a.rpc('prompt', { message: '/goal tidy the docs' });
+  assert.equal(marks(a.events).length, 1, 'not in the middle of the reply being written');
+  await a.rpc('abort');
+  await a.next(settled);
+  const ends = a.events.filter(e => e.type === 'message_end').map(e => e.message.role === 'custom' ? 'goal' : e.message.role);
+  assert.deepEqual(ends.slice(-2), ['assistant', 'goal']);
+  // Kept: reopened, both are where they were set.
+  const state = (await a.rpc('get_state')).data;
+  const again = f.start(state.sessionFile);
+  const entries = (await again.rpc('get_entries')).data.entries;
+  assert.deepEqual(entries.filter(e => e.type === 'message' || e.type === 'custom_message').map(e => e.type === 'custom_message' ? 'goal' : e.message.role),
+    ['goal', 'user', 'assistant', 'goal']);
+});
+
 test('a goal read when the conversation opens, answered after /goal set one, does not undo it', { timeout: 20000 }, async t => {
   const f = fixture(t);
   f.env.FAKE_CODEX_GOAL_GET_MS = '400';

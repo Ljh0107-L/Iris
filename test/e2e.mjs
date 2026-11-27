@@ -738,7 +738,7 @@ try {
 
   // ---- a command keeps running on the host through a drop; its events are replayed
   await send('[[bash:sleep 2 && echo survived | tee survived.txt]]');
-  await page.locator('.tool-group-head .step-mark, .tool-group-head .spinner').first().waitFor({ timeout: 15000 });
+  await page.locator('.tool-group-head .shimmer').first().waitFor({ timeout: 15000 });
   dropSsh();
   await page.locator('.markdown', { hasText: 'Tool result: survived' }).waitFor({ timeout: 60000 });
   check('command finished during the drop and its result was replayed', existsSync(join(remoteProject, 'survived.txt')));
@@ -794,7 +794,7 @@ try {
   // on this Mac nothing keeps running once the app quits
   await page.locator('.session-row', { hasText: 'hello from the server' }).click();
   await send('[[bash:sleep 3 && echo after-quit | tee after-quit.txt]]');
-  await page.locator('.tool-group-head .step-mark, .tool-group-head .spinner').first().waitFor({ timeout: 15000 });
+  await page.locator('.tool-group-head .shimmer').first().waitFor({ timeout: 15000 });
 } catch (error) {
   check('unexpected error', false, error.message.split('\n').slice(0, 2).join(' | '));
   console.log(error.stack);

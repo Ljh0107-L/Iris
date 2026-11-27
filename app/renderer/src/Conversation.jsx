@@ -76,13 +76,18 @@ const urlLabel = url => {
   } catch { return String(url ?? '').slice(0, 96); }
 };
 
-// Whether the last thing in the conversation is a block of steps that is under way, and so carries the mark
-// itself. (Blocks that show nothing may follow it; a paragraph, a thought or a message after it means it is not.)
-const stepsRunning = (blocks, tools, live) => {
+// What the last thing in the conversation is doing, if it is a block of steps under way: 'thinking' (a thought
+// being written in it) or 'step' (a step running). (Blocks that show nothing may follow it; a paragraph, a thought
+// or a message after it means it is not under way.) The step names itself on its own line; the line under the
+// turn, which stays put the whole turn, then just says the turn is working.
+const stepUnderWay = (blocks, tools, live) => {
   const block = blocks.findLast(candidate => ['work', 'tools', 'text', 'thinking', 'user', 'error'].includes(candidate.kind));
-  if (block?.kind === 'tools') return block.calls.some(call => tools[call.id]?.status === 'running' || (!tools[call.id] && live));
-  if (block?.kind !== 'work') return false;
-  return block.items.some(item => item.streaming || (item.kind === 'tools' && item.calls.some(call => tools[call.id]?.status === 'running' || (!tools[call.id] && live))));
+  const running = calls => calls.some(call => tools[call.id]?.status === 'running' || (!tools[call.id] && live));
+  if (block?.kind === 'tools') return running(block.calls) ? 'step' : null;
+  if (block?.kind !== 'work') return null;
+  const latest = block.items.at(-1);
+  if (latest?.kind === 'thinking' && latest.streaming) return 'thinking';
+  return block.items.some(item => item.streaming || (item.kind === 'tools' && running(item.calls))) ? 'step' : null;
 };
 // How long the step under way has been going, counted where it is shown.
 function Elapsed({ since }) {
@@ -91,11 +96,7 @@ function Elapsed({ since }) {
   const ms = Date.now() - since;
   return ms >= 1000 ? <span className="step-duration">{seconds(ms)}</span> : null;
 }
-// What marks the step that is under way: four dots changing places for something being done (a command, a file
-// read or written, a search), three dots turning for a thought being written. A step that is done has no mark.
-function Running({ thinking = false }) {
-  return <Spinner size={14} spectrum kind={thinking ? 'tumble' : 'swap'} />;
-}
+// A step under way has no moving mark of its own: its words shimmer, and the turn's one mark is on the line under it.
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 // A step while it runs, as the line under the turn says it: what is being done now ("Editing notes.md"). A
 // command with a description is that description; one without, "Running" and the command.
@@ -206,8 +207,7 @@ function ToolCall({ call, tool, bare = false }) {
       {!bare && <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && filePath) { openTarget(filePath); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {status === 'running' && <Running />}
-        <FadeText className="step-text" title={title ?? filePath ?? undefined}>
+        <FadeText className={`step-text ${status === 'running' ? 'shimmer' : ''}`} title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
           {filePath ? (
             <span className="step-subject file-ref-inline" data-kind={fileBadgeKind(filePath)} onContextMenu={e => onFileContextMenu?.(e, filePath)}>{subject}</span>
@@ -273,8 +273,7 @@ function ToolGroup({ calls, tools, live, behind = false }) {
   return (
     <div className="tool-group">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
-        {running && !background && <Running />}
-        <span>{toolSummary(calls)}{background && <span className="group-still">, still running</span>}</span>
+        <span className={running && !background ? 'shimmer' : undefined}>{toolSummary(calls)}{background && <span className="group-still">, still running</span>}</span>
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
@@ -434,8 +433,7 @@ function WorkNote({ item }) {
   return (
     <div className={`step thought ${open ? 'open' : ''}`}>
       <div className="step-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {item.streaming && <Running thinking />}
-        <FadeText className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</FadeText>
+        <FadeText className={`step-text ${item.streaming ? 'shimmer' : ''}`}>{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</FadeText>
         <ReasoningTokens tokens={item.tokens} />
         <Caret open={open} />
       </div>
@@ -517,8 +515,9 @@ function WorkGroup({ items, tools, live, behind = false }) {
       <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open}
         onClick={e => { if ((e.metaKey || e.ctrlKey) && onlyFile) { openTarget(onlyFile); return; } setOpen(o => !o); }}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
-        {running && !background && <Running thinking={thinkingNow} />}
-        <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
+        {/* (No moving mark here: the one mark of the turn is on the line under it, which stays where it is. A
+            step's line coming and going there made the end of the conversation jump with every short command.) */}
+        <FadeText className={`group-summary ${running && !background ? 'shimmer' : ''}`}>
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
             : background ? <>{only ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)}<span className="group-still">{only ? ', still running' : `, ${stillRunning} still running`}</span>
                 {!open && <span className="group-live" role="link" tabIndex={0} onClick={e => { e.stopPropagation(); setOpen(true); }} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); setOpen(true); } }}>View live output</span>}</>
@@ -977,7 +976,7 @@ function AskBlock({ call, tool }) {
 }
 
 // While Pi or Claude Code works: what it is doing, for how long, and how many tokens it has produced this turn.
-const QUIET_MS = 15000, STALL_MS = 180000;
+const QUIET_MS = 15000, STALL_MS = 180000, HAND_MS = 400;
 // A turn the agent has said nothing in for minutes, with no step running: say so, and offer what helps.
 function StallRow({ session, quiet }) {
   const [busy, setBusy] = useState(null);
@@ -996,7 +995,7 @@ function StallRow({ session, quiet }) {
     </div>
   );
 }
-function WorkingRow({ session, transcript, sending = false }) {
+function WorkingRow({ session, transcript, sending = false, step = null }) {
   const [, tick] = useState(0);
   const envPrep = useStore(s => session?.environmentId ? s.envStatus[session.environmentId] : null);
   const ccPrep = useStore(s => session?.environmentId ? s.claudeStatus[session.environmentId] : null);
@@ -1036,9 +1035,13 @@ function WorkingRow({ session, transcript, sending = false }) {
     return <div className="working"><Spinner size={14} spectrum />{waited >= 1000 && <span className="working-meta">{seconds(waited)}</span>}<span className="shimmer">Thinking</span></div>;
   }
   const messages = transcript.messages;
-  let from = messages.length; while (from > 0 && messages[from - 1].role !== 'user') from--;
+  // The run under way: since your message, or since the run before it ended (a run the agent began itself, such as
+  // the next one toward a goal, is timed and counted on its own, not with the runs before it).
+  const ends = m => m.role === 'user' || (m.role === 'custom' && m.customType === 'iris-goal') || (m.role === 'assistant' && ['stop', 'length', 'aborted'].includes(m.stopReason));
+  let from = messages.length; while (from > 0 && !ends(messages[from - 1])) from--;
   const turn = messages.slice(from);
-  const startedAt = first ?? messages[from - 1]?.timestamp ?? turn[0]?.__timing?.start ?? transcript.live?.__t0;
+  const opener = messages[from - 1];
+  const startedAt = first ?? (opener?.role === 'user' || opener?.role === 'custom' ? opener.timestamp : null) ?? turn[0]?.__timing?.start ?? turn[0]?.timestamp ?? transcript.live?.__t0;
   const live = transcript.live;
   // Real output tokens of the model calls finished so far this turn (no live estimate).
   const tokens = turn.reduce((n, m) => n + (m.role === 'assistant' ? m.usage?.output ?? 0 : 0), 0) + Math.round(transcript.live?.__est ?? 0);
@@ -1052,6 +1055,8 @@ function WorkingRow({ session, transcript, sending = false }) {
   const state = pending ? 'Interrupting…'
     : (session?.compacting ?? transcript.compacting) ? 'Compacting conversation'
     : transcript.retry ? `Reconnecting to model · retry ${transcript.retry.attempt}/${transcript.retry.maxAttempts}`
+    // (The step at the end names itself, on its line just above: said once.)
+    : step === 'thinking' ? 'Thinking' : step === 'step' ? 'Working'
     : !live || !live.content?.length || lastBlock?.type === 'thinking' ? (stepLabel && !streamingNow ? stepLabel : 'Thinking')
     : lastBlock?.type === 'toolCall' ? (stepLabel ?? 'Working')
     : stepLabel && !streamingNow ? stepLabel : 'Writing';
@@ -1063,10 +1068,12 @@ function WorkingRow({ session, transcript, sending = false }) {
   const quiet = heard && startedAt && heard >= startedAt ? Date.now() - heard : startedAt ? elapsed : 0;
   const waiting = state === 'Thinking' || state === 'Writing' ? 'Waiting for the model' : state;
   // (While a step runs, a quiet agent is waiting for it: not stuck, and no "no output" either.)
-  if (session && !pending && !runningStep && quiet >= STALL_MS) return <StallRow session={session} quiet={quiet} />;
+  if (session && !pending && !runningStep && step !== 'step' && quiet >= STALL_MS) return <StallRow session={session} quiet={quiet} />;
   return (
     <div className="working">
-      <Spinner size={14} spectrum kind={state === 'Writing' ? 'orbit' : 'tumble'} />
+      {/* What the mark says is going on: three dots turning for thinking, circling in a row for writing, four
+          changing places for a step under way. It changes shape where it is. */}
+      <Spinner size={14} spectrum kind={state === 'Writing' ? 'orbit' : step === 'step' || (stepLabel && state === stepLabel) ? 'swap' : 'tumble'} />
       {/* While the model writes, the line has nothing to name: how long, and how much it has written. */}
       {(session?.activityLabel || state !== 'Writing' || quiet >= QUIET_MS) && <span className="shimmer">{session?.activityLabel ?? (quiet >= QUIET_MS && !runningStep ? waiting : state)}</span>}
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
@@ -1306,7 +1313,15 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
   // Starting the agent shows as work only when something waits on it (a new conversation, a message on its
   // way, a reply in progress): reopening a conversation just shows its history while the agent starts.
   const sending = useStore(s => !!s.sending[session?.id]);
-  const working = session?.streaming || (session?.compacting ?? transcript.compacting) || sending;
+  const busy = session?.streaming || (session?.compacting ?? transcript.compacting) || sending;
+  // Your message just sent, not taken up yet, after a run that has ended: the next run is about to begin. The line
+  // stays the moment between them (a little while at most) rather than going and coming back.
+  const busySince = useRef(0);
+  if (busy) busySince.current = Date.now();
+  const handing = !busy && !!transcript.messages.at(-1)?.__optimistic && Date.now() - busySince.current < HAND_MS;
+  const [, recheck] = useState(0);
+  useEffect(() => { if (!handing) return; const timer = setTimeout(() => recheck(n => n + 1), HAND_MS); return () => clearTimeout(timer); }, [handing]);
+  const working = busy || handing;
   // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
   // a new conversation already shows your message.
   const loading = !transcript.error && !transcript.loaded;
@@ -1341,6 +1356,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && (!isCliEngine(session?.engine) || session?.engine === 'codex') && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.steer && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} block={block} />;
+            // A run the agent began itself (no message of yours before it): said in a quiet line, so it does not read
+            // as more of the run above it.
+            case 'continued': return <div key={block.key} className="block-notice run-continued" title="The agent began this turn itself, without a new message.">
+              {block.goal && <Icon name="target" size={13} />}{block.goal ? 'Continued toward the goal' : 'Continued'}</div>;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} blockKey={block.key} />;
@@ -1365,6 +1384,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
           return <HistoryContent key={block.key} historyRef={automatic ? block.historyRef : null} active={active}>{render()}</HistoryContent>;
         }} />
         {readOnly && copyText && <TurnFooter text={copyText} last />}
+        {/* A goal just set, until the agent's own record of it is in the conversation. */}
+        {transcript.pendingGoal && blocks.findLast(b => b.kind === 'goal')?.objective !== transcript.pendingGoal.objective
+          && <GoalMarker key="pending-goal" block={{ key: 'pending-goal', objective: transcript.pendingGoal.objective }} />}
         {(transcript.queued ?? []).map(q => (
           <div key={q.id} className="user-row queued" aria-label="Queued message">
             <div className="user-stack">
@@ -1377,8 +1399,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
           const Card = q.permission ? PermissionCard : QuestionCard;
           return <Card key={q.requestId} sessionId={session.id} question={q} />;
         })}
-        {/* One mark at a time: while a step is under way the mark is on that step, and this line steps aside. */}
-        {working && !loading && !questions.length && !stepsRunning(blocks, transcript.tools, !!transcript.live) && <WorkingRow session={session} transcript={transcript} sending={sending} />}
+        {/* One mark for the turn, on this line, which stays from the turn's start to its end (it does not step aside
+            while a step runs: with short commands the end of the conversation jumped up and down). */}
+        {working && !loading && !questions.length && <WorkingRow session={session} transcript={transcript} sending={sending} step={stepUnderWay(blocks, transcript.tools, !!transcript.live)} />}
         <div className="transcript-end" />
       </div>
     </div>

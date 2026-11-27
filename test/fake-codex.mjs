@@ -18,7 +18,33 @@ const count = t => { const last = { totalTokens: 60, inputTokens: 50, cachedInpu
   send({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: t, tokenUsage: { total, last, modelContextWindow: 400000 } } }); };
 const finish = status => { if (!active) return; const t = active; active = null;
   count(t);
-  send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: t, status, error: null } } }); };
+  send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: t, status, error: null } } });
+  if (process.env.FAKE_CODEX_GOAL === 'steps' && status === 'completed' && goal && goal.status === 'active') setTimeout(() => goalTurn(), 300); };
+// A turn of short steps: a thought, a command (counted as a model request when it ends), again, then the answer.
+// (FAKE_CODEX_STEP_MS: how long each takes.)
+const stepMs = Number(process.env.FAKE_CODEX_STEP_MS) || 250;
+const steps = (t, n, answer, then) => { let i = 0;
+  const say = (method, params) => send({ method, params: { threadId: 'thread-1', turnId: t, ...params } });
+  const next = () => {
+    if (active !== t) return;
+    if (i === n) { say('item/agentMessage/delta', { itemId: 'ans-' + t, delta: answer }); say('item/completed', { item: { type: 'agentMessage', id: 'ans-' + t, text: answer } }); finish('completed'); return then && then(); }
+    const k = i++, item = { type: 'commandExecution', id: 'mc-' + t + '-' + k, command: 'echo step ' + k, cwd, commandActions: [{ type: 'unknown', command: 'echo step ' + k }] };
+    say('item/reasoning/summaryTextDelta', { itemId: 'mr-' + t + '-' + k, delta: 'Checking step ' + k, summaryIndex: 0 });
+    setTimeout(() => { if (active !== t) return; say('item/started', { item: { ...item, status: 'inProgress', aggregatedOutput: null } });
+      setTimeout(() => { if (active !== t) return; say('item/completed', { item: { ...item, status: 'completed', exitCode: 0, aggregatedOutput: 'step ' + k } }); count(t); setTimeout(next, stepMs); }, stepMs); }, stepMs / 2);
+  };
+  next(); };
+// FAKE_CODEX_GOAL=steps: an active goal is worked on in turns Codex starts itself, three of them, then it is complete.
+let goalTurns = 0;
+const goalTurn = () => {
+  if (active || !goal || goal.status !== 'active') return;
+  active = 'turn-' + (++turn); goalTurns++;
+  send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: active } } });
+  const t = active, last = goalTurns >= 3;
+  steps(t, 2, 'Goal step ' + goalTurns + (last ? ': done.' : '.'), () => {
+    if (last) { goalTurns = 0; goal = { ...goal, status: 'complete' }; keep(); return send({ method: 'thread/goal/updated', params: { threadId: 'thread-1', turnId: t, goal } }); }
+    setTimeout(goalTurn, 300);
+  }); };
 let buffer = '';
 process.stdin.on('data', d => { buffer += d; let i; while ((i = buffer.indexOf('\\n')) >= 0) { const line = buffer.slice(0, i); buffer = buffer.slice(i + 1); if (line.trim()) handle(JSON.parse(line)); } });
 process.stdin.on('end', () => process.exit(0));
@@ -86,6 +112,8 @@ function handle(m) {
         return finish('completed');
       }
       if (text.includes('wait')) return; // stays active until interrupted
+      // Short commands one after another, a thought before each, as Codex works through a task.
+      if (text.includes('many commands')) return steps(active, 6, 'All six ran.');
       // A command that takes a while: the model's own time in the turn is the turn's length less this.
       // (As in the real CLI: the command starts while the request that asked for it is still being answered,
       // the request is counted when it ends, and the next request begins when the command is done.)
@@ -159,6 +187,7 @@ function handle(m) {
       goal = { threadId: 'thread-1', objective: m.params.objective ?? goal.objective, status: m.params.status ?? goal?.status ?? 'active', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1764000000, updatedAt: 1764000000 };
       keep(); reply({ goal });
       send({ method: 'thread/goal/updated', params: { threadId: 'thread-1', turnId: null, goal } });
+      if (process.env.FAKE_CODEX_GOAL === 'steps') { if (goal.status === 'active') setTimeout(goalTurn, 20); return; }
       if (goal.status === 'active' && !active && process.env.FAKE_CODEX_GOAL !== 'idle') setTimeout(() => {
         if (active || !goal || goal.status !== 'active') return;
         active = 'turn-' + (++turn);

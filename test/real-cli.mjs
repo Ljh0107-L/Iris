@@ -36,7 +36,7 @@ const { app, page } = await launch({ userData: profile, width: 1500, height: 950
 const S = name => shot(page, shots, name);
 const box = () => page.locator('.dock textarea[aria-label="Message"]');
 const send = async (text, keys = 'Enter') => { await box().fill(text); await box().press(keys); };
-const settled = (timeout = 240000) => page.waitForFunction(() => !document.querySelector('.composer [aria-label="Stop"], .send-button.stop') && !document.querySelector('div.working') && !document.querySelector('.tool-group-head .spinner'), undefined, { timeout });
+const settled = (timeout = 240000) => page.waitForFunction(() => !document.querySelector('.composer [aria-label="Stop"], .send-button.stop') && !document.querySelector('div.working') && !document.querySelector('.tool-group-head .shimmer'), undefined, { timeout });
 const open = async (engine, title) => {
   const s = await page.evaluate(({ engine, work, title }) => window.iris.invoke('createSession', { environmentId: 'local', cwd: work, engine, prompt: title, creationId: `pending:${title}` }), { engine, work, title });
   await page.locator('.session-row', { hasText: s.title }).first().click({ timeout: 30000 });

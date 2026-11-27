@@ -362,7 +362,7 @@ export class CodexAdapter {
     this.standby = standby === true && sessionFile == null;
     this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true, home: text(home) && isAbsolute(home) ? home : undefined };
     this.write = write; this.env = env;
-    this.goal = null; this.goalNudge = null;
+    this.goal = null; this.goalNudge = null; this.goalMarker = null;
     this.controls = Promise.resolve();
     this.permissions = new Map();
     this.models = []; this.model = null; this.effort = null; this.speed = null;
@@ -584,6 +584,11 @@ export class CodexAdapter {
     try { const read = await peer.request('thread/goal/get', { threadId }, CONTROL_MS); if (peer === this.peer && threadId === this.threadId && (this.goalSeen ?? 0) === seen) this.#publishGoal(read?.goal ?? null); }
     catch { /* a Codex without goals: the conversation simply has none */ }
   }
+  #goalMarker(objective) {
+    const message = { role: 'custom', customType: 'iris-goal', content: `The user set a goal for this session.\n\n<objective>\n${objective}\n</objective>`, display: false, timestamp: Date.now() };
+    try { this.transcript.append([{ type: 'custom_message', customType: message.customType, content: message.content, display: false }]); } catch { /* shown, not kept */ }
+    this.#message(message);
+  }
   async #goalCommand(word) {
     await this.#ensureReady();
     if (this.authRequired) throw new Error('Sign in to Codex to continue.');
@@ -606,7 +611,12 @@ export class CodexAdapter {
     if (word === 'resume') {
       if (!this.goal) throw new Error('There is no goal to resume. Set one with /goal and what you want done.');
       this.#publishGoal(await set({ status: 'active' }));
-    } else this.#publishGoal(await set({ objective: word, status: 'active' }));
+    } else {
+      this.#publishGoal(await set({ objective: word, status: 'active' }));
+      // Where the goal was set, kept with the conversation (Codex's thread has no message for it). Set while a turn
+      // is under way: after that turn's reply, which is saved when the turn ends.
+      if (this.turn) this.goalMarker = word; else this.#goalMarker(word);
+    }
     // Codex starts on an active goal by itself when the thread is idle (the turn arrives as turn/started). Should
     // it not, it is asked to: a goal that says "Working" over a conversation where nothing happens helps nobody.
     clearTimeout(this.goalNudge);
@@ -911,6 +921,7 @@ export class CodexAdapter {
     this.turn = null;
     this.write({ type: 'message_end', message });
     for (const result of results) this.#message(result);
+    if (this.goalMarker) { const objective = this.goalMarker; this.goalMarker = null; this.#goalMarker(objective); }
     this.write({ type: 'agent_end' });
     this.write({ type: 'agent_settled' });
     if (turn.requests.length) this.#updateState(); // the turn's requests are in the saved reply now

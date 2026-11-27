@@ -150,6 +150,7 @@ try {
     send({ type: 'message_start', message: { role: 'assistant', timestamp: Date.now() } });
   }, { id: session.id });
   await page.locator('div.working').waitFor();
+  await page.evaluate(() => window.__irisState()); // (the turn's start taken up before the clock is moved on)
   // (the page's clock moved on, as if that much time had passed)
   const later = ms => page.evaluate(ms => { const real = window.__realNow ??= Date.now.bind(Date); Date.now = () => real() + ms; }, ms);
   await later(20000);
@@ -207,7 +208,7 @@ try {
     call(2, 'busy-1', 'make');
   }, { id: session.id });
   await page.locator('.markdown', { hasText: 'Listed; now building.' }).waitFor();
-  const spinning = () => page.evaluate(() => [...document.querySelectorAll('.tool-group')].slice(-2).map(g => !!g.querySelector('.tool-group-head .spinner')));
+  const spinning = () => page.evaluate(() => [...document.querySelectorAll('.tool-group')].slice(-2).map(g => !!g.querySelector('.tool-group-head .shimmer')));
   await page.waitForFunction(() => document.querySelectorAll('.tool-group').length >= 2);
   assert.deepEqual(await spinning(), [false, true]);
   const loads = ipcCalls.filter(c => c.method === 'historyPage').length;
@@ -352,12 +353,16 @@ try {
   await page.locator('.toast-action', { hasText: 'Details' }).click();
   assert.ok(ipcCalls.some(c => c.method === 'sessionUpdateTold') && ipcCalls.some(c => c.method === 'showSessionUpdateReport'));
 
-  // ---- one mark for work in progress at a time, and which one says what is going on: three dots turning under
-  // the conversation while the model thinks, the same circling in a row while it writes, four dots changing places
-  // on the step that is under way
+  // ---- one mark for work in progress, on the line under the turn, which stays there from the turn's start to its
+  // end; what it shows says what is going on: three dots turning while the model thinks, circling in a row while it
+  // writes, four dots changing places while a step runs. A step under way has no mark of its own: its words shimmer.
+  // (The line used to step aside while a step ran: with short commands the end of the conversation jumped.)
   await page.keyboard.press('Escape');
   const marks = () => page.evaluate(() => ({ line: [...document.querySelectorAll('.session-main .working .spinner')].map(el => `${el.dataset.kind}:${el.children.length}`),
-    step: [...document.querySelectorAll('.session-main .tool-group-head .spinner, .session-main .step-head .spinner')].map(el => `${el.dataset.kind}:${el.children.length}`) }));
+    step: [...document.querySelectorAll('.session-main .tool-group-head .spinner, .session-main .step-head .spinner')].map(el => `${el.dataset.kind}:${el.children.length}`),
+    shimmering: [...document.querySelectorAll('.session-main .tool-group-head .shimmer')].map(el => el.innerText.trim()),
+    label: document.querySelector('.session-main .working .shimmer')?.innerText.trim() ?? null,
+    lineTop: Math.round(document.querySelector('.session-main .working')?.getBoundingClientRect().top ?? -1) }));
   const fire = events => page.evaluate(({ id, events }) => { for (const event of events) { if (event.status) window.fixtureEvent({ channel: 'status', payload: { id, ...event.status } }); else window.fixtureEvent({ channel: 'event', payload: { id, event } }); } }, { id: session.id, events });
   const call = (id, name, args, index) => [{ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: index, id, toolName: name } },
     { type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: index, toolCall: { type: 'toolCall', id, name, arguments: args } } },
@@ -367,24 +372,30 @@ try {
   await fire([{ status: { status: 'connected', streaming: true } }, { type: 'agent_start' }, { type: 'message_start', message: { role: 'assistant', timestamp: Date.now(), content: [] } }]);
   await page.getByRole('button', { name: 'Latest' }).click().catch(() => {}); // (Find left the page on an earlier turn)
   await page.locator('.session-main .working .spinner').waitFor();
-  assert.deepEqual(await marks(), { line: ['tumble:3'], step: [] }, 'thinking: three dots turning, under the conversation');
+  assert.deepEqual((({ line, step, label }) => ({ line, step, label }))(await marks()), { line: ['tumble:3'], step: [], label: 'Thinking' }, 'thinking: three dots turning, under the conversation');
   await fire(call('mark-read', 'read', { path: '/work/README.md' }, 0));
-  await page.locator('.session-main .tool-group-head .spinner').waitFor();
+  await page.locator('.session-main .tool-group-head .shimmer').waitFor();
   await settle();
-  assert.deepEqual(await marks(), { line: [], step: ['swap:4'] }, 'a step under way carries the mark (four dots), and the line under the conversation steps aside');
+  const reading = await marks();
+  assert.deepEqual((({ line, step, label }) => ({ line, step, label }))(reading), { line: ['swap:4'], step: [], label: 'Working' }, 'a step under way: the line stays, its mark turns to four dots; the step has no mark of its own');
+  assert.equal(reading.shimmering.length, 1, 'the step under way shimmers');
   await fire([done('mark-read', 'read'), ...call('mark-bash', 'bash', { command: 'npm test' }, 1)]);
   await settle();
-  assert.deepEqual(await marks(), { line: [], step: ['swap:4'] }, 'a command is a step like any other: the same mark, and still the only one');
+  const commanding = await marks();
+  assert.deepEqual((({ line, step }) => ({ line, step }))(commanding), { line: ['swap:4'], step: [] }, 'a command is a step like any other');
+  assert.match(commanding.shimmering.join(' '), /npm test/, 'the step names itself on its own line');
   await fire([done('mark-bash', 'bash')]);
-  await page.locator('.session-main .working .spinner').waitFor();
-  assert.deepEqual(await marks(), { line: ['tumble:3'], step: [] }, 'between steps the model is thinking again');
+  await page.locator('.session-main .working .spinner[data-kind="tumble"]').waitFor();
+  const between = await marks();
+  assert.deepEqual((({ line, step, shimmering }) => ({ line, step, shimmering }))(between), { line: ['tumble:3'], step: [], shimmering: [] }, 'between steps the model is thinking again');
+  assert.equal(between.lineTop, commanding.lineTop, 'the line under the turn did not move as the step ended');
   await fire([{ type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 2 } }, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 2, delta: 'Done with ' } }]);
   await page.locator('.session-main .working .spinner.orbit').waitFor();
-  assert.deepEqual(await marks(), { line: ['orbit:3'], step: [] }, 'writing: the three dots circle in a row');
+  assert.deepEqual((({ line, step }) => ({ line, step }))(await marks()), { line: ['orbit:3'], step: [] }, 'writing: the three dots circle in a row');
   await fire([{ type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'toolCall', id: 'mark-read', name: 'read', arguments: { path: '/work/README.md' } }, { type: 'toolCall', id: 'mark-bash', name: 'bash', arguments: { command: 'npm test' } }, { type: 'text', text: 'Done with both.' }] } },
     { type: 'agent_settled' }, { status: { status: 'connected', streaming: false } }]);
   await page.locator('.markdown', { hasText: 'Done with both.' }).waitFor();
-  assert.deepEqual(await marks(), { line: [], step: [] }, 'finished: no mark anywhere');
+  assert.deepEqual((({ line, step, shimmering }) => ({ line, step, shimmering }))(await marks()), { line: [], step: [], shimmering: [] }, 'finished: no mark anywhere');
 
   // A turn whose task list was left with a step under way, then a turn in which the agent starts a long command
   // and writes on while it runs (Antigravity): the old list does not turn, the step's line says it is still
@@ -445,9 +456,10 @@ try {
     const bubble = [...document.querySelectorAll('.user-bubble')].findLast(el => el.textContent.includes('Reply in Chinese from now on'));
     const after = [...document.querySelectorAll('.cc-todo-card')].filter(card => bubble.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING);
     const before = [...document.querySelectorAll('.cc-todo-card')].filter(card => !after.includes(card));
-    // (The old list, of the same turn as the stopped one, was superseded by it.)
+    // (The old list stays where its run left it: that run, begun by the agent with no message between, is a turn of its own.)
     return JSON.stringify({ after: after.map(c => c.dataset.toolId), before: before.map(c => c.dataset.toolId) });
-  }), JSON.stringify({ after: ['stopped-plan'], before: [] }), 'the plan is shown once, under the latest message');
+  }), JSON.stringify({ after: ['stopped-plan'], before: ['old-plan'] }), 'the plan is shown once, under the latest message');
+  assert.match(await page.locator('.run-continued').first().innerText(), /^Continued$/, 'a run the agent began itself says so, in a quiet line');
   const stoppedPlan = page.locator('.cc-todo-card[data-tool-id="stopped-plan"]');
   assert.equal(await stoppedPlan.locator('.spinner').count(), 0, 'a run that is not carrying it out does not turn it');
   assert.deepEqual(await dots(stoppedPlan), ['none']);
