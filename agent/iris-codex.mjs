@@ -571,6 +571,7 @@ export class CodexAdapter {
   // toward it whenever the thread is idle, and marks it complete (or blocked) itself.
   #publishGoal(goal) {
     const next = goal?.objective ? { objective: goal.objective, status: goal.status } : null;
+    this.goalSeen = (this.goalSeen ?? 0) + 1; // (said since: a read begun before is out of date)
     if (JSON.stringify(next) === JSON.stringify(this.goal ?? null)) return;
     this.goal = next;
     this.write({ type: 'extension_ui_request', id: randomUUID(), method: 'setStatus', statusKey: 'iris-goal', ...(next ? { statusText: JSON.stringify(next) } : {}) });
@@ -578,7 +579,9 @@ export class CodexAdapter {
   async #readGoal() {
     const peer = this.peer, threadId = this.threadId;
     if (!peer || peer.closed || !threadId) return;
-    try { const read = await peer.request('thread/goal/get', { threadId }, CONTROL_MS); if (peer === this.peer && threadId === this.threadId) this.#publishGoal(read?.goal ?? null); }
+    // (A goal set or said by Codex while this read was on its way is newer than what it answers: the answer is dropped.)
+    const seen = this.goalSeen ?? 0;
+    try { const read = await peer.request('thread/goal/get', { threadId }, CONTROL_MS); if (peer === this.peer && threadId === this.threadId && (this.goalSeen ?? 0) === seen) this.#publishGoal(read?.goal ?? null); }
     catch { /* a Codex without goals: the conversation simply has none */ }
   }
   async #goalCommand(word) {

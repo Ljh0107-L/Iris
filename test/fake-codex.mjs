@@ -151,7 +151,8 @@ function handle(m) {
       return finish('completed'); }
     // Goals, as Codex keeps them: one per thread. An active goal on an idle thread is worked on without being
     // asked (a turn Codex starts itself), unless FAKE_CODEX_GOAL is "idle"; "long" keeps that turn going.
-    case 'thread/goal/get': return reply({ goal });
+    // (FAKE_CODEX_GOAL_GET_MS: the answer is late, as a slow machine's can be; it says the goal as it was asked.)
+    case 'thread/goal/get': { const was = goal; return process.env.FAKE_CODEX_GOAL_GET_MS ? setTimeout(() => reply({ goal: was }), Number(process.env.FAKE_CODEX_GOAL_GET_MS)) : reply({ goal }); }
     case 'thread/goal/clear': goal = null; keep(); reply({ cleared: true }); return send({ method: 'thread/goal/cleared', params: { threadId: 'thread-1' } });
     case 'thread/goal/set': {
       if (!goal && !m.params.objective) return send({ id: m.id, error: { code: -32600, message: 'thread has no goal' } });

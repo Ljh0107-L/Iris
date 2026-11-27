@@ -315,6 +315,18 @@ test('/goal sets Codex’s own goal: Codex starts on it itself, the turn is a re
   assert.deepEqual(goalsOf(again.events), [{ objective: 'ship the parser', status: 'complete' }]);
 });
 
+test('a goal read when the conversation opens, answered after /goal set one, does not undo it', { timeout: 20000 }, async t => {
+  const f = fixture(t);
+  f.env.FAKE_CODEX_GOAL_GET_MS = '400';
+  const a = f.start();
+  await a.rpc('get_state');
+  await a.rpc('prompt', { message: '/goal ship the parser' });
+  await a.next(settled);
+  await new Promise(r => setTimeout(r, 600));
+  assert.ok(!goalsOf(a.events).includes(null), JSON.stringify(goalsOf(a.events)));
+  assert.equal(goalsOf(a.events).at(-1).status, 'complete');
+});
+
 test('stopping a goal’s work pauses the goal, and /goal resume and /goal clear do what they say', { timeout: 20000 }, async t => {
   const f = fixture(t);
   f.env.FAKE_CODEX_GOAL = 'long';
